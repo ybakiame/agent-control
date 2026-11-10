@@ -25,3 +25,7 @@ run = "cargo run -p agent-control-mcp -- --stdio"
 [tasks.fmt]
 description = "Format all code"
 run = "cargo fmt --all"
+
+[tasks.release]
+description = "Build release binaries and package a portable Windows zip into dist/"
+run = "cargo build --release --workspace && node scripts/package-release.mjs"

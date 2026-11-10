@@ -5,18 +5,58 @@ use anyhow::{Context, Result};
 pub const APP_DIR_NAME: &str = ".agent-control";
 pub const PROJECT_DIR_NAME: &str = ".agent-control";
 pub const DB_FILE_NAME: &str = "control.db";
+/// Marker file next to the executable that switches the store to portable mode.
+pub const PORTABLE_MARKER: &str = "portable.marker";
+/// Environment variable that forces portable mode (alternative to the marker file).
+pub const PORTABLE_ENV: &str = "AGENT_CONTROL_PORTABLE";
 
 #[derive(Debug, Clone)]
 pub struct DataLayout {
     pub root: PathBuf,
+    pub portable: bool,
 }
 
 impl DataLayout {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            portable: false,
+        }
+    }
+
+    /// Portable store rooted at an explicit directory; the database lives under `<root>/db`.
+    pub fn portable_with_root(root: PathBuf) -> Self {
+        Self {
+            root,
+            portable: true,
+        }
+    }
+
+    /// Portable store beside the running executable: `<exe dir>/data`.
+    pub fn portable_layout() -> Result<Self> {
+        let exe = std::env::current_exe().context("cannot determine executable path")?;
+        let dir = exe.parent().context("executable has no parent directory")?;
+        Ok(Self::portable_with_root(dir.join("data")))
+    }
+
+    /// True when a `portable.marker` file sits next to the executable or `PORTABLE_ENV` is set.
+    pub fn portable_requested() -> bool {
+        if let Some(v) = std::env::var_os(PORTABLE_ENV) {
+            let s = v.to_string_lossy();
+            if !s.is_empty() && s != "0" {
+                return true;
+            }
+        }
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join(PORTABLE_MARKER).exists()))
+            .unwrap_or(false)
     }
 
     pub fn default_layout() -> Result<Self> {
+        if Self::portable_requested() {
+            return Self::portable_layout();
+        }
         let home = dirs::home_dir().context("cannot determine home directory")?;
         Ok(Self::new(home.join(APP_DIR_NAME)))
     }
@@ -30,7 +70,11 @@ impl DataLayout {
     }
 
     pub fn db_path(&self) -> PathBuf {
-        self.root.join(DB_FILE_NAME)
+        if self.portable {
+            self.root.join("db").join(DB_FILE_NAME)
+        } else {
+            self.root.join(DB_FILE_NAME)
+        }
     }
 
     pub fn bundles_dir(&self) -> PathBuf {
@@ -38,7 +82,11 @@ impl DataLayout {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
-        for dir in [self.user_rules_dir(), self.bundles_dir()] {
+        let mut dirs = vec![self.user_rules_dir(), self.bundles_dir()];
+        if let Some(parent) = self.db_path().parent() {
+            dirs.push(parent.to_path_buf());
+        }
+        for dir in dirs {
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("creating directory {}", dir.display()))?;
         }

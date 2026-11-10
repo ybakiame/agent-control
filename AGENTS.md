@@ -44,6 +44,7 @@ mise run test         # cargo test --workspace
 mise run run          # cargo run -p agent-control-app   (desktop console)
 mise run mcp          # cargo run -p agent-control-mcp -- --stdio
 mise run fmt          # cargo fmt --all
+mise run release      # cargo build --release + package dist/ portable zip
 ```
 
 Ad-hoc cargo (still through mise): `mise exec -- cargo <args>`.
@@ -113,6 +114,13 @@ existing files).
 Hybrid by design: **git-friendly rule files** (Markdown + YAML frontmatter) + **SQLite** for
 sessions, provenance, the evidence chain, projects and rule suggestions. Default root
 `~/.agent-control`; override with `--data-dir` (MCP bin) or `Store::open_with_root`.
+
+**Portable mode** (`DataLayout`, `core/src/config.rs`): a `portable.marker` file next to the
+executable, or `AGENT_CONTROL_PORTABLE=1`, makes `default_layout()` return a portable layout
+rooted at `<exe dir>/data` with the DB at `<root>/db/control.db` (`portable: bool` on
+`DataLayout`); `ensure_dirs` creates the `db` parent. `Store::open_default()` (app + MCP bin)
+picks this up automatically, so a portable copy never touches `~/.agent-control`. Use it to
+isolate test runs; `open_with_root` / `--data-dir` still override everything.
 
 ```
 ~/.agent-control/
@@ -240,6 +248,12 @@ accent bar), `empty_state(cx, IconName, title, desc)`, `stat_card(cx, icon, labe
 be **flex containers** (`h_flex()`), not plain `div()` — a block `div` ignores
 `items_center`/`justify_center`, leaving the icon pinned top-left. Destructive actions
 (rule delete, project remove, suggestion reject) go through `window.open_alert_dialog` confirmations.
+
+**App icon & release:** the brand mark lives at `crates/app/assets/icon.{png,ico}` (violet tile,
+`>` chevron, inverted-C canopy over an "A" on a baseline). `crates/app/build.rs` embeds the `.ico`
++ version info into the Windows exe via a windows-only `winresource` build-dependency.
+`mise run release` → `scripts/package-release.mjs` assembles `dist/agent-control-v<ver>-windows-x64.zip`
+(exes + README + icon + `portable.marker`, portable by default).
 
 **Self-rendered title bar (no native OS chrome):**
 

@@ -181,6 +181,17 @@ approved entries record the resulting `approved_rule_id`, rejected entries keep 
 
 Default data root: `~/.agent-control` (override with `--data-dir`).
 
+**Portable mode / 便携模式.** Place a `portable.marker` file next to the executable (or set
+`AGENT_CONTROL_PORTABLE=1`) and the whole store moves beside the binary instead of the global
+home directory: data root `<exe dir>/data`, database at `<exe dir>/data/db/control.db`, with
+rules / `ui.json` / bundles under `<exe dir>/data/`. Nothing reads or writes `~/.agent-control`,
+so a portable copy is fully isolated — ideal for testing. Delete the marker to return to the
+global store. Release zips ship the marker so they run portable out of the box.
+
+便携模式：在可执行文件旁放置 `portable.marker`（或设 `AGENT_CONTROL_PORTABLE=1`），全部数据改存
+于程序旁 `<exe目录>/data`（数据库在 `data/db/control.db`），不再读写全局 `~/.agent-control`，
+便于测试隔离；删除标记即恢复全局存储。Release 压缩包默认附带该标记。
+
 ```
 ~/.agent-control/
 ├── control.db          # SQLite: sessions, provenance, evidence chain, projects, rule suggestions
@@ -207,6 +218,20 @@ scripts/uia-dump.ps1   -Hwnd <hwnd>          # walk the control-view tree
 scripts/uia-invoke.ps1 -Hwnd <hwnd> -Name "Settings"   # invoke by name
 scripts/uia-shot.ps1   -Hwnd <hwnd> -Out out.png       # capture the window rect
 ```
+
+## Release packaging / 打包发布
+
+`mise run release` builds optimized binaries (`cargo build --release`) and assembles
+`dist/agent-control-v<version>-windows-x64.zip` via `scripts/package-release.mjs`. The zip bundles
+the console + MCP executables, the README, the brand icon and a `portable.marker`, so an extracted
+copy runs fully portable (store beside the exe) out of the box. The Windows executable embeds
+`crates/app/assets/icon.ico` (multi-size) plus version info through `crates/app/build.rs`
+(winresource), so Explorer / the taskbar show the Agent Control icon.
+
+打包：`mise run release` 构建优化二进制并生成 `dist/agent-control-v<版本>-windows-x64.zip`
+（含控制台与 MCP 可执行文件、README、品牌图标与 `portable.marker`，解压即便携运行）。
+Windows 可执行文件通过 `crates/app/build.rs`（winresource）嵌入多尺寸 `icon.ico` 与版本信息，
+资源管理器 / 任务栏显示 Agent Control 图标。
 
 ## License
 

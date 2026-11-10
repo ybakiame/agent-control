@@ -639,3 +639,31 @@ fn submit_suggestion_validates_fields_and_path() {
     let missing = make_suggestion(&project.path().join("does-not-exist"), "api-isasc");
     assert!(store.submit_suggestion(missing).is_err());
 }
+
+#[test]
+fn portable_layout_isolates_database_under_data_db() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = agent_control_core::DataLayout::portable_with_root(root.path().to_path_buf());
+    assert_eq!(layout.db_path(), root.path().join("db").join("control.db"));
+    layout.ensure_dirs().unwrap();
+    assert!(root.path().join("db").is_dir());
+
+    let store = Store::open(layout).unwrap();
+    store
+        .register_project("Portable", root.path(), None)
+        .unwrap();
+    // The database lives under data/db, never at the root (global-style) location.
+    assert!(root.path().join("db").join("control.db").exists());
+    assert!(!root.path().join("control.db").exists());
+}
+
+#[test]
+fn portable_env_flag_routes_default_layout_away_from_global() {
+    // Scoped env mutation; other tests open explicit roots, not the default layout.
+    unsafe { std::env::set_var("AGENT_CONTROL_PORTABLE", "1") };
+    let layout = agent_control_core::DataLayout::default_layout().unwrap();
+    unsafe { std::env::remove_var("AGENT_CONTROL_PORTABLE") };
+    assert!(layout.portable);
+    assert!(layout.root.ends_with("data"));
+    assert_eq!(layout.db_path(), layout.root.join("db").join("control.db"));
+}

@@ -1,4 +1,6 @@
 /target
+/dist
+/vibe_images
 **/*.rs.bk
 *.pdb
 .env
