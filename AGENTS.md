@@ -1,0 +1,358 @@
+# AGENTS.md
+
+Engineering conventions for agents (and humans) working on **Agent Control** — a Rust-first,
+local-first command console that connects different Agents over **MCP / ACP** and makes rule
+provenance, conflicts, cross-harness continuity and evidence verifiable.
+
+以开发者为中心、以工程协议为基础的本地优先指挥台。本文件是仓库的工程约定，动手前请先读。
+
+> Read this file before editing. It defines the commands, the crate boundaries, and the
+> non-negotiable conventions (i18n, self-rendered title bar, accessibility-first verification).
+
+---
+
+## Golden rules / 铁律
+
+1. **Rust-first.** All product logic lives in the four Rust crates. Node.js appears only in
+   `scripts/*.mjs` as dependency-free protocol/mock harnesses for end-to-end checks.
+2. **Use mise for everything.** Never call a globally-installed `cargo`/`rustc` directly; the
+   toolchain is pinned. Use `mise run <task>` or `mise exec -- cargo ...`.
+3. **Never hardcode user-facing UI strings.** Every label goes through the i18n table
+   (`crates/app/src/i18n.rs`) and `self.t(...)` / `self.tr(...)`. See [i18n](#i18n--多语言).
+4. **The window renders its own title bar.** Do not reintroduce native OS chrome. Use
+   `TitleBar` from `gpui_kit::component`. See [GUI](#gui--自渲染标题栏).
+5. **Drive the GUI through the accessibility tree, not the mouse.** Use the UIA scripts and
+   `InvokePattern`; synthetic clicks are forbidden (DPI artifacts + user interference).
+   See [Verification](#gui-verification--无障碍树驱动).
+6. **Stop the running GUI before rebuilding on Windows**, or the build fails with a file-lock
+   `os error 5`. See [Verification](#gui-verification--无障碍树驱动).
+7. **Keep `core` free of GUI/transport dependencies.** `core` is pure logic + storage; `mcp`,
+   `acp`, `app` depend on it, never the reverse.
+
+---
+
+## Toolchain & commands / 工具链与命令
+
+Pinned in `mise.toml`: **rust 1.99.0**, **cmake latest**. Workspace is **edition 2024**,
+**MSRV 1.95** (`Cargo.toml`). `resolver = "3"`.
+
+```sh
+mise install          # one-time: install the pinned rust + cmake
+mise run build        # cargo build --workspace
+mise run check        # cargo clippy --workspace --all-targets -- -D warnings
+mise run test         # cargo test --workspace
+mise run run          # cargo run -p agent-control-app   (desktop console)
+mise run mcp          # cargo run -p agent-control-mcp -- --stdio
+mise run fmt          # cargo fmt --all
+```
+
+Ad-hoc cargo (still through mise): `mise exec -- cargo <args>`.
+
+**Definition of done for any code change:** `mise run fmt` → `mise run check` (zero warnings,
+`-D warnings`) → `mise run test` all green. GUI changes additionally require the
+accessibility-tree verification below.
+
+---
+
+## Workspace map / 工作区结构
+
+Four crates under `crates/`. Dependency direction: `app → {mcp, acp, core}`, `mcp → core`,
+`acp → core`, `core → (nothing internal)`.
+
+| Crate | Package | Kind | Responsibility | Key files |
+|-------|---------|------|----------------|-----------|
+| core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs`, `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
+| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 14 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
+| acp | `agent-control-acp` | lib | ACP client / harness manager: launches agent CLIs, injects constraint briefing, streams events, permission round-trips, file-change evidence | `lib.rs` (`HarnessManager`), `connection.rs` (`run_harness`, `HarnessConfig`, `constraint_briefing`), `events.rs`, `fs.rs`, `terminal.rs` |
+| app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
+
+Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`, `Store`,
+`RuleExplanation`, `AcknowledgmentReport`, and all of `model::*`.
+
+`Store` entry points: `Store::open(layout)`, `Store::open_default()` (`~/.agent-control`),
+`Store::open_with_root(path)`. Rules load via `load_rules(project_path: Option<&Path>)`
+(user scope always; project scope when a path is given). Write rules via `save_rule(rule,
+project_path)` (overwrite) or `upsert_rule(rule, project_path) -> (Rule, PathBuf)` (create-or-update
+by id: bumps version, preserves original `created_at`; backs the MCP `save_rule` tool). Build fresh
+rules with `store::new_rule(id, title, content, kind, scope, author)` (`new_user_rule` is a
+preference/user wrapper).
+
+**Rule suggestions** (`Store`, backed by the SQLite `rule_suggestions` table): the human-in-the-loop
+authoring path. `submit_suggestion(draft)` queues a `Pending` draft (build it with
+`store::new_suggestion(project_path, agent_id, id, title, content, kind)`); `list_suggestions(
+project_path?, status?)` and `count_suggestions(project_path?, status?)` read the queue;
+`get_suggestion(id)` fetches one. `approve_suggestion(id, SuggestionEdits, note?) -> (RuleSuggestion,
+Rule, PathBuf)` applies optional human edits (`SuggestionEdits` fields default to the agent draft),
+writes a binding rule via the same `upsert_rule` path as `save_rule`, and marks the suggestion
+`Approved` with `approved_rule_id`. `reject_suggestion(id, note?)` marks it `Rejected` and writes
+**no** rule. `RuleSuggestion` / `SuggestionStatus` (`Pending`/`Approved`/`Rejected`) / `SuggestionEdits`
+live in `model.rs`. Backs the MCP `suggest_rule` / `list_suggestions` tools and the app Suggestions view.
+
+**Project registry** (`Store`, backed by the SQLite `projects` table): `register_project(name,
+path, description)` (canonicalizes + dedups by path, defaults the name to the folder name),
+`list_projects()` (most-recently-opened first), `get_project(id)`, `project_by_path(path)`,
+`touch_project(id)`, `rename_project(id, name)`, `remove_project(id)` (**unregisters only — never
+deletes repo files**), and `init_project_contracts(path)` (idempotent scaffold of
+`<project>/.agent-control/rules/` + `examples/` templates + a bilingual `README.md` guide; preserves
+existing files).
+`Project` (`model.rs`) = `{ id, name, path, description?, created_at, last_opened_at }`.
+
+### The four layers → where they live
+
+1. **Personal preferences / 个人偏好** — user-scope `Rule`s in `~/.agent-control/rules/user/`.
+2. **Project contracts / 项目契约** — project-scope `Rule`s in `<project>/.agent-control/rules/`.
+3. **Cross-harness continuity / 跨 harness 连续性** — `ConstraintSnapshot` frozen at
+   `create_session`, `HandoffBundle` export/import, `acknowledge_rules` compliance report.
+4. **Verifiable evidence / 可验证证据** — SHA-256 hash chain (`canonical_hash`, `EvidenceEntry`),
+   `verify_evidence` recomputes and flags tampering/gaps.
+
+---
+
+## Storage / 存储
+
+Hybrid by design: **git-friendly rule files** (Markdown + YAML frontmatter) + **SQLite** for
+sessions, provenance, the evidence chain, projects and rule suggestions. Default root
+`~/.agent-control`; override with `--data-dir` (MCP bin) or `Store::open_with_root`.
+
+```
+~/.agent-control/
+├── control.db          # SQLite (rusqlite, bundled): sessions, provenance, evidence chain, projects, rule_suggestions
+├── ui.json             # UI prefs: {"locale":"en"|"zh"}
+├── agents.yaml         # registered harness commands
+├── rules/user/         # user-scope rule files (committed/reviewed)
+└── bundles/            # exported handoff bundles
+<project>/.agent-control/
+├── rules/              # project-scope contract rules (binding)
+├── examples/           # copy-ready rule templates (NOT binding; copy into rules/ to activate)
+└── README.md           # bilingual contract guide (scaffolded by init_project_contracts)
+```
+
+`DataLayout` (`core/src/config.rs`) owns every path — add new paths there, don't scatter
+`join()` literals (`project_rules_dir`, `project_examples_dir`, `project_config_dir`). Rule files
+carry frontmatter: `id`, `title`, `kind`, `scope`, `source`, optional `code_checks`, filters,
+priority. `init_project_contracts` scaffolds `rules/`, `examples/` (contract + constraint
+templates), and the guide idempotently. Examples live outside `rules/` so they never load as
+binding contracts.
+
+---
+
+## MCP protocol / MCP 协议
+
+Transports (rmcp 3.9): **stdio** and **Streamable HTTP** (axum, route `/mcp`, `mcp-session-id`
+header). The desktop app auto-starts HTTP at `http://127.0.0.1:9870/mcp`
+(`console.rs` → `agent_control_mcp::serve_http`).
+
+MCP bin CLI (`crates/mcp/src/main.rs`):
+
+```sh
+cargo run -p agent-control-mcp -- --stdio                 # stdio (harness spawns this)
+cargo run -p agent-control-mcp -- --bind 127.0.0.1:9870   # HTTP (default bind)
+cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
+```
+
+**14 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
+`record_evidence`, `acknowledge_rules`, `get_session_context`, `export_handoff`,
+`import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `suggest_rule`, `list_suggestions`
+(plus resources & prompts).
+`save_rule` is the active rule-authoring path: an agent records a discovered project contract
+(`scope=project`, `kind=contract`, `project_path`) or personal preference (`scope=user`) as a rule
+file via `Store::upsert_rule`; reusing an id updates + bumps version. Use it for durable project
+knowledge; `record_evidence` remains for session-scoped actions (fixed `EvidenceKind` enum).
+`suggest_rule` is the human-in-the-loop alternative for inferred/uncertain contracts: it queues a
+`Pending` draft via `Store::submit_suggestion` (with a `rationale`) that does **not** bind sessions
+until a user approves it in the Suggestions view; `list_suggestions` reads the queue
+(`pending|approved|rejected`) plus a pending count. Prefer `suggest_rule` when a human should sign
+off first, `save_rule` when the contract is confident project knowledge.
+
+Recommended harness call order:
+
+1. `get_applicable_rules` — resolve binding rules + provenance + conflicts before working.
+2. `create_session` — freeze the constraint snapshot.
+3. `acknowledge_rules` — prove you received exactly the snapshot's rules.
+4. `record_evidence` — append tool calls / file changes / test results to the hash chain.
+5. `export_handoff` → `import_handoff` + `acknowledge_rules` — move between harnesses.
+6. `verify_evidence` — recompute the chain, detect tampering.
+
+When adding a tool: implement the handler in `crates/mcp/src/lib.rs` with the rmcp `#[tool]`
+macro, keep it a thin adapter over `Store`/`RuleEngine` (no business logic in the transport
+layer), and extend `scripts/mcp-e2e.mjs` to cover it.
+
+End-to-end checks (Node.js, no deps):
+
+```sh
+node scripts/mcp-e2e.mjs        # stdio: rules, conflicts, sessions, evidence, handoff
+node scripts/mcp-http-e2e.mjs   # Streamable HTTP transport
+```
+
+---
+
+## ACP harness / ACP 代理
+
+`agent-client-protocol` 5.0. `HarnessManager` (`crates/acp/src/lib.rs`) owns a small tokio
+runtime and spawns `run_harness`, which: launches the agent CLI, injects `constraint_briefing`
+as system prompt, wires the MCP endpoint, streams `HarnessEvent`s, handles permission requests
+(`PermissionPolicy` / `PermissionDecision`), and records file-change evidence.
+
+Tested by `crates/acp/tests/harness.rs` against the mock agent `scripts/mock-acp-agent.mjs`
+(covers a permission round-trip and file-change evidence). Run with `mise run test`. When you
+change the ACP flow, update the mock + the test together.
+
+---
+
+## i18n / 多语言
+
+Bilingual **English / 简体中文**, runtime-switchable in Settings, persisted to `ui.json`.
+
+- All strings live in the static table `STRINGS: &[(&str, &str, &str)]` in
+  `crates/app/src/i18n.rs`, as `(key, English, 简体中文)` rows. Keys are namespaced
+  (`nav.*`, `header.*`, `dash.*`, `proj.*`, `rules.*`, `scope.*`, `prov.*`, `decision.*`,
+  `reason.*`, `ev.*`, `sess.*`, `sugg.*`, `desc.*`, `kind.*`, `set.*`, `ph.*`, `log.*`, `lang.*`,
+  `common.*`, `mcp.*`, `footer.*`).
+- Lookup: `i18n::t(locale, key) -> &'static str` (unknown key falls back to the key itself).
+  Templates: `i18n::tr(locale, key, &[args]) -> String` replaces each `{}` **in order**.
+- In views/console use the entity helpers **`self.t(key)`** and **`self.tr(key, &[args])`**.
+  `Console` holds `pub locale: Locale`; `set_locale(locale, window, cx)` saves `ui.json`,
+  re-localizes every `InputState` placeholder, and calls `cx.notify()`.
+- `Locale` is `En` (default) / `Zh`; `code()` → `"en"`/`"zh"`, `from_code()` parses.
+
+**To add a UI string:** add a row to `STRINGS` with both languages, then reference it via
+`self.t`/`self.tr`. Never inline an English or Chinese literal in a view. Placeholders use
+`ph.*` keys and are set through `InputState::set_placeholder` (runtime-localized on switch).
+
+---
+
+## GUI / 自渲染标题栏
+
+Built on **gpui-kit 0.9** (`gpui-pre` + `gpui-component` + `gpui-base`; docs at
+<https://nsh.dev/docs/>). Branded dark theme applied in `main.rs` via `theme::apply_brand`
+(`Theme::update`): violet primary `#7c6af0`, background `#0e1116`, semantic tokens
+(`sidebar`, `status_bar`, `group_box`, `radius`/`radius_lg`). Eight views under
+`crates/app/src/views/`: `dashboard`, `projects`, `rules`, `suggestions`, `provenance`, `evidence`,
+`sessions`, `settings`. `Console` (`console.rs`) is the root entity: grouped icon sidebar
+(Workspace / Verify / System) + header (title, project switcher, refresh) + content + status bar,
+and owns `Store` + `HarnessManager`.
+
+**Shared view helpers** (`crates/app/src/ui.rs`): reuse these instead of re-rolling surfaces —
+`card(cx)` (standard bordered `group_box` panel), `section_label(cx, text)` (heading with a brand
+accent bar), `empty_state(cx, IconName, title, desc)`, `stat_card(cx, icon, label, value, tint)`,
+`kv(cx, key, value)`, `dot(color)`, `mono(cx, text)` (monospace hash/id). Icons come from
+`gpui_kit::assets::IconName` (only the runtime-served default set renders). Icon tiles/circles must
+be **flex containers** (`h_flex()`), not plain `div()` — a block `div` ignores
+`items_center`/`justify_center`, leaving the icon pinned top-left. Destructive actions
+(rule delete, project remove, suggestion reject) go through `window.open_alert_dialog` confirmations.
+
+**Self-rendered title bar (no native OS chrome):**
+
+- Import `TitleBar` from the **component root**: `use gpui_kit::component::TitleBar;`
+  (the `title_bar` module is private — `component::title_bar::TitleBar` will not compile).
+- `main.rs` builds `WindowOptions` from `TitleBar::window_options()` (sets
+  `appears_transparent: true` + `app_owns_titlebar_drag: true`) and
+  `TitleBar::title_bar_options()`, with `title: Some("Agent Control".into())`.
+- On Windows `appears_transparent` removes the native caption (WM_NCCALCSIZE); `TitleBar`
+  renders the drag region, its children, and the min/max/close buttons.
+- Render it as `TitleBar::new().child(<h_flex …>)` at the top of `Console::render`.
+
+Give interactive elements **stable ids and accessible names** (e.g. nav buttons use
+`(Nav::Dashboard, "nav.dashboard", "nav-dashboard")` + `self.t(key)`) so the UIA tree is
+deterministic.
+
+### Projects, scope & the tree / 项目、作用域与树
+
+`Console` tracks two project pointers: **`current_project`** (the project that sessions,
+project-scope rule edits and conflict resolution bind to; defaults to the most-recently-opened)
+and **`selected_project`** (the tree highlight / detail pane; defaults to current). Helpers:
+`current_project()`, `current_project_path()`. The header chip reflects `current_project` and
+clicking it opens the Projects view. `refresh_data(cx)` reloads projects, repairs dangling
+pointers, reloads rules for the current project path, and rebuilds the tree.
+
+The Projects view (`views/projects.rs`) renders a **gpui-kit tree**
+(`gpui_kit::component::tree::{tree, TreeState, TreeItem}`; `Console` owns
+`project_tree: Entity<TreeState>`). `rebuild_project_tree(cx)` builds one root per project
+(id `project:<uuid>`) with **Contracts** (`contracts:<uuid>`, leaves `rule:<uuid>:<rule_id>`),
+**Sessions** (`sessions:<uuid>`) and **Conflicts** (`conflicts:<uuid>`) children. The `tree(...)`
+render closure returns a `ListItem` with `.accessibility_label(...)` and an `.on_click` that
+captures a `WeakEntity<Console>` + the node id and calls `handle_tree_click(node_id, window, cx)`
+(prefix-dispatch → select / activate project + jump to the matching view). Per-project counts are
+precomputed into `project_stats: HashMap<Uuid,(usize,usize)>` during rebuild — **no disk I/O at
+render time**.
+
+**Onboarding** (`show_onboarding`): browse via `browse_project_folder` (native
+`cx.prompt_for_paths(PathPromptOptions{ directories: true, .. })`, awaited in a detached
+`cx.spawn_in` task that writes the picker result back into the input), then `onboard_project`
+registers + scaffolds contracts + sets current/selected. Guidance copy lives under `proj.*` i18n
+keys.
+
+**Rules scope separation** (`views/rules.rs`): a `rules_tab: Scope` toggles **Personal** vs
+**Project**; the list filters `rule.scope == tab` (original indices preserved for editing). The
+editor's scope is derived from the tab — there is **no free-text project path input** anymore.
+With no current project, the Project tab shows guidance + a `rules-go-projects` shortcut instead
+of the form. `save_rule_from_inputs` / `delete_selected_rule` resolve the project path from
+`current_project_path()`.
+
+**Suggestions review** (`views/suggestions.rs`): the human-in-the-loop queue for agent-proposed
+rules. `Console` holds `suggestions: Vec<RuleSuggestion>`, `pending_suggestions: usize` (sidebar
+Badge + Dashboard banner), `selected_suggestion: Option<Uuid>`, `suggestion_filter:
+Option<SuggestionStatus>` (Pending/Approved/Rejected/All tabs), and draft inputs
+(`sugg_rule_id_input`, `sugg_title_input`, `sugg_content_input`, `sugg_note_input`).
+`select_suggestion` loads the draft into the editor; `approve_selected_suggestion` reads the inputs
+into `SuggestionEdits` + note and calls `Store::approve_suggestion` (writes a binding project rule);
+`confirm_reject_suggestion` opens an AlertDialog then calls `Store::reject_suggestion` (writes no
+rule). Reviewed suggestions render read-only with status, review note and `approved_rule_id`.
+`refresh_data` reloads the queue + pending count and repairs a dangling selection.
+
+---
+
+## GUI verification / 无障碍树驱动
+
+The window exposes a full **UI Automation (AccessKit)** tree. Drive it by element name +
+`InvokePattern`, never by synthetic mouse clicks (immune to user interference and DPI scaling;
+works even when the Windows session is locked).
+
+PowerShell helpers in `scripts/` (use the window handle `HWND`):
+
+```powershell
+scripts/uia-dump.ps1   -Hwnd <hwnd>                 # walk the control-view tree (names/roles)
+scripts/uia-invoke.ps1 -Hwnd <hwnd> -Name "Settings" # invoke a button by its accessible name
+scripts/uia-shot.ps1   -Hwnd <hwnd> -Out out.png     # capture the window rect (GetWindowRect)
+```
+
+Typical loop: launch with `mise run run` → find the HWND → `uia-dump` to confirm names →
+`uia-invoke` each nav item / the language buttons → `uia-dump` again to assert the localized
+names changed → `uia-shot` for pixels. Verify locale persistence by reading `ui.json`.
+
+**Windows gotchas:**
+
+- **Stop the GUI before rebuilding.** A running `agent-control-app.exe` locks the binary;
+  `cargo build` then fails with `failed to remove … (os error 5 / 拒绝访问)`. Find and kill it:
+  `tasklist | grep agent-control-app` then `taskkill //PID <pid> //F` (Git Bash needs `//`).
+- **Locked session ⇒ screenshots show the lock screen / black.** That is not an app bug. The
+  UIA tree still returns correct elements, so verify functionally (names, geometry, `ui.json`)
+  and note that pixel confirmation is blocked until the session is unlocked.
+- **Clickable list rows must be named to be UIA-drivable.** A raw `div().id(...).on_click(...)`
+  is pruned from the control view (generic role, no name). Add `.role(Role::Button)` +
+  `.aria_label(...)` (see the suggestion/session/rule/provenance rows) so it exposes an Invoke
+  node; `Role` comes from `gpui_kit::*`.
+- **gpui's AccessKit `Click` is coordinate-based** (it synthesizes a mouse down/up at the node's
+  bounds center). Controls scrolled out of view therefore do NOT respond to `InvokePattern`.
+  Bring them on-screen first — e.g. resize/move the window via the root `TransformPattern`
+  (`Resize`/`Move`) on a tall monitor — then invoke. Prefer this over synthetic mouse clicks.
+
+---
+
+## Coding conventions / 编码约定
+
+- Edition 2024; format with `mise run fmt` (rustfmt defaults). Keep `clippy -D warnings` clean.
+- Library crates return `anyhow::Result` / typed errors (`thiserror`); avoid `unwrap()`/`expect()`
+  on fallible I/O in `core`/`mcp`/`acp`. `expect()` is acceptable only for truly-unreachable
+  invariant violations (e.g. window creation in `app/main.rs`).
+- Business logic belongs in `core`; `mcp`/`acp` are thin protocol adapters; `app` is presentation.
+- Add paths to `DataLayout`, strings to `STRINGS`, tools to `ControlServer` — extend the existing
+  owner rather than duplicating logic.
+- Tests: unit/integration in `crates/core/tests/core_tests.rs` and `crates/acp/tests/harness.rs`;
+  protocol e2e in `scripts/*.mjs`. Cover new behavior before declaring done.
+- Don't add speculative abstractions, backward-compat shims, or noise comments. Comment only a
+  non-obvious *why* (hidden constraint, invariant, Windows/GPUI workaround).
+
+## License
+
+Apache-2.0.

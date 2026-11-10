@@ -1,0 +1,27 @@
+[tools]
+rust = "1.99.0"
+cmake = "latest"
+
+[tasks.build]
+description = "Build the entire workspace"
+run = "cargo build --workspace"
+
+[tasks.check]
+description = "Type-check + lint the workspace"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run all workspace tests"
+run = "cargo test --workspace"
+
+[tasks.run]
+description = "Launch the desktop command console"
+run = "cargo run -p agent-control-app"
+
+[tasks.mcp]
+description = "Run the MCP server in stdio mode (for agent harnesses)"
+run = "cargo run -p agent-control-mcp -- --stdio"
+
+[tasks.fmt]
+description = "Format all code"
+run = "cargo fmt --all"

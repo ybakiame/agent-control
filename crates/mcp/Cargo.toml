@@ -1,0 +1,40 @@
+[package]
+name = "agent-control-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "agent_control_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-control-mcp"
+path = "src/main.rs"
+
+[dependencies]
+agent-control-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+axum = { workspace = true }
+tokio-util = { workspace = true }
+rmcp = { workspace = true, features = [
+    "server",
+    "macros",
+    "transport-io",
+    "transport-streamable-http-server",
+    "client",
+    "transport-child-process",
+] }
+
+[dev-dependencies]
+tempfile = "3"
