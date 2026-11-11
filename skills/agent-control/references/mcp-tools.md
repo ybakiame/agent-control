@@ -84,7 +84,8 @@ Actively create or update a rule file — the way to record a **durable project 
 personal preference) so it shows up in the console and binds future sessions. Use this for lasting
 project knowledge; use `record_evidence` for session-scoped actions instead.
 - `id` (string, required) — stable unique id (kebab-case recommended). Reusing an id **updates** the
-  rule and bumps its `version`; it never creates a duplicate.
+  rule and bumps its `version`; it never creates a duplicate. A content update preserves the rule's
+  `enabled` state — use `set_rule_enabled` to toggle it.
 - `title` (string, required), `content` (string, required) — Markdown body stating the contract and
   how to satisfy it.
 - `agent_id` (string, required) — recorded as the rule's `source.author` for provenance.
@@ -96,6 +97,20 @@ project knowledge; use `record_evidence` for session-scoped actions instead.
   The file lands in `<project>/.agent-control/rules/<id>.md` (project) or
   `~/.agent-control/rules/user/<id>.md` (user). Confirm with `get_applicable_rules` / `list_rules`.
 - Errors (`isError`): empty id/title, unknown kind/scope, or project scope without `project_path`.
+
+### set_rule_enabled
+Pause or resume a rule **without changing its content**. A disabled rule is excluded from
+resolution (`Decision::Disabled`) and stops binding sessions; enabling restores it. This is the
+only tool that flips `enabled` — a `save_rule` content update preserves the existing state, so
+editing a paused rule never silently re-activates it. Prefer disabling over deleting when a
+contract may apply again later.
+- `id` (string, required) — the rule to toggle.
+- `enabled` (bool, required) — `false` to disable, `true` to enable.
+- `scope` (string, default `project`) — `user` | `project`. `session` is rejected.
+- `project_path` (string) — **required when `scope` is `project`**; absolute project path.
+- Returns: `rule` (the updated rule with its new `enabled` and bumped `version`), `instruction`.
+- Errors (`isError`): unknown scope, project scope without `project_path`, or an id that does not
+  exist (it never creates a rule).
 
 ### suggest_rule
 Propose a new rule for **human review** instead of writing it directly. The draft is queued
@@ -206,6 +221,12 @@ suggest_rule { "scope": "user", "agent_id": "codex-cli", "id": "wsl-env",
 list_suggestions { "status": "pending" }   // unfiltered queue includes the user-scope proposal
 // On approval it becomes a user rule (~/.agent-control/rules/user/wsl-env.md) that applies across
 // all projects and is injected into every future session briefing.
+
+// 10. pause a rule without deleting it, then resume it (content is untouched)
+set_rule_enabled { "id": "api-isasc", "enabled": false, "scope": "project", "project_path": "/abs/repo" }
+// -> { "rule": { "enabled": false, ... } }; get_applicable_rules no longer returns it
+set_rule_enabled { "id": "api-isasc", "enabled": true, "scope": "project", "project_path": "/abs/repo" }
+// -> { "rule": { "enabled": true, ... } }; it binds sessions again
 ```
 
 A partial `acknowledge_rules` (omitting a snapshot rule) is flagged in the report — acknowledge

@@ -22,7 +22,7 @@ work). It is not the guide for editing the console's Rust source — that lives 
 
 ## Connect
 
-The console exposes an **MCP server** (14 tools + resources + prompts). Pick one transport:
+The console exposes an **MCP server** (15 tools + resources + prompts). Pick one transport:
 
 - **Streamable HTTP** — the desktop app runs a **background daemon** at `http://127.0.0.1:9870/mcp`
   (`mcp-session-id` header). It reuses an already-running daemon or spawns the sibling
@@ -38,7 +38,7 @@ next to the binary switches to `<exe dir>/data`). Both binaries run with **no co
 Windows and log to `<root>/logs/{app,mcp}.log`. Build the binary
 with `mise run build` (→ `target/debug/agent-control-mcp`), or run via `mise run mcp` (stdio).
 
-Verify the connection by listing tools (expect 14) or reading resource `control://overview`.
+Verify the connection by listing tools (expect 15) or reading resource `control://overview`.
 If your client cannot reach the server, confirm the desktop app is running (HTTP) or that your
 harness spawned the stdio binary correctly.
 
@@ -80,6 +80,14 @@ Reusing an `id` updates the rule and bumps its version. For a personal preferenc
 provenance and the GUI stay consistent. Onboarded projects ship copy-ready templates in
 `<project>/.agent-control/examples/` (not binding until copied into `rules/`).
 
+**Pausing/resuming a rule.** To temporarily stop a rule from binding without deleting it, call
+**`set_rule_enabled`** with `id`, `enabled: false`, `scope`, and `project_path` for project scope.
+The rule is excluded from resolution (`Decision::Disabled`) and no longer binds sessions; set
+`enabled: true` to restore it. This is the *only* tool that flips enablement — a `save_rule` content
+update preserves the existing state, so editing a paused rule never silently re-activates it. The
+console's Rules editor exposes the same toggle as an **Enabled** switch. Prefer disabling over
+deleting when a contract may apply again later.
+
 **Proposing rules for human review.** When a rule is *inferred, uncertain, or needs user
 confirmation*, do not write it directly with `save_rule`. Instead call **`suggest_rule`** with
 `agent_id`, `id`, `title`, `content`, and a `rationale` explaining the discovery. Pass
@@ -112,7 +120,7 @@ permission policies, and how to make your CLI ACP-compatible.
 
 ## Resources
 
-- [references/mcp-tools.md](references/mcp-tools.md) — all 14 tools (parameters + returns), the 3
+- [references/mcp-tools.md](references/mcp-tools.md) — all 15 tools (parameters + returns), the 3
   resources, the `constraint-briefing` prompt, and concrete call examples.
 - [references/acp-harness.md](references/acp-harness.md) — `agents.yaml`, harness config, permission
   flow, constraint briefing, automatic evidence, and writing an ACP agent.

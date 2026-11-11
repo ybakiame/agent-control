@@ -87,9 +87,40 @@ impl Store {
         if let Some(existing) = self.get_rule(&rule.id, project_path)? {
             rule.version = existing.version + 1;
             rule.source.created_at = existing.source.created_at;
+            // Enablement is its own axis: a content update must not silently re-enable a rule
+            // the user disabled. Only `set_rule_enabled` flips it.
+            rule.enabled = existing.enabled;
         }
         let path = self.save_rule(&rule, project_path)?;
         Ok((rule.with_checksum(), path))
+    }
+
+    /// Enable or disable a rule in place, preserving its content and provenance. This is the only
+    /// write path for `enabled` (`save_rule`/`upsert_rule` never flip it). Bumps the version like
+    /// any other persisted edit and returns the updated rule with its recomputed checksum.
+    pub fn set_rule_enabled(
+        &self,
+        rule_id: &str,
+        scope: Scope,
+        project_path: Option<&Path>,
+        enabled: bool,
+    ) -> Result<Rule> {
+        let dir = match scope {
+            Scope::User => self.layout.user_rules_dir(),
+            Scope::Project => {
+                let project = project_path.context("project scope requires a project path")?;
+                DataLayout::project_rules_dir(project)
+            }
+            Scope::Session => bail!("session rules cannot be toggled as files"),
+        };
+        let mut rule = files::load_rules_from_dir(&dir, scope)?
+            .into_iter()
+            .find(|r| r.id == rule_id)
+            .with_context(|| format!("rule '{rule_id}' not found in {}", dir.display()))?;
+        rule.enabled = enabled;
+        rule.version += 1;
+        self.save_rule(&rule, project_path)?;
+        Ok(rule.with_checksum())
     }
 
     pub fn delete_rule(

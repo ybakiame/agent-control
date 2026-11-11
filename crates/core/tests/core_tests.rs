@@ -445,6 +445,128 @@ fn upsert_rule_creates_then_updates_with_version_bump() {
 }
 
 #[test]
+fn disabled_rule_is_excluded_from_resolution() {
+    let mut rule = make_rule("paused", Scope::User, 100, Some("style"));
+    rule.enabled = false;
+    let resolution = RuleEngine::resolve(&[rule.clone()], &ctx());
+    assert!(resolution.applied.is_empty());
+    assert_eq!(resolution.trace[0].decision, Decision::Disabled);
+
+    // A disabled rule neither applies nor competes: an enabled peer wins outright.
+    let peer = make_rule("active", Scope::User, 1, Some("style"));
+    let resolution = RuleEngine::resolve(&[rule, peer], &ctx());
+    assert_eq!(resolution.applied.len(), 1);
+    assert_eq!(resolution.applied[0].rule.id, "active");
+}
+
+#[test]
+fn set_rule_enabled_round_trips_and_bumps_version() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let rule = agent_control_core::store::new_rule(
+        "toggle-me",
+        "Toggle me",
+        "content",
+        RuleKind::Preference,
+        Scope::User,
+        None,
+    );
+    store.save_rule(&rule, None).unwrap();
+    let initial = store.get_rule("toggle-me", None).unwrap().unwrap();
+    assert!(initial.enabled);
+
+    let disabled = store
+        .set_rule_enabled("toggle-me", Scope::User, None, false)
+        .unwrap();
+    assert!(!disabled.enabled);
+    assert_eq!(disabled.version, initial.version + 1);
+    let reloaded = store.get_rule("toggle-me", None).unwrap().unwrap();
+    assert!(!reloaded.enabled);
+    assert_eq!(reloaded.content, "content");
+
+    let enabled = store
+        .set_rule_enabled("toggle-me", Scope::User, None, true)
+        .unwrap();
+    assert!(enabled.enabled);
+    assert_eq!(enabled.version, initial.version + 2);
+    assert!(store.get_rule("toggle-me", None).unwrap().unwrap().enabled);
+}
+
+#[test]
+fn upsert_rule_preserves_disabled_state() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let rule = agent_control_core::store::new_rule(
+        "paused-contract",
+        "Paused",
+        "v1",
+        RuleKind::Contract,
+        Scope::User,
+        None,
+    );
+    store.save_rule(&rule, None).unwrap();
+    store
+        .set_rule_enabled("paused-contract", Scope::User, None, false)
+        .unwrap();
+
+    // A content update via upsert (enabled defaults true) must NOT re-enable the rule.
+    let update = agent_control_core::store::new_rule(
+        "paused-contract",
+        "Paused",
+        "v2",
+        RuleKind::Contract,
+        Scope::User,
+        None,
+    );
+    assert!(update.enabled);
+    store.upsert_rule(&update, None).unwrap();
+    let after = store.get_rule("paused-contract", None).unwrap().unwrap();
+    assert!(!after.enabled, "upsert must preserve the disabled state");
+    assert_eq!(after.content, "v2");
+}
+
+#[test]
+fn set_rule_enabled_project_scope_and_missing_rule() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let rule = agent_control_core::store::new_rule(
+        "proj-rule",
+        "Project rule",
+        "content",
+        RuleKind::Contract,
+        Scope::Project,
+        None,
+    );
+    store.save_rule(&rule, Some(project.path())).unwrap();
+
+    let disabled = store
+        .set_rule_enabled("proj-rule", Scope::Project, Some(project.path()), false)
+        .unwrap();
+    assert!(!disabled.enabled);
+    assert!(
+        !store
+            .get_rule("proj-rule", Some(project.path()))
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+
+    // Project scope requires a project path.
+    assert!(
+        store
+            .set_rule_enabled("proj-rule", Scope::Project, None, true)
+            .is_err()
+    );
+    // Unknown id errors instead of silently creating a rule.
+    assert!(
+        store
+            .set_rule_enabled("nope", Scope::User, None, false)
+            .is_err()
+    );
+}
+
+#[test]
 fn init_project_contracts_scaffolds_non_binding_examples() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();

@@ -48,7 +48,7 @@ agents touch one codebase:
   binding project rule) or **rejects** it — keeping humans in the loop for inferred contracts.
 - **Bilingual UI (English / 简体中文)** with a runtime switcher in Settings; the choice is
   persisted to `<data root>/ui.json`.
-- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 14 tools plus
+- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 15 tools plus
   resources and prompts.
 - **ACP client / harness manager** (agent-client-protocol) that launches real agent CLIs,
   injects the constraint briefing as system prompt, wires the MCP endpoint, streams session
@@ -108,13 +108,20 @@ Recommended call order for a harness:
 
 `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`, `record_evidence`,
 `acknowledge_rules`, `get_session_context`, `export_handoff`, `import_handoff`,
-`verify_evidence`, `list_rules`, `save_rule`, `suggest_rule`, `list_suggestions`.
+`verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`, `list_suggestions`.
 
 `save_rule` lets an agent **actively record** a discovered project contract (or personal
 preference) as a rule file: pass `id`, `title`, `content`, `agent_id`, and for project contracts
 `scope: "project"` + `project_path`. Reusing an `id` updates the rule and bumps its version. The
 file lands in the project's `.agent-control/rules/`, appears in the console, and binds future
 sessions — use it for durable project knowledge, while `record_evidence` stays for session actions.
+
+`set_rule_enabled` **pauses or resumes** a rule without changing its content: pass `id`, `enabled`
+(`true`/`false`), `scope`, and `project_path` for project scope. A disabled rule is excluded from
+resolution (`Decision::Disabled`) and stops binding sessions; enabling restores it. This is the only
+tool that flips enablement — a `save_rule` content update preserves the existing state, so editing a
+paused rule never silently re-activates it. The console's Rules editor exposes the same toggle as an
+**Enabled** switch.
 
 `suggest_rule` is the **human-in-the-loop** alternative: when a rule is inferred or uncertain,
 the agent proposes it (with a `rationale`) rather than writing it directly. The draft is stored in

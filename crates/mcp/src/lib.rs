@@ -193,6 +193,20 @@ pub struct SaveRuleRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetRuleEnabledRequest {
+    /// Stable id of the rule to enable or disable
+    pub id: String,
+    /// true = the rule binds sessions; false = it is excluded from resolution (Decision::Disabled)
+    pub enabled: bool,
+    /// Scope: user | project. Defaults to project. Session scope cannot be toggled as a file.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Absolute project path; required when scope is project
+    #[serde(default)]
+    pub project_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SuggestRuleRequest {
     /// Absolute path of the project this suggestion targets; required when scope=project,
     /// ignored when scope=user
@@ -518,6 +532,58 @@ impl ControlServer {
                 "rule": saved,
                 "instruction": "Rule saved. It now appears in the console and binds future sessions; call get_applicable_rules to confirm.",
             })),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Enable or disable an existing rule without changing its content. Disabled rules are excluded from resolution (Decision::Disabled) and no longer bind sessions; enabling restores them. Use this to pause a contract/preference temporarily instead of deleting it. scope=project (default) requires project_path; scope=user targets a personal preference. Content updates via save_rule never change enablement."
+    )]
+    async fn set_rule_enabled(
+        &self,
+        Parameters(req): Parameters<SetRuleEnabledRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let scope: Scope = serde_json::from_value(serde_json::Value::String(
+            req.scope.clone().unwrap_or_else(|| "project".into()),
+        ))
+        .map_err(|_| {
+            ErrorData::invalid_params(
+                format!(
+                    "unknown scope '{}'; use user|project",
+                    req.scope.clone().unwrap_or_default()
+                ),
+                None,
+            )
+        })?;
+        if scope == Scope::Session {
+            return Err(ErrorData::invalid_params(
+                "session scope cannot be toggled as a rule file; use user or project",
+                None,
+            ));
+        }
+        let project_path = match scope {
+            Scope::Project => Some(PathBuf::from(req.project_path.clone().ok_or_else(
+                || ErrorData::invalid_params("project_path is required for project scope", None),
+            )?)),
+            _ => None,
+        };
+        match self.store.set_rule_enabled(
+            req.id.trim(),
+            scope,
+            project_path.as_deref(),
+            req.enabled,
+        ) {
+            Ok(rule) => {
+                let enabled = rule.enabled;
+                json_result(&serde_json::json!({
+                    "rule": rule,
+                    "instruction": if enabled {
+                        "Rule enabled. It binds future sessions; call get_applicable_rules to confirm."
+                    } else {
+                        "Rule disabled. It is excluded from resolution and no longer binds sessions."
+                    },
+                }))
+            }
             Err(e) => tool_err(e),
         }
     }

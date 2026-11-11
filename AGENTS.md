@@ -63,7 +63,7 @@ Four crates under `crates/`. Dependency direction: `app → {mcp, acp, core}`, `
 | Crate | Package | Kind | Responsibility | Key files |
 |-------|---------|------|----------------|-----------|
 | core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs`, `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
-| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 14 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
+| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 15 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
 | acp | `agent-control-acp` | lib | ACP client / harness manager: launches agent CLIs, injects constraint briefing, streams events, permission round-trips, file-change evidence | `lib.rs` (`HarnessManager`), `connection.rs` (`run_harness`, `HarnessConfig`, `constraint_briefing`), `events.rs`, `fs.rs`, `terminal.rs` |
 | app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
 
@@ -74,9 +74,14 @@ Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`
 `Store::open_with_root(path)`. Rules load via `load_rules(project_path: Option<&Path>)`
 (user scope always; project scope when a path is given). Write rules via `save_rule(rule,
 project_path)` (overwrite) or `upsert_rule(rule, project_path) -> (Rule, PathBuf)` (create-or-update
-by id: bumps version, preserves original `created_at`; backs the MCP `save_rule` tool). Build fresh
-rules with `store::new_rule(id, title, content, kind, scope, author)` (`new_user_rule` is a
-preference/user wrapper).
+by id: bumps version, preserves original `created_at` **and `enabled`**; backs the MCP `save_rule`
+tool). Toggle enablement with `set_rule_enabled(rule_id, scope, project_path, enabled) -> Rule` —
+the only write path for `enabled` (bumps version, preserves content; backs the MCP
+`set_rule_enabled` tool and the Rules-view Switch). Disabled rules are excluded by `RuleEngine`
+(`Decision::Disabled`) and never bind sessions; a content update via `save_rule`/`upsert_rule`
+never silently re-enables them. Build fresh rules with
+`store::new_rule(id, title, content, kind, scope, author)` (`new_user_rule` is a preference/user
+wrapper).
 
 **Rule suggestions** (`Store`, backed by the SQLite `rule_suggestions` table): the human-in-the-loop
 authoring path. `submit_suggestion(draft)` queues a `Pending` draft (build it with
@@ -190,14 +195,18 @@ cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 **Single-instance:** the TCP bind is the lock — a second HTTP launch on a busy address logs
 "already serving" and exits cleanly (`AddrInUse` guard), so daemon spawns are idempotent.
 
-**14 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
+**15 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
 `record_evidence`, `acknowledge_rules`, `get_session_context`, `export_handoff`,
-`import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `suggest_rule`, `list_suggestions`
-(plus resources & prompts).
+`import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`,
+`list_suggestions` (plus resources & prompts).
 `save_rule` is the active rule-authoring path: an agent records a discovered project contract
 (`scope=project`, `kind=contract`, `project_path`) or personal preference (`scope=user`) as a rule
 file via `Store::upsert_rule`; reusing an id updates + bumps version. Use it for durable project
 knowledge; `record_evidence` remains for session-scoped actions (fixed `EvidenceKind` enum).
+`set_rule_enabled` pauses/resumes a rule without touching its content (`id`, `enabled`, `scope`,
+`project_path` for project scope): disabled rules are excluded from resolution and stop binding
+sessions, enabling restores them. It is the only tool that flips `enabled` — `save_rule` content
+updates preserve the existing state.
 `suggest_rule` is the human-in-the-loop alternative for inferred/uncertain rules: it queues a
 `Pending` draft via `Store::submit_suggestion` (with a `rationale`) that does **not** bind sessions
 until a user approves it in the Suggestions view. `scope=project` (default) requires `project_path`
@@ -340,7 +349,11 @@ filters `rule.scope == tab` (original indices preserved for editing); the editor
 from the nav — there is **no free-text project path input** and no in-view tab toggle. With no
 current project, the Project view shows guidance + a `rules-go-projects` shortcut instead of the
 form. `save_rule_from_inputs` / `delete_selected_rule` resolve the project path from
-`current_project_path()`.
+`current_project_path()`. When a rule is selected the editor shows an **enable/disable Switch**
+(`rule-enabled-switch`, `gpui_kit::component::switch::Switch`, controlled by `rule.enabled`); its
+`on_click` calls `set_selected_rule_enabled(next, cx)` → `Store::set_rule_enabled`, then refreshes and
+toasts. The list row's on/off `Tag` is a read-only status indicator. Enablement is independent of
+content edits: saving a rule preserves its `enabled` state.
 
 **Suggestions review** (`views/suggestions.rs`): the human-in-the-loop queue for agent-proposed
 rules. `Console` holds `suggestions: Vec<RuleSuggestion>`, `pending_suggestions: usize` (sidebar

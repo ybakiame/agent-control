@@ -119,8 +119,9 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  check("tools/list has 14 tools", names.length === 14, names);
+  check("tools/list has 15 tools", names.length === 15, names);
   check("save_rule registered", names.includes("save_rule"), names);
+  check("set_rule_enabled registered", names.includes("set_rule_enabled"), names);
   check("suggest_rule registered", names.includes("suggest_rule"), names);
   check("list_suggestions registered", names.includes("list_suggestions"), names);
 
@@ -229,6 +230,45 @@ try {
   const afterUpdate = await tool("list_rules", { project_path: projectDir });
   check("save_rule upsert creates no duplicate", afterUpdate.rules?.filter((r) => r.id === "api-isasc").length === 1, afterUpdate);
 
+  // set_rule_enabled: pause/resume a rule without deleting it; disabled rules stop binding.
+  const disabled = await tool("set_rule_enabled", {
+    id: "api-isasc", enabled: false, scope: "project", project_path: projectDir,
+  });
+  check("set_rule_enabled disables a rule", disabled.rule?.enabled === false, disabled);
+  const afterDisable = await tool("get_applicable_rules", query);
+  check(
+    "disabled rule is excluded from resolution",
+    !afterDisable.applied_rules?.some((m) => m.rule.id === "api-isasc"),
+    afterDisable,
+  );
+
+  // A content update via save_rule must NOT silently re-enable a disabled rule.
+  await tool("save_rule", {
+    id: "api-isasc",
+    title: "Upstream isAsc type is ambiguous",
+    content: "Still paused; content edited while disabled.",
+    agent_id: "harness-b",
+    scope: "project",
+    project_path: projectDir,
+  });
+  const stillDisabled = await tool("list_rules", { project_path: projectDir });
+  check(
+    "save_rule preserves the disabled state",
+    stillDisabled.rules?.some((r) => r.id === "api-isasc" && r.enabled === false),
+    stillDisabled,
+  );
+
+  const reenabled = await tool("set_rule_enabled", {
+    id: "api-isasc", enabled: true, scope: "project", project_path: projectDir,
+  });
+  check("set_rule_enabled re-enables a rule", reenabled.rule?.enabled === true, reenabled);
+  const afterEnable = await tool("get_applicable_rules", query);
+  check(
+    "re-enabled rule binds again",
+    afterEnable.applied_rules?.some((m) => m.rule.id === "api-isasc"),
+    afterEnable,
+  );
+
   // Boundary validation: project scope requires project_path; unknown kind is rejected.
   async function toolRejects(name, args) {
     const res = await rpc("tools/call", { name, arguments: args });
@@ -241,6 +281,22 @@ try {
   check(
     "save_rule rejects unknown kind",
     await toolRejects("save_rule", { id: "x", title: "x", content: "x", agent_id: "a", kind: "bogus", scope: "user" }),
+  );
+  check(
+    "set_rule_enabled rejects project scope without project_path",
+    await toolRejects("set_rule_enabled", { id: "api-isasc", enabled: false, scope: "project" }),
+  );
+  check(
+    "set_rule_enabled rejects unknown scope",
+    await toolRejects("set_rule_enabled", { id: "api-isasc", enabled: false, scope: "bogus" }),
+  );
+  check(
+    "set_rule_enabled rejects session scope",
+    await toolRejects("set_rule_enabled", { id: "api-isasc", enabled: false, scope: "session" }),
+  );
+  check(
+    "set_rule_enabled rejects an unknown rule id",
+    await toolRejects("set_rule_enabled", { id: "does-not-exist", enabled: false, scope: "user" }),
   );
 
   // suggest_rule: an agent proposes a rule for human review instead of writing it directly.

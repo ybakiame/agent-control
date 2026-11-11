@@ -155,6 +155,14 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("rules.save", "Save rule", "保存规则"),
     ("rules.delete", "Delete", "删除"),
     ("rules.saved", "Rule saved", "规则已保存"),
+    ("rules.enabled", "Enabled", "启用"),
+    (
+        "rules.enabled_hint",
+        "Disabled rules are excluded from resolution and do not bind sessions.",
+        "禁用的规则不参与解析，也不会约束会话。",
+    ),
+    ("rules.enabled_toast", "Rule enabled", "规则已启用"),
+    ("rules.disabled_toast", "Rule disabled", "规则已禁用"),
     // Provenance
     ("prov.title", "Provenance", "溯源"),
     ("prov.rules_count", "{} rules", "{} 条规则"),
@@ -373,6 +381,9 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("log.deleted", "deleted rule '{}'", "已删除规则 '{}'"),
     ("log.not_found", "rule file not found", "未找到规则文件"),
     ("log.delete_failed", "delete failed: {}", "删除失败: {}"),
+    ("log.rule_enabled", "enabled rule '{}'", "已启用规则 '{}'"),
+    ("log.rule_disabled", "disabled rule '{}'", "已禁用规则 '{}'"),
+    ("log.toggle_failed", "toggle failed: {}", "切换失败: {}"),
     (
         "log.task_required",
         "task and project path are required",

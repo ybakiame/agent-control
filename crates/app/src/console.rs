@@ -676,6 +676,41 @@ impl Console {
         }
     }
 
+    pub fn set_selected_rule_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
+        let Some(index) = self.selected_rule else {
+            return false;
+        };
+        let Some(rule) = self.rules.get(index) else {
+            return false;
+        };
+        let project_path = if rule.scope == Scope::Project {
+            self.current_project_path()
+        } else {
+            None
+        };
+        match self
+            .store
+            .set_rule_enabled(&rule.id, rule.scope, project_path.as_deref(), enabled)
+        {
+            Ok(updated) => {
+                self.log(self.tr(
+                    if enabled {
+                        "log.rule_enabled"
+                    } else {
+                        "log.rule_disabled"
+                    },
+                    &[&updated.id],
+                ));
+                self.refresh_data(cx);
+                true
+            }
+            Err(e) => {
+                self.log(self.tr("log.toggle_failed", &[&e.to_string()]));
+                false
+            }
+        }
+    }
+
     pub fn select_suggestion(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(suggestion) = self.suggestions.iter().find(|s| s.id == id).cloned() else {
             return;

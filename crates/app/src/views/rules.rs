@@ -2,6 +2,7 @@ use agent_control_core::model::Scope;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -99,6 +100,38 @@ impl Console {
                     .into_any_element()
             });
 
+        let enabled_switch = self
+            .selected_rule
+            .and_then(|i| self.rules.get(i))
+            .map(|rule| {
+                let enabled = rule.enabled;
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Switch::new("rule-enabled-switch")
+                            .checked(enabled)
+                            .label(self.t("rules.enabled"))
+                            .on_click(cx.listener(|this, next, window, cx| {
+                                if this.set_selected_rule_enabled(*next, cx) {
+                                    let msg = this.t(if *next {
+                                        "rules.enabled_toast"
+                                    } else {
+                                        "rules.disabled_toast"
+                                    });
+                                    this.notify(window, cx, msg);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(self.t("rules.enabled_hint")),
+                    )
+                    .into_any_element()
+            });
+
         let tab_desc = if tab == Scope::Project {
             match self.current_project() {
                 Some(p) => self.tr("rules.project_desc", &[&p.name]),
@@ -171,6 +204,7 @@ impl Console {
                         .child(Textarea::new(&self.rule_content_input).h(px(160.))),
                 )
                 .children(selected_meta)
+                .children(enabled_switch)
                 .child(
                     h_flex()
                         .gap_2()

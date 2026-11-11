@@ -83,10 +83,15 @@ try {
   await rpc("notifications/initialized", {}, true);
 
   const tools = await rpc("tools/list", {});
-  check("tools/list over HTTP", tools.result?.tools?.length === 14, tools);
+  check("tools/list over HTTP", tools.result?.tools?.length === 15, tools);
   check(
     "save_rule available over HTTP",
     tools.result?.tools?.some((t) => t.name === "save_rule"),
+    tools,
+  );
+  check(
+    "set_rule_enabled available over HTTP",
+    tools.result?.tools?.some((t) => t.name === "set_rule_enabled"),
     tools,
   );
   check(
