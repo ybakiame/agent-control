@@ -75,19 +75,22 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ),
     ("app.version", "v{}", "v{}"),
     ("nav.dashboard", "Dashboard", "仪表盘"),
-    ("nav.rules", "Rules & Contracts", "规则与契约"),
+    ("nav.preferences", "Preferences", "个人偏好"),
+    ("nav.rules", "Project Contracts", "项目契约"),
     ("nav.provenance", "Provenance", "溯源"),
     ("nav.evidence", "Evidence Chain", "证据链"),
     ("nav.sessions", "Sessions & Handoff", "会话与交接"),
     ("nav.settings", "Settings", "设置"),
     ("header.dashboard", "Dashboard", "仪表盘"),
-    ("header.rules", "Rules & Contracts", "规则与契约"),
+    ("header.preferences", "Personal Preferences", "个人偏好"),
+    ("header.rules", "Project Contracts", "项目契约"),
     ("header.provenance", "Provenance Explorer", "溯源浏览器"),
     ("header.evidence", "Verifiable Evidence", "可验证证据"),
     ("header.sessions", "Sessions & Continuity", "会话与连续性"),
     ("header.settings", "Settings", "设置"),
     ("common.refresh", "Refresh", "刷新"),
     ("mcp.running", "running", "运行中"),
+    ("mcp.daemon", "daemon", "守护进程"),
     ("mcp.stopped", "stopped", "已停止"),
     ("footer.mcp", "MCP: {}", "MCP: {}"),
     // Dashboard
@@ -290,8 +293,8 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ),
     (
         "set.mcp.desc",
-        "Agents connect here to read applicable rules, record evidence, acknowledge constraints and export handoffs.",
-        "代理在此连接以读取适用规则、记录证据、确认约束并导出交接。",
+        "Agents connect here to read applicable rules, record evidence, acknowledge constraints and export handoffs. Runs as a background daemon that stays alive after you close the console.",
+        "代理在此连接以读取适用规则、记录证据、确认约束并导出交接。以后台守护进程运行，关闭指挥台后仍常驻。",
     ),
     ("set.mcp.stop", "Stop MCP server", "停止 MCP 服务"),
     ("set.mcp.start", "Start MCP server", "启动 MCP 服务"),
@@ -312,6 +315,7 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("set.path.user_rules", "User rules", "用户规则"),
     ("set.path.agents", "Agents registry", "代理注册表"),
     ("set.path.bundles", "Handoff bundles", "交接包"),
+    ("set.path.logs", "Logs (app / mcp)", "日志（app / mcp）"),
     ("set.layers", "The four layers", "四层架构"),
     (
         "set.layer1",
@@ -474,6 +478,16 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "MCP HTTP server starting",
         "MCP HTTP 服务启动中",
     ),
+    (
+        "log.mcp_reuse",
+        "reusing running MCP daemon at {}",
+        "复用运行中的 MCP 守护进程：{}",
+    ),
+    (
+        "log.mcp_daemon",
+        "started background MCP daemon at {} (survives closing the console)",
+        "已启动后台 MCP 守护进程：{}（关闭指挥台后仍常驻）",
+    ),
     // Projects / onboarding
     ("nav.projects", "Projects", "项目"),
     ("header.projects", "Project Management", "项目管理"),
@@ -617,6 +631,11 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ),
     ("log.current_project", "current project: {}", "当前项目：{}"),
     (
+        "log.scaffold_failed",
+        "contract scaffold update failed: {}",
+        "契约脚手架更新失败：{}",
+    ),
+    (
         "log.no_project",
         "no project selected; onboard or pick one first",
         "未选择项目；请先接入或选择一个项目",
@@ -653,9 +672,14 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "组织仓库、契约与会话",
     ),
     (
+        "desc.preferences",
+        "User-scope preferences that follow you across projects",
+        "跨项目跟随你的用户级偏好",
+    ),
+    (
         "desc.rules",
-        "Personal preferences and project contracts",
-        "个人偏好与项目契约",
+        "Project-scope contracts binding this repository",
+        "绑定本仓库的项目级契约",
     ),
     (
         "desc.suggestions",
@@ -722,6 +746,11 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "Adjust the draft before approving; it will be written to the project's rules folder.",
         "批准前可修改草稿；批准后将写入项目规则目录。",
     ),
+    (
+        "sugg.edit_hint_user",
+        "Adjust the draft before approving; it will be written to your personal preferences and apply across all projects.",
+        "批准前可修改草稿；批准后将写入个人偏好，并在所有项目中生效。",
+    ),
     ("sugg.note", "Review note (optional)", "审核备注（可选）"),
     (
         "ph.sugg_note",
@@ -729,11 +758,21 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "批准/拒绝的原因…",
     ),
     ("sugg.approve", "Approve → project rule", "批准 → 项目规则"),
+    (
+        "sugg.approve_user",
+        "Approve → personal preference",
+        "批准 → 个人偏好",
+    ),
     ("sugg.reject", "Reject", "拒绝"),
     (
         "sugg.approved_toast",
         "Approved and written to project rules",
         "已批准并写入项目规则",
+    ),
+    (
+        "sugg.approved_toast_user",
+        "Approved and written to personal preferences",
+        "已批准并写入个人偏好",
     ),
     ("sugg.rejected_toast", "Suggestion rejected", "建议已拒绝"),
     ("sugg.reviewed", "Reviewed {}", "审核于 {}"),

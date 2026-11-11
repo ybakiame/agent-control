@@ -34,6 +34,7 @@ use crate::ui;
 pub enum Nav {
     Dashboard,
     Projects,
+    Preferences,
     Rules,
     Suggestions,
     Provenance,
@@ -99,6 +100,7 @@ pub struct Console {
     pub pending_permission: Option<PendingPermission>,
 
     pub mcp_running: bool,
+    pub mcp_external: bool,
     pub mcp_shutdown: Option<CancellationToken>,
     pub mcp_bind: String,
 
@@ -188,6 +190,7 @@ impl Console {
             active_harness: None,
             pending_permission: None,
             mcp_running: false,
+            mcp_external: false,
             mcp_shutdown: None,
             mcp_bind: "127.0.0.1:9870".into(),
             rule_id_input,
@@ -205,6 +208,9 @@ impl Console {
             poll_task: None,
         };
         console.refresh_data(cx);
+        if let Some(id) = console.current_project {
+            console.ensure_project_scaffold(id);
+        }
         console.start_mcp_http();
         console.start_polling(cx);
         console.log(i18n::t(locale, "log.ready"));
@@ -391,9 +397,44 @@ impl Console {
     }
 
     pub fn start_mcp_http(&mut self) {
+        let bind = self.mcp_bind.clone();
+
+        // 1. Reuse an already-running daemon (single instance across consoles and GUI restarts).
+        if daemon_listening(&bind) {
+            self.mcp_external = true;
+            self.mcp_running = true;
+            self.log(self.tr("log.mcp_reuse", &[&bind]));
+            return;
+        }
+
+        // 2. Spawn the sibling MCP binary as a detached background daemon that outlives the GUI.
+        //    It resolves the same data root (portable marker sits next to both executables).
+        if let Some(exe) = sibling_mcp_exe() {
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.arg("--bind").arg(&bind);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const DETACHED_PROCESS: u32 = 0x0000_0008;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
+            }
+            match cmd.spawn() {
+                Ok(_) => {
+                    self.mcp_external = true;
+                    self.mcp_running = true;
+                    self.log(self.tr("log.mcp_daemon", &[&bind]));
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to spawn MCP daemon; hosting in-process");
+                }
+            }
+        }
+
+        // 3. Fallback (dev run without a sibling binary): host in-process on the manager runtime.
         let shutdown = CancellationToken::new();
         let store = self.store.clone();
-        let bind = self.mcp_bind.clone();
         let sd = shutdown.clone();
         self.manager.spawn(async move {
             if let Err(e) = agent_control_mcp::serve_http(store, &bind, sd).await {
@@ -401,13 +442,17 @@ impl Console {
             }
         });
         self.mcp_shutdown = Some(shutdown);
+        self.mcp_external = false;
         self.mcp_running = true;
     }
 
     pub fn stop_mcp_http(&mut self) {
-        if let Some(sd) = self.mcp_shutdown.take() {
+        if self.mcp_external {
+            request_daemon_shutdown(&self.mcp_bind);
+        } else if let Some(sd) = self.mcp_shutdown.take() {
             sd.cancel();
         }
+        self.mcp_external = false;
         self.mcp_running = false;
     }
 
@@ -677,7 +722,13 @@ impl Console {
                     "log.sugg_approved",
                     &[&rule.id, &path.display().to_string()],
                 ));
-                let message = self.t("sugg.approved_toast").to_string();
+                let message = self
+                    .t(if rule.scope == Scope::User {
+                        "sugg.approved_toast_user"
+                    } else {
+                        "sugg.approved_toast"
+                    })
+                    .to_string();
                 self.notify(window, cx, &message);
                 self.selected_suggestion = None;
                 self.refresh_data(cx);
@@ -1041,14 +1092,33 @@ impl Console {
             self.project_rename_input
                 .update(cx, |s, cx| s.set_value(&name, window, cx));
         }
-        self.rebuild_project_tree(cx);
+        // Selection only: rebuilding items here would reset expand/collapse state, which the
+        // tree row's own click toggle then flips again, so a root could never stay open.
+        self.project_tree.update(cx, |state, cx| {
+            if let Some(ix) = state.index_of(&format!("project:{id}").into()) {
+                state.set_selected_index(Some(ix), cx);
+            }
+        });
         cx.notify();
+    }
+
+    /// Ensure the project's contract scaffold exists and migrate untouched templates to the current
+    /// version. Idempotent and edit-safe; failures are logged, never fatal.
+    fn ensure_project_scaffold(&mut self, id: Uuid) {
+        let path = match self.store.get_project(id) {
+            Ok(Some(project)) => project.path,
+            _ => return,
+        };
+        if let Err(e) = self.store.init_project_contracts(&path) {
+            self.log(self.tr("log.scaffold_failed", &[&e.to_string()]));
+        }
     }
 
     pub fn set_current_project(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.current_project = Some(id);
         self.selected_project = Some(id);
         let _ = self.store.touch_project(id);
+        self.ensure_project_scaffold(id);
         self.refresh_data(cx);
         let name = self
             .current_project()
@@ -1160,6 +1230,7 @@ impl Console {
         self.rules_tab = tab;
         self.nav = nav;
         let _ = self.store.touch_project(id);
+        self.ensure_project_scaffold(id);
         self.refresh_data(cx);
     }
 
@@ -1214,6 +1285,7 @@ impl Render for Console {
         let content = match self.nav {
             Nav::Dashboard => self.render_dashboard(cx).into_any_element(),
             Nav::Projects => self.render_projects(cx).into_any_element(),
+            Nav::Preferences => self.render_rules(cx).into_any_element(),
             Nav::Rules => self.render_rules(cx).into_any_element(),
             Nav::Suggestions => self.render_suggestions(cx).into_any_element(),
             Nav::Provenance => self.render_provenance(cx).into_any_element(),
@@ -1279,6 +1351,7 @@ impl Console {
         match self.nav {
             Nav::Dashboard => self.t("header.dashboard"),
             Nav::Projects => self.t("header.projects"),
+            Nav::Preferences => self.t("header.preferences"),
             Nav::Rules => self.t("header.rules"),
             Nav::Suggestions => self.t("header.suggestions"),
             Nav::Provenance => self.t("header.provenance"),
@@ -1292,6 +1365,7 @@ impl Console {
         match self.nav {
             Nav::Dashboard => self.t("desc.dashboard"),
             Nav::Projects => self.t("desc.projects"),
+            Nav::Preferences => self.t("desc.preferences"),
             Nav::Rules => self.t("desc.rules"),
             Nav::Suggestions => self.t("desc.suggestions"),
             Nav::Provenance => self.t("desc.provenance"),
@@ -1370,6 +1444,14 @@ impl Console {
                 "nav.projects",
                 "nav-projects",
                 IconName::Folder,
+                0,
+                cx,
+            ))
+            .child(self.nav_item(
+                Nav::Preferences,
+                "nav.preferences",
+                "nav-preferences",
+                IconName::User,
                 0,
                 cx,
             ))
@@ -1601,4 +1683,43 @@ impl Console {
             .child(div().child(locale_label))
             .child(div().child(version))
     }
+}
+
+/// True when something is already accepting TCP connections on `bind` (a running MCP daemon).
+fn daemon_listening(bind: &str) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    match bind.parse::<SocketAddr>() {
+        Ok(addr) => TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Path to the MCP server binary shipped next to the console executable, if present.
+fn sibling_mcp_exe() -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) {
+        "agent-control-mcp.exe"
+    } else {
+        "agent-control-mcp"
+    };
+    let exe = std::env::current_exe().ok()?;
+    let path = exe.parent()?.join(name);
+    path.is_file().then_some(path)
+}
+
+/// Ask a background daemon to shut down via its loopback-only `POST /shutdown` route. Best-effort:
+/// the daemon may have been started by another console, so we signal it rather than kill a PID.
+fn request_daemon_shutdown(bind: &str) {
+    use std::io::Write;
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let Ok(mut stream) = TcpStream::connect(bind) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let req = format!(
+        "POST /shutdown HTTP/1.1\r\nHost: {bind}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let _ = stream.write_all(req.as_bytes());
+    let _ = stream.flush();
 }

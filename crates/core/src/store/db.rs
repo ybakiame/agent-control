@@ -89,6 +89,7 @@ impl Db {
             CREATE TABLE IF NOT EXISTS rule_suggestions (
                 id TEXT PRIMARY KEY,
                 project_path TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'project',
                 agent_id TEXT NOT NULL,
                 rule_id TEXT NOT NULL,
                 title TEXT NOT NULL,
@@ -109,6 +110,15 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_suggestions_project ON rule_suggestions(project_path, status);
             ",
         )?;
+        // Databases created before user-scope suggestions lack the scope column; add it once.
+        let has_scope = conn
+            .prepare("SELECT scope FROM rule_suggestions LIMIT 0")
+            .is_ok();
+        if !has_scope {
+            conn.execute_batch(
+                "ALTER TABLE rule_suggestions ADD COLUMN scope TEXT NOT NULL DEFAULT 'project';",
+            )?;
+        }
         Ok(())
     }
 
@@ -378,8 +388,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let params = suggestion_params(suggestion)?;
         conn.execute(
-            "INSERT INTO rule_suggestions (id, project_path, agent_id, rule_id, title, topic, content, kind, tags_json, rationale, status, created_at, updated_at, reviewed_at, review_note, approved_rule_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO rule_suggestions (id, project_path, agent_id, rule_id, title, topic, content, kind, tags_json, rationale, status, created_at, updated_at, reviewed_at, review_note, approved_rule_id, scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
         )?;
         Ok(())
@@ -393,7 +403,7 @@ impl Db {
                 project_path = ?2, agent_id = ?3, rule_id = ?4, title = ?5, topic = ?6,
                 content = ?7, kind = ?8, tags_json = ?9, rationale = ?10, status = ?11,
                 created_at = ?12, updated_at = ?13, reviewed_at = ?14, review_note = ?15,
-                approved_rule_id = ?16
+                approved_rule_id = ?16, scope = ?17
              WHERE id = ?1",
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
         )?;
@@ -442,7 +452,7 @@ impl Db {
     }
 }
 
-const SUGGESTION_SELECT: &str = "SELECT id, project_path, agent_id, rule_id, title, topic, content, kind, tags_json, rationale, status, created_at, updated_at, reviewed_at, review_note, approved_rule_id FROM rule_suggestions";
+const SUGGESTION_SELECT: &str = "SELECT id, project_path, agent_id, rule_id, title, topic, content, kind, tags_json, rationale, status, created_at, updated_at, reviewed_at, review_note, approved_rule_id, scope FROM rule_suggestions";
 
 fn suggestion_filter_query(
     project_path: Option<&str>,
@@ -493,6 +503,7 @@ fn suggestion_params(suggestion: &RuleSuggestion) -> Result<Vec<Box<dyn rusqlite
         Box::new(suggestion.reviewed_at.map(|t| t.to_rfc3339())),
         Box::new(suggestion.review_note.clone()),
         Box::new(suggestion.approved_rule_id.clone()),
+        Box::new(suggestion.scope.label().to_string()),
     ])
 }
 
@@ -504,9 +515,11 @@ fn suggestion_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuleSuggesti
     let created: String = row.get(11)?;
     let updated: String = row.get(12)?;
     let reviewed: Option<String> = row.get(13)?;
+    let scope_raw: String = row.get(16)?;
     Ok(RuleSuggestion {
         id: Uuid::parse_str(&id).map_err(invalid_uuid)?,
         project_path: std::path::PathBuf::from(row.get::<_, String>(1)?),
+        scope: serde_json::from_str(&format!("\"{scope_raw}\"")).map_err(json_err)?,
         agent_id: row.get(2)?,
         rule_id: row.get(3)?,
         title: row.get(4)?,

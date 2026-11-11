@@ -1,4 +1,4 @@
-use agent_control_core::model::{RuleKind, SuggestionStatus};
+use agent_control_core::model::{RuleKind, Scope, SuggestionStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
@@ -56,6 +56,11 @@ impl Console {
                 RuleKind::Contract => "kind.contract",
                 RuleKind::Constraint => "kind.constraint",
             };
+            let scope_tag = match s.scope {
+                Scope::User => Tag::info().child(self.t("scope.user.tag")),
+                Scope::Project => Tag::primary().child(self.t("scope.project.tag")),
+                Scope::Session => Tag::secondary().child(self.t("scope.session.tag")),
+            };
             v_flex()
                 .id(format!("sugg-row-{id}"))
                 .role(Role::Button)
@@ -78,6 +83,7 @@ impl Console {
                         .gap_1()
                         .items_center()
                         .child(status_tag)
+                        .child(scope_tag)
                         .child(Tag::secondary().child(self.t(kind_key))),
                 )
                 .child(
@@ -202,6 +208,12 @@ impl Console {
             RuleKind::Contract => "kind.contract",
             RuleKind::Constraint => "kind.constraint",
         };
+        let scope_tag = match s.scope {
+            Scope::User => Tag::info().child(self.t("scope.user.tag")),
+            Scope::Project => Tag::primary().child(self.t("scope.project.tag")),
+            Scope::Session => Tag::secondary().child(self.t("scope.session.tag")),
+        };
+        let is_user = s.scope == Scope::User;
 
         let header = v_flex()
             .gap_1()
@@ -212,6 +224,7 @@ impl Console {
                     .gap_2()
                     .items_center()
                     .child(ui::mono(cx, s.rule_id.clone()))
+                    .child(scope_tag)
                     .child(Tag::secondary().child(self.t(kind_key)))
                     .child(
                         div()
@@ -249,12 +262,11 @@ impl Console {
                 .child(header)
                 .child(rationale)
                 .child(ui::section_label(cx, self.t("sugg.edit_title")))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(self.t("sugg.edit_hint")),
-                )
+                .child(div().text_xs().text_color(muted).child(self.t(if is_user {
+                    "sugg.edit_hint_user"
+                } else {
+                    "sugg.edit_hint"
+                })))
                 .child(
                     v_flex()
                         .gap_1()
@@ -294,7 +306,11 @@ impl Console {
                         .gap_2()
                         .child(
                             Button::new("sugg-approve")
-                                .label(self.t("sugg.approve"))
+                                .label(self.t(if is_user {
+                                    "sugg.approve_user"
+                                } else {
+                                    "sugg.approve"
+                                }))
                                 .primary()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.approve_selected_suggestion(window, cx);

@@ -24,12 +24,18 @@ work). It is not the guide for editing the console's Rust source — that lives 
 
 The console exposes an **MCP server** (14 tools + resources + prompts). Pick one transport:
 
-- **Streamable HTTP** — the desktop app auto-starts `http://127.0.0.1:9870/mcp`
-  (`mcp-session-id` header). Configure your MCP client to point at that URL. To run the server
-  headless: `agent-control-mcp --bind 127.0.0.1:9870`.
+- **Streamable HTTP** — the desktop app runs a **background daemon** at `http://127.0.0.1:9870/mcp`
+  (`mcp-session-id` header). It reuses an already-running daemon or spawns the sibling
+  `agent-control-mcp` binary detached, so the endpoint **stays alive after you close the console**.
+  Configure your MCP client to point at that URL. To run it headless yourself:
+  `agent-control-mcp --bind 127.0.0.1:9870`, or `agent-control-mcp --daemon` to detach and exit.
+  Single-instance: a second launch on a busy address exits cleanly. Stop a daemon with a loopback
+  `POST /shutdown` (the console's Stop button does this).
 - **stdio** — for harnesses that spawn the server process: `agent-control-mcp --stdio`.
 
-Optional `--data-dir <path>` overrides the data root (default `~/.agent-control`). Build the binary
+Optional `--data-dir <path>` overrides the data root (default `~/.agent-control`; a `portable.marker`
+next to the binary switches to `<exe dir>/data`). Both binaries run with **no console window** on
+Windows and log to `<root>/logs/{app,mcp}.log`. Build the binary
 with `mise run build` (→ `target/debug/agent-control-mcp`), or run via `mise run mcp` (stdio).
 
 Verify the connection by listing tools (expect 14) or reading resource `control://overview`.
@@ -74,16 +80,26 @@ Reusing an `id` updates the rule and bumps its version. For a personal preferenc
 provenance and the GUI stay consistent. Onboarded projects ship copy-ready templates in
 `<project>/.agent-control/examples/` (not binding until copied into `rules/`).
 
-**Proposing rules for human review.** When a contract is *inferred, uncertain, or needs user
+**Proposing rules for human review.** When a rule is *inferred, uncertain, or needs user
 confirmation*, do not write it directly with `save_rule`. Instead call **`suggest_rule`** with
-`project_path`, `agent_id`, `id`, `title`, `content`, and a `rationale` explaining the discovery.
-The draft is queued as a `pending` suggestion in the console's **Suggestions** view; it does **not**
-bind sessions until a user reviews it. The user can edit the draft, **approve** it (it becomes a
-binding project rule via the same path as `save_rule`), or **reject** it with a note. Keep working
+`agent_id`, `id`, `title`, `content`, and a `rationale` explaining the discovery. Pass
+`scope: "project"` + `project_path` for a project contract, or `scope: "user"` (no `project_path`)
+for a **personal preference** that follows the user across projects. The draft is queued as a
+`pending` suggestion in the console's **Suggestions** view; it does **not** bind sessions until a
+user reviews it. The user can edit the draft, **approve** it (it becomes a binding rule via the same
+path as `save_rule` — project or user scope as proposed), or **reject** it with a note. Keep working
 under the currently applicable rules meanwhile. Use **`list_suggestions`** (`project_path`,
 `status`) to check whether your proposals were reviewed; an approved one reports `approved_rule_id`.
-Rule of thumb: `save_rule` for contracts you are confident are correct project knowledge;
-`suggest_rule` for anything a human should sign off on first.
+Rule of thumb: `save_rule` for rules you are confident are correct; `suggest_rule` for anything a
+human should sign off on first.
+
+**Where environment notes go.** Facts about the user's working environment that should hold across
+projects — e.g. "I run codex/kimi CLIs inside WSL; the repo lives in WSL, but Windows-native tools
+are callable for compile/verify" — belong in a **user-scope `constraint` rule**, not a project
+contract or session evidence. Propose it with `suggest_rule { scope: "user", kind: "constraint" }`
+(or `save_rule` if confident). User rules always load, are frozen into every session snapshot, and
+are injected proactively through the ACP `constraint_briefing` and `get_applicable_rules`, so the
+agent is told up front rather than needing a mid-task reminder.
 
 ## ACP harness integration
 

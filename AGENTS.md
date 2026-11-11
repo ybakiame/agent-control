@@ -80,7 +80,7 @@ preference/user wrapper).
 
 **Rule suggestions** (`Store`, backed by the SQLite `rule_suggestions` table): the human-in-the-loop
 authoring path. `submit_suggestion(draft)` queues a `Pending` draft (build it with
-`store::new_suggestion(project_path, agent_id, id, title, content, kind)`); `list_suggestions(
+`store::new_suggestion(project_path, agent_id, id, title, content, kind, scope)`); `list_suggestions(
 project_path?, status?)` and `count_suggestions(project_path?, status?)` read the queue;
 `get_suggestion(id)` fetches one. `approve_suggestion(id, SuggestionEdits, note?) -> (RuleSuggestion,
 Rule, PathBuf)` applies optional human edits (`SuggestionEdits` fields default to the agent draft),
@@ -88,6 +88,17 @@ writes a binding rule via the same `upsert_rule` path as `save_rule`, and marks 
 `Approved` with `approved_rule_id`. `reject_suggestion(id, note?)` marks it `Rejected` and writes
 **no** rule. `RuleSuggestion` / `SuggestionStatus` (`Pending`/`Approved`/`Rejected`) / `SuggestionEdits`
 live in `model.rs`. Backs the MCP `suggest_rule` / `list_suggestions` tools and the app Suggestions view.
+
+A suggestion carries a `scope` (`Scope`, serde-default `project`): `Project` requires a non-empty
+`project_path` (normalized on submit) and approval writes `<project>/.agent-control/rules/`; `User`
+clears `project_path` to empty and approval writes `~/.agent-control/rules/user/` (a personal
+preference that follows the user across projects); `Session` is rejected. The `rule_suggestions`
+table has a `scope TEXT NOT NULL DEFAULT 'project'` column, added by a guarded `ALTER` migration for
+older DBs. Project-filtered `list_suggestions`/`count_suggestions` exclude user-scope rows (empty
+path). **Environment notes** (e.g. "agents run inside WSL; Windows-native tools are callable for
+compile/verify") belong in a **user-scope `constraint` rule** — propose via `suggest_rule scope=user`
+or record via `save_rule scope=user`; user rules always load, freeze into every session snapshot, and
+are injected proactively via the ACP `constraint_briefing` / `get_applicable_rules`.
 
 **Project registry** (`Store`, backed by the SQLite `projects` table): `register_project(name,
 path, description)` (canonicalizes + dedups by path, defaults the name to the folder name),
@@ -127,36 +138,57 @@ isolate test runs; `open_with_root` / `--data-dir` still override everything.
 ├── control.db          # SQLite (rusqlite, bundled): sessions, provenance, evidence chain, projects, rule_suggestions
 ├── ui.json             # UI prefs: {"locale":"en"|"zh"}
 ├── agents.yaml         # registered harness commands
+├── logs/               # app.log + mcp.log (tracing-appender, non-rolling; visible with no console)
 ├── rules/user/         # user-scope rule files (committed/reviewed)
 └── bundles/            # exported handoff bundles
 <project>/.agent-control/
 ├── rules/              # project-scope contract rules (binding)
 ├── examples/           # copy-ready rule templates (NOT binding; copy into rules/ to activate)
-└── README.md           # bilingual contract guide (scaffolded by init_project_contracts)
+├── README.md           # bilingual contract guide (scaffolded by init_project_contracts)
+└── .scaffold.json      # template version + per-file sha256, drives edit-safe scaffold migration
 ```
 
 `DataLayout` (`core/src/config.rs`) owns every path — add new paths there, don't scatter
-`join()` literals (`project_rules_dir`, `project_examples_dir`, `project_config_dir`). Rule files
+`join()` literals (`project_rules_dir`, `project_examples_dir`, `project_config_dir`,
+`project_scaffold_marker`, `logs_dir`). Rule files
 carry frontmatter: `id`, `title`, `kind`, `scope`, `source`, optional `code_checks`, filters,
 priority. `init_project_contracts` scaffolds `rules/`, `examples/` (contract + constraint
-templates), and the guide idempotently. Examples live outside `rules/` so they never load as
-binding contracts.
+templates), and the guide, then **migrates** previously scaffolded files to the current templates
+(`TEMPLATE_VERSION` in `store/mod.rs`). Migration is hash-guarded by `.scaffold.json`: a generated
+file is refreshed only while its on-disk sha256 still equals the hash recorded when we wrote it
+(user never edited it); user-modified files are always preserved, and legacy scaffolds with no
+marker are adopted only when their content already matches the current template. The app calls it
+on startup and whenever a project becomes current, so upgrades reach existing projects. Examples
+live outside `rules/` so they never load as binding contracts.
 
 ---
 
 ## MCP protocol / MCP 协议
 
 Transports (rmcp 3.9): **stdio** and **Streamable HTTP** (axum, route `/mcp`, `mcp-session-id`
-header). The desktop app auto-starts HTTP at `http://127.0.0.1:9870/mcp`
-(`console.rs` → `agent_control_mcp::serve_http`).
+header). The desktop app runs MCP as a **background daemon** at `http://127.0.0.1:9870/mcp`:
+`console.rs::start_mcp_http` first probes the bind address and reuses an already-running daemon,
+otherwise spawns the sibling `agent-control-mcp` binary **detached** (`DETACHED_PROCESS |
+CREATE_NO_WINDOW`) so it survives closing the GUI; it falls back to in-process
+`agent_control_mcp::serve_http` only when no sibling binary exists (dev). `mcp_external` tracks
+which mode is active. The daemon resolves the same data root as the app (the `portable.marker`
+sits next to both executables). `serve_http` also exposes a **loopback-only `POST /shutdown`**
+route (rejects non-loopback peers) so the console's Stop button can stop a daemon it does not own
+as a child; `stop_mcp_http` signals it for external daemons and cancels the token for in-process.
+Both binaries are `#![windows_subsystem = "windows"]` (no popped cmd window) and log to
+`<root>/logs/{app,mcp}.log` via `tracing-appender` (the `WorkerGuard` must outlive the process).
 
 MCP bin CLI (`crates/mcp/src/main.rs`):
 
 ```sh
 cargo run -p agent-control-mcp -- --stdio                 # stdio (harness spawns this)
 cargo run -p agent-control-mcp -- --bind 127.0.0.1:9870   # HTTP (default bind)
+cargo run -p agent-control-mcp -- --daemon                # detached background daemon, then exit
 cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 ```
+
+**Single-instance:** the TCP bind is the lock — a second HTTP launch on a busy address logs
+"already serving" and exits cleanly (`AddrInUse` guard), so daemon spawns are idempotent.
 
 **14 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
 `record_evidence`, `acknowledge_rules`, `get_session_context`, `export_handoff`,
@@ -166,11 +198,13 @@ cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 (`scope=project`, `kind=contract`, `project_path`) or personal preference (`scope=user`) as a rule
 file via `Store::upsert_rule`; reusing an id updates + bumps version. Use it for durable project
 knowledge; `record_evidence` remains for session-scoped actions (fixed `EvidenceKind` enum).
-`suggest_rule` is the human-in-the-loop alternative for inferred/uncertain contracts: it queues a
+`suggest_rule` is the human-in-the-loop alternative for inferred/uncertain rules: it queues a
 `Pending` draft via `Store::submit_suggestion` (with a `rationale`) that does **not** bind sessions
-until a user approves it in the Suggestions view; `list_suggestions` reads the queue
-(`pending|approved|rejected`) plus a pending count. Prefer `suggest_rule` when a human should sign
-off first, `save_rule` when the contract is confident project knowledge.
+until a user approves it in the Suggestions view. `scope=project` (default) requires `project_path`
+and approval writes a project contract; `scope=user` needs no `project_path` and approval writes a
+personal preference that follows the user across projects (the right home for environment notes).
+`list_suggestions` reads the queue (`pending|approved|rejected`) plus a pending count. Prefer
+`suggest_rule` when a human should sign off first, `save_rule` when the rule is confident knowledge.
 
 Recommended harness call order:
 
@@ -288,7 +322,9 @@ render closure returns a `ListItem` with `.accessibility_label(...)` and an `.on
 captures a `WeakEntity<Console>` + the node id and calls `handle_tree_click(node_id, window, cx)`
 (prefix-dispatch → select / activate project + jump to the matching view). Per-project counts are
 precomputed into `project_stats: HashMap<Uuid,(usize,usize)>` during rebuild — **no disk I/O at
-render time**.
+render time**. `select_project` (root-row click) only moves the highlight via `set_selected_index`;
+it must **not** call `rebuild_project_tree`, because `set_items` resets expand/collapse state and
+the row's own click toggle would then flip it again (a root could never stay open).
 
 **Onboarding** (`show_onboarding`): browse via `browse_project_folder` (native
 `cx.prompt_for_paths(PathPromptOptions{ directories: true, .. })`, awaited in a detached
@@ -296,11 +332,14 @@ render time**.
 registers + scaffolds contracts + sets current/selected. Guidance copy lives under `proj.*` i18n
 keys.
 
-**Rules scope separation** (`views/rules.rs`): a `rules_tab: Scope` toggles **Personal** vs
-**Project**; the list filters `rule.scope == tab` (original indices preserved for editing). The
-editor's scope is derived from the tab — there is **no free-text project path input** anymore.
-With no current project, the Project tab shows guidance + a `rules-go-projects` shortcut instead
-of the form. `save_rule_from_inputs` / `delete_selected_rule` resolve the project path from
+**Rules scope separation** (`views/rules.rs`): scope is driven by the **sidebar nav**, not a tab
+switcher — `Nav::Preferences` (a top-level "Personal Preferences" menu) renders the rules view with
+`Scope::User`, and `Nav::Rules` ("Project Contracts") renders it with `Scope::Project`
+(`let tab = if self.nav == Nav::Preferences { Scope::User } else { Scope::Project }`). The list
+filters `rule.scope == tab` (original indices preserved for editing); the editor's scope is derived
+from the nav — there is **no free-text project path input** and no in-view tab toggle. With no
+current project, the Project view shows guidance + a `rules-go-projects` shortcut instead of the
+form. `save_rule_from_inputs` / `delete_selected_rule` resolve the project path from
 `current_project_path()`.
 
 **Suggestions review** (`views/suggestions.rs`): the human-in-the-loop queue for agent-proposed
@@ -309,10 +348,14 @@ Badge + Dashboard banner), `selected_suggestion: Option<Uuid>`, `suggestion_filt
 Option<SuggestionStatus>` (Pending/Approved/Rejected/All tabs), and draft inputs
 (`sugg_rule_id_input`, `sugg_title_input`, `sugg_content_input`, `sugg_note_input`).
 `select_suggestion` loads the draft into the editor; `approve_selected_suggestion` reads the inputs
-into `SuggestionEdits` + note and calls `Store::approve_suggestion` (writes a binding project rule);
-`confirm_reject_suggestion` opens an AlertDialog then calls `Store::reject_suggestion` (writes no
-rule). Reviewed suggestions render read-only with status, review note and `approved_rule_id`.
-`refresh_data` reloads the queue + pending count and repairs a dangling selection.
+into `SuggestionEdits` + note and calls `Store::approve_suggestion` (writes a binding rule at the
+suggestion's scope); `confirm_reject_suggestion` opens an AlertDialog then calls
+`Store::reject_suggestion` (writes no rule). Each row and the detail header show a **scope tag**
+(`scope.user.tag` info / `scope.project.tag` primary) beside the status + kind tags; the approve
+button label, edit hint and success toast are scope-aware (`sugg.approve_user` /
+`sugg.edit_hint_user` / `sugg.approved_toast_user` for user scope). Reviewed suggestions render
+read-only with status, review note and `approved_rule_id`. `refresh_data` reloads the queue + pending
+count and repairs a dangling selection.
 
 ---
 

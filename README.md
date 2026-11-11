@@ -116,11 +116,14 @@ preference) as a rule file: pass `id`, `title`, `content`, `agent_id`, and for p
 file lands in the project's `.agent-control/rules/`, appears in the console, and binds future
 sessions — use it for durable project knowledge, while `record_evidence` stays for session actions.
 
-`suggest_rule` is the **human-in-the-loop** alternative: when a contract is inferred or uncertain,
+`suggest_rule` is the **human-in-the-loop** alternative: when a rule is inferred or uncertain,
 the agent proposes it (with a `rationale`) rather than writing it directly. The draft is stored in
 SQLite as a `pending` suggestion and surfaces in the **Suggestions** view. It does not bind sessions
-until a user reviews it — the user can edit the draft, **approve** it (writing a binding project rule
-just like `save_rule`), or **reject** it with a note. `list_suggestions` lets agents poll the review
+until a user reviews it — the user can edit the draft, **approve** it (writing a binding rule just
+like `save_rule`), or **reject** it with a note. `scope: "project"` (default, needs `project_path`)
+proposes a project contract; `scope: "user"` proposes a **personal preference** that follows you
+across projects — the right home for environment notes such as "I run my CLIs inside WSL;
+Windows-native tools are callable for compile/verify". `list_suggestions` lets agents poll the review
 queue (`pending` / `approved` / `rejected`) and see the `approved_rule_id` once accepted.
 
 ## Projects & onboarding / 项目接入
@@ -160,22 +163,27 @@ Agents propose rules with `suggest_rule`; humans decide. The **Suggestions** vie
 pending-count badge in the sidebar and a banner on the Dashboard) is the review queue:
 
 1. Filter by **Pending / Approved / Rejected / All** and select a suggestion to see the agent's
-   draft, its `rationale`, and who proposed it.
+   draft, its `rationale`, who proposed it, and a **scope tag** (user / project).
 2. **Edit** the rule id, title, body, and add a review note — the human can supplement or correct
    the agent's draft before deciding.
-3. **Approve** to write it as a binding project rule into the current project's
-   `.agent-control/rules/` (the same path as `save_rule`); or **Reject** (with a confirmation
-   dialog) to discard it without writing any rule.
+3. **Approve** to write it as a binding rule at its proposed scope — a **project** suggestion lands
+   in the current project's `.agent-control/rules/`, a **user** suggestion (personal preference /
+   environment note) lands in `~/.agent-control/rules/user/` and applies across all projects (the
+   same path as `save_rule`); or **Reject** (with a confirmation dialog) to discard it without
+   writing any rule.
 
 Suggestions live in SQLite (`rule_suggestions`), so the queue survives restarts and is auditable:
 approved entries record the resulting `approved_rule_id`, rejected entries keep the review note.
 
 代理通过 `suggest_rule` 提议规则，由人审核。**Suggestions** 视图（侧栏带待审计数徽标、仪表盘有入口
-横幅）即审核队列：按 **Pending / Approved / Rejected / All** 过滤，选中后可见代理草稿、`rationale`
-与提议者；用户可**编辑**规则 id/标题/正文并补充审核备注，再**批准**（写入当前项目
-`.agent-control/rules/` 成为绑定规则，与 `save_rule` 同路径）或**拒绝**（确认对话框，不写任何规则）。
-建议存于 SQLite（`rule_suggestions`），重启后保留且可审计：批准记录生成的 `approved_rule_id`，
-拒绝保留审核备注。
+横幅）即审核队列：按 **Pending / Approved / Rejected / All** 过滤，选中后可见代理草稿、`rationale`、
+提议者与**作用域标签**（user / project）；用户可**编辑**规则 id/标题/正文并补充审核备注，再**批准**
+（按提议作用域写入绑定规则，与 `save_rule` 同路径：**project** 写入当前项目 `.agent-control/rules/`，
+**user** 写入 `~/.agent-control/rules/user/` 成为跨项目生效的个人偏好）或**拒绝**（确认对话框，不写任何规则）。
+`scope: "user"` 适合记录**工作环境说明**等个人偏好（如「我在 WSL 中运行 CLI，编译验证时可调用 Windows
+原生工具」）——用户级规则总会加载、冻结进每个会话快照，并通过 ACP `constraint_briefing` /
+`get_applicable_rules` 主动注入，无需任务中途再提醒。建议存于 SQLite（`rule_suggestions`），重启后保留
+且可审计：批准记录生成的 `approved_rule_id`，拒绝保留审核备注。
 
 ## Storage layout / 存储布局
 

@@ -9,6 +9,9 @@ pub const DB_FILE_NAME: &str = "control.db";
 pub const PORTABLE_MARKER: &str = "portable.marker";
 /// Environment variable that forces portable mode (alternative to the marker file).
 pub const PORTABLE_ENV: &str = "AGENT_CONTROL_PORTABLE";
+/// Per-project scaffold marker recording the template version and the content hash of each
+/// generated file, so upgrades can refresh untouched scaffolds without clobbering user edits.
+pub const SCAFFOLD_MARKER: &str = ".scaffold.json";
 
 #[derive(Debug, Clone)]
 pub struct DataLayout {
@@ -81,8 +84,12 @@ impl DataLayout {
         self.root.join("bundles")
     }
 
+    pub fn logs_dir(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
     pub fn ensure_dirs(&self) -> Result<()> {
-        let mut dirs = vec![self.user_rules_dir(), self.bundles_dir()];
+        let mut dirs = vec![self.user_rules_dir(), self.bundles_dir(), self.logs_dir()];
         if let Some(parent) = self.db_path().parent() {
             dirs.push(parent.to_path_buf());
         }
@@ -105,5 +112,10 @@ impl DataLayout {
     /// loaded as binding contracts; copy one into `rules/` to activate it.
     pub fn project_examples_dir(project_path: &Path) -> PathBuf {
         Self::project_config_dir(project_path).join("examples")
+    }
+
+    /// Scaffold marker tracking template version + per-file hashes for safe upgrades.
+    pub fn project_scaffold_marker(project_path: &Path) -> PathBuf {
+        Self::project_config_dir(project_path).join(SCAFFOLD_MARKER)
     }
 }

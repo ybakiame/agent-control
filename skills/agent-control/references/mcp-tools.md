@@ -98,11 +98,16 @@ project knowledge; use `record_evidence` for session-scoped actions instead.
 - Errors (`isError`): empty id/title, unknown kind/scope, or project scope without `project_path`.
 
 ### suggest_rule
-Propose a new project rule for **human review** instead of writing it directly. The draft is queued
+Propose a new rule for **human review** instead of writing it directly. The draft is queued
 as a `pending` suggestion in the console's **Suggestions** view; a user reviews, edits, approves
-(making it a binding project rule) or rejects it. **Prefer this over `save_rule` when the contract is
+(making it binding) or rejects it. **Prefer this over `save_rule` when the rule is
 inferred, uncertain, or needs user confirmation.** A pending suggestion does **not** bind sessions.
-- `project_path` (string, required) — absolute project path the suggestion targets.
+- `scope` (string, default `project`) — `user` | `project`. `user` proposes a **personal preference**
+  that follows the user across all projects (approval writes `~/.agent-control/rules/user/<id>.md`);
+  `project` proposes a project contract (approval writes `<project>/.agent-control/rules/<id>.md`).
+  `session` is rejected.
+- `project_path` (string) — **required when `scope` is `project`**; absolute project path. Omit for
+  `scope: "user"`.
 - `agent_id` (string, required) — recorded as the proposer for provenance.
 - `id` (string, required) — proposed stable rule id (kebab-case recommended).
 - `title` (string, required), `content` (string, required) — proposed Markdown body.
@@ -110,9 +115,18 @@ inferred, uncertain, or needs user confirmation.** A pending suggestion does **n
 - `topic` (string, optional), `tags` (string[], default `[]`).
 - `rationale` (string, optional but recommended) — why the rule is proposed (discovery context,
   evidence); shown to the human reviewer.
-- Returns: `suggestion` (the queued draft with `status: "pending"`, `id` UUID, `created_at`) and
-  `instruction`. Continue working under the currently applicable rules until a user approves it.
-- Errors (`isError`): empty project_path/id/title/content, or unknown kind.
+- Returns: `suggestion` (the queued draft with `status: "pending"`, `scope`, `id` UUID, `created_at`)
+  and `instruction`. Continue working under the currently applicable rules until a user approves it.
+- Errors (`isError`): empty id/title/content, project scope without `project_path`, or unknown
+  kind/scope.
+
+> **Where do environment notes go?** Facts about the user's working environment that should hold
+> across projects — e.g. "I run codex/kimi CLIs inside WSL; the repo lives in WSL, but Windows-native
+> tools are callable for compile/verify" — are **user-scope `constraint` rules**. Propose one with
+> `suggest_rule { scope: "user", kind: "constraint", ... }` (or record a confident one with
+> `save_rule { scope: "user", kind: "constraint" }`). User rules always load, are frozen into every
+> session snapshot, and are injected proactively via the ACP `constraint_briefing` and
+> `get_applicable_rules` — so the agent is told up front instead of needing a reminder mid-task.
 
 ### list_suggestions
 List rule suggestions submitted by agents; check whether your proposals were reviewed.
@@ -182,6 +196,16 @@ list_suggestions { "project_path": "/abs/repo", "status": "pending" }
 // -> { "suggestions": [...], "count": 1, "pending_count": 1 }
 // A user approves it in the console (Suggestions view); it then becomes a binding project rule
 // and appears here with status "approved" + approved_rule_id.
+
+// 9. propose a PERSONAL PREFERENCE / environment note for human review (user scope, no project_path)
+suggest_rule { "scope": "user", "agent_id": "codex-cli", "id": "wsl-env",
+  "title": "Agents run inside WSL",
+  "content": "The repo lives in WSL; compile/verify there, but Windows-native tools are callable when needed.",
+  "kind": "constraint", "rationale": "Agent kept needing reminding it was in WSL during build verification." }
+// -> { "suggestion": { "id": "UUID", "status": "pending", "scope": "user", ... }, "instruction": "..." }
+list_suggestions { "status": "pending" }   // unfiltered queue includes the user-scope proposal
+// On approval it becomes a user rule (~/.agent-control/rules/user/wsl-env.md) that applies across
+// all projects and is injected into every future session briefing.
 ```
 
 A partial `acknowledge_rules` (omitting a snapshot rule) is flagged in the report — acknowledge

@@ -526,6 +526,10 @@ impl std::fmt::Display for SuggestionStatus {
 pub struct RuleSuggestion {
     pub id: Uuid,
     pub project_path: PathBuf,
+    /// Whether approval writes a personal preference (user) or a project contract (project).
+    /// `project_path` is empty for user-scope suggestions.
+    #[serde(default = "default_suggestion_scope")]
+    pub scope: Scope,
     pub agent_id: String,
     pub rule_id: String,
     pub title: String,
@@ -546,6 +550,10 @@ pub struct RuleSuggestion {
     pub review_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_rule_id: Option<String>,
+}
+
+fn default_suggestion_scope() -> Scope {
+    Scope::Project
 }
 
 /// Optional human edits applied when approving a suggestion. `None` fields keep the agent's draft.

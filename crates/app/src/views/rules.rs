@@ -3,7 +3,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, Selectable, Sizable, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -17,7 +17,12 @@ impl Console {
         let bg = cx.theme().background;
         let muted_bg = cx.theme().muted;
 
-        let tab = self.rules_tab;
+        let tab = if self.nav == Nav::Preferences {
+            Scope::User
+        } else {
+            Scope::Project
+        };
+        self.rules_tab = tab;
         let visible_count = self.rules.iter().filter(|r| r.scope == tab).count();
         let project_blocked = tab == Scope::Project && self.current_project().is_none();
 
@@ -193,88 +198,54 @@ impl Console {
                 .into_any_element()
         };
 
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .p_4()
-            .gap_3()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("rules-tab-personal")
-                            .label(self.t("rules.personal"))
-                            .ghost()
-                            .small()
-                            .selected(tab == Scope::User)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.rules_tab = Scope::User;
-                                this.clear_rule_editor(window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("rules-tab-project")
-                            .label(self.t("rules.project"))
-                            .ghost()
-                            .small()
-                            .selected(tab == Scope::Project)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.rules_tab = Scope::Project;
-                                this.clear_rule_editor(window, cx);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .w(px(320.))
-                            .h_full()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(ui::section_label(cx, self.t("rules.title")))
-                                    .child(Tag::secondary().child(visible_count.to_string())),
+        v_flex().flex_1().min_h_0().w_full().p_4().gap_3().child(
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .gap_3()
+                .child(
+                    v_flex()
+                        .w(px(320.))
+                        .h_full()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .child(ui::section_label(cx, self.t("rules.title")))
+                                .child(Tag::secondary().child(visible_count.to_string())),
+                        )
+                        .child(if visible_count == 0 {
+                            ui::empty_state(
+                                cx,
+                                IconName::BookOpen,
+                                self.t("rules.title"),
+                                tab_desc.clone(),
                             )
-                            .child(if visible_count == 0 {
-                                ui::empty_state(
-                                    cx,
-                                    IconName::BookOpen,
-                                    self.t("rules.title"),
-                                    tab_desc.clone(),
-                                )
+                            .into_any_element()
+                        } else {
+                            v_flex()
+                                .flex_1()
+                                .min_h_0()
+                                .gap_2()
+                                .id("rules-list")
+                                .overflow_y_scroll()
+                                .children(rule_rows)
                                 .into_any_element()
-                            } else {
-                                v_flex()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .gap_2()
-                                    .id("rules-list")
-                                    .overflow_y_scroll()
-                                    .children(rule_rows)
-                                    .into_any_element()
-                            }),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .gap_3()
-                            .id("rules-editor")
-                            .overflow_y_scroll()
-                            .child(ui::section_label(cx, self.t("rules.editor")))
-                            .child(div().text_sm().text_color(muted).child(tab_desc))
-                            .child(editor_body),
-                    ),
-            )
+                        }),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .gap_3()
+                        .id("rules-editor")
+                        .overflow_y_scroll()
+                        .child(ui::section_label(cx, self.t("rules.editor")))
+                        .child(div().text_sm().text_color(muted).child(tab_desc))
+                        .child(editor_body),
+                ),
+        )
     }
 }

@@ -15,7 +15,9 @@ impl Console {
         let muted = cx.theme().muted_foreground;
         let bg = cx.theme().background;
 
-        let mcp_status = if self.mcp_running {
+        let mcp_status = if self.mcp_running && self.mcp_external {
+            Tag::success().child(self.t("mcp.daemon"))
+        } else if self.mcp_running {
             Tag::success().child(self.t("mcp.running"))
         } else {
             Tag::danger().child(self.t("mcp.stopped"))
@@ -90,6 +92,10 @@ impl Console {
             (
                 self.t("set.path.bundles"),
                 layout.bundles_dir().display().to_string(),
+            ),
+            (
+                self.t("set.path.logs"),
+                layout.logs_dir().display().to_string(),
             ),
         ];
         let path_rows = paths.iter().map(|(label, value)| {

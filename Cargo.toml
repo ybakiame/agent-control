@@ -38,6 +38,7 @@ regex = "1"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 rmcp = { version = "3.9", default-features = false }
 agent-client-protocol = { version = "5.0", default-features = false }

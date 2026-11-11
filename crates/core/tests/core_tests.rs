@@ -470,6 +470,117 @@ fn init_project_contracts_scaffolds_non_binding_examples() {
     assert_eq!(rules[0].kind, RuleKind::Contract);
 }
 
+fn scaffold_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn read_marker(project: &std::path::Path) -> serde_json::Value {
+    let path = project.join(".agent-control/.scaffold.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn init_project_contracts_preserves_user_edited_scaffold() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store.init_project_contracts(project.path()).unwrap();
+
+    let guide = project.path().join(".agent-control/README.md");
+    let edited = format!(
+        "{}\n\nMy custom note.",
+        std::fs::read_to_string(&guide).unwrap()
+    );
+    std::fs::write(&guide, &edited).unwrap();
+
+    store.init_project_contracts(project.path()).unwrap();
+    assert_eq!(std::fs::read_to_string(&guide).unwrap(), edited);
+    // The edited file is no longer managed, so future upgrades never clobber it.
+    assert!(
+        read_marker(project.path())["files"]
+            .get("README.md")
+            .is_none()
+    );
+}
+
+#[test]
+fn init_project_contracts_migrates_untouched_scaffold() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store.init_project_contracts(project.path()).unwrap();
+
+    let guide = project.path().join(".agent-control/README.md");
+    let marker_path = project.path().join(".agent-control/.scaffold.json");
+
+    // Simulate an older template we wrote that the user never touched: file content and the
+    // recorded hash agree, but both differ from the current template.
+    let old = "# old guide\n";
+    std::fs::write(&guide, old).unwrap();
+    let mut marker = read_marker(project.path());
+    marker["files"]["README.md"] = serde_json::Value::String(scaffold_sha256(old.as_bytes()));
+    std::fs::write(&marker_path, serde_json::to_string(&marker).unwrap()).unwrap();
+
+    store.init_project_contracts(project.path()).unwrap();
+    let migrated = std::fs::read_to_string(&guide).unwrap();
+    assert_ne!(migrated, old);
+    assert!(migrated.contains("项目契约"));
+    assert_eq!(
+        read_marker(project.path())["files"]["README.md"]
+            .as_str()
+            .unwrap(),
+        scaffold_sha256(migrated.as_bytes())
+    );
+}
+
+#[test]
+fn init_project_contracts_adopts_legacy_unmodified_scaffold() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store.init_project_contracts(project.path()).unwrap();
+
+    let guide = project.path().join(".agent-control/README.md");
+    let current = std::fs::read_to_string(&guide).unwrap();
+    // Legacy project: content matches the current template but there is no marker yet.
+    std::fs::remove_file(project.path().join(".agent-control/.scaffold.json")).unwrap();
+
+    store.init_project_contracts(project.path()).unwrap();
+    assert_eq!(std::fs::read_to_string(&guide).unwrap(), current);
+    assert_eq!(
+        read_marker(project.path())["files"]["README.md"]
+            .as_str()
+            .unwrap(),
+        scaffold_sha256(current.as_bytes())
+    );
+}
+
+#[test]
+fn init_project_contracts_preserves_legacy_modified_scaffold() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store.init_project_contracts(project.path()).unwrap();
+
+    let guide = project.path().join(".agent-control/README.md");
+    std::fs::write(&guide, "# hand written guide\n").unwrap();
+    std::fs::remove_file(project.path().join(".agent-control/.scaffold.json")).unwrap();
+
+    store.init_project_contracts(project.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&guide).unwrap(),
+        "# hand written guide\n"
+    );
+    assert!(
+        read_marker(project.path())["files"]
+            .get("README.md")
+            .is_none()
+    );
+}
+
 fn make_suggestion(
     project: &std::path::Path,
     rule_id: &str,
@@ -481,6 +592,7 @@ fn make_suggestion(
         "isAsc accepts bool or string",
         "Upstream API isAsc may receive bool or string; normalize before calling.",
         RuleKind::Contract,
+        Scope::Project,
     );
     draft.rationale = Some("Discovered while integrating the upstream API.".into());
     draft.tags = vec!["api".into()];
@@ -567,6 +679,51 @@ fn suggestion_reject_writes_no_rule() {
             .approve_suggestion(submitted.id, SuggestionEdits::default(), None)
             .is_err()
     );
+}
+
+#[test]
+fn user_suggestion_submit_approve_writes_user_rule() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let draft = agent_control_core::store::new_suggestion(
+        std::path::Path::new(""),
+        "claude-code",
+        "wsl-env",
+        "Agents run inside WSL",
+        "Harnesses run in WSL on Windows; Windows-native tools are reachable via interop.",
+        RuleKind::Constraint,
+        Scope::User,
+    );
+    let submitted = store.submit_suggestion(draft).unwrap();
+    assert_eq!(submitted.scope, Scope::User);
+    assert!(submitted.project_path.as_os_str().is_empty());
+    assert!(store.load_rules(None).unwrap().is_empty());
+
+    let (reviewed, saved, path) = store
+        .approve_suggestion(submitted.id, SuggestionEdits::default(), None)
+        .unwrap();
+    assert_eq!(reviewed.status, SuggestionStatus::Approved);
+    assert_eq!(saved.scope, Scope::User);
+    assert!(path.starts_with(store.layout.user_rules_dir()));
+    assert!(
+        store
+            .load_rules(None)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == "wsl-env" && r.scope == Scope::User)
+    );
+    // A user-scope suggestion is global: a project filter must not return it.
+    assert!(
+        store
+            .list_suggestions(Some(project.path()), None)
+            .unwrap()
+            .is_empty()
+    );
+    let all = store.list_suggestions(None, None).unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].scope, Scope::User);
 }
 
 #[test]

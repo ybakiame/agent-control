@@ -194,8 +194,14 @@ pub struct SaveRuleRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SuggestRuleRequest {
-    /// Absolute path of the project this suggestion targets
-    pub project_path: String,
+    /// Absolute path of the project this suggestion targets; required when scope=project,
+    /// ignored when scope=user
+    #[serde(default)]
+    pub project_path: Option<String>,
+    /// Scope: user | project. Defaults to project. user = a personal preference that follows the
+    /// user across projects (reviewed in the console Preferences/Suggestions flow).
+    #[serde(default)]
+    pub scope: Option<String>,
     /// Identifier of the calling agent/harness; recorded as the proposer for provenance
     pub agent_id: String,
     /// Proposed stable rule id (kebab-case recommended)
@@ -517,19 +523,38 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Propose a new project rule for HUMAN REVIEW instead of writing it directly. The draft is queued as a pending suggestion in the console; a user reviews, edits, approves (making it a binding project rule) or rejects it. Prefer this over save_rule when the contract is inferred, uncertain, or needs user confirmation. Include a rationale explaining why the rule is proposed."
+        description = "Propose a new rule for HUMAN REVIEW instead of writing it directly. The draft is queued as a pending suggestion in the console; a user reviews, edits, approves (making it binding) or rejects it. scope=project (default) targets a project contract and requires project_path; scope=user proposes a personal preference that follows the user across projects (no project_path needed). Prefer this over save_rule when the rule is inferred, uncertain, or needs user confirmation. Include a rationale explaining why the rule is proposed."
     )]
     async fn suggest_rule(
         &self,
         Parameters(req): Parameters<SuggestRuleRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        let scope: Scope = serde_json::from_value(serde_json::Value::String(
+            req.scope.clone().unwrap_or_else(|| "project".into()),
+        ))
+        .map_err(|_| {
+            ErrorData::invalid_params(
+                format!(
+                    "unknown scope '{}'; use user|project",
+                    req.scope.clone().unwrap_or_default()
+                ),
+                None,
+            )
+        })?;
+        if scope == Scope::Session {
+            return Err(ErrorData::invalid_params(
+                "session scope cannot be suggested; use user or project",
+                None,
+            ));
+        }
+        let project_path = req.project_path.clone().unwrap_or_default();
         if req.id.trim().is_empty()
             || req.title.trim().is_empty()
             || req.content.trim().is_empty()
-            || req.project_path.trim().is_empty()
+            || (scope == Scope::Project && project_path.trim().is_empty())
         {
             return Err(ErrorData::invalid_params(
-                "project_path, id, title and content are required and cannot be empty",
+                "id, title and content are required; project_path is also required for project scope",
                 None,
             ));
         }
@@ -546,12 +571,13 @@ impl ControlServer {
             )
         })?;
         let mut draft = agent_control_core::store::new_suggestion(
-            &PathBuf::from(req.project_path.trim()),
+            &PathBuf::from(project_path.trim()),
             &req.agent_id,
             req.id.trim(),
             req.title.trim(),
             &req.content,
             kind,
+            scope,
         );
         draft.topic = req.topic.clone().filter(|t| !t.trim().is_empty());
         draft.tags = req.tags.clone();
@@ -766,6 +792,7 @@ pub async fn serve_http(
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
+    use std::net::SocketAddr;
 
     let factory_store = store.clone();
     let service = StreamableHttpService::new(
@@ -773,11 +800,31 @@ pub async fn serve_http(
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default().with_cancellation_token(shutdown.clone()),
     );
-    let app = axum::Router::new().nest_service("/mcp", service);
+    // Loopback-only shutdown so the console (or a script) can stop a background daemon it does not
+    // own as a child process. Rejects non-loopback peers in case the server is bound to 0.0.0.0.
+    let shutdown_token = shutdown.clone();
+    let app = axum::Router::new().nest_service("/mcp", service).route(
+        "/shutdown",
+        axum::routing::post(
+            move |axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>| {
+                let token = shutdown_token.clone();
+                async move {
+                    if !addr.ip().is_loopback() {
+                        return (axum::http::StatusCode::FORBIDDEN, "loopback only");
+                    }
+                    token.cancel();
+                    (axum::http::StatusCode::OK, "shutting down")
+                }
+            },
+        ),
+    );
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "MCP Streamable HTTP server listening at http://{bind}/mcp");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move { shutdown.cancelled_owned().await })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { shutdown.cancelled_owned().await })
+    .await?;
     Ok(())
 }

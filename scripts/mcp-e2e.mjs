@@ -284,6 +284,49 @@ try {
     await toolRejects("list_suggestions", { status: "bogus" }),
   );
 
+  // suggest_rule scope=user: an agent proposes a personal preference (e.g. an environment note)
+  // for human review; approval writes a user-scope rule that follows the user across projects.
+  const userSuggested = await tool("suggest_rule", {
+    scope: "user",
+    agent_id: "codex-cli",
+    id: "wsl-env",
+    title: "Agents run inside WSL",
+    content: "The project lives in WSL; compile/verify there, but Windows-native tools are callable when needed.",
+    kind: "constraint",
+    rationale: "Agent repeatedly needed reminding it was in WSL during build verification.",
+  });
+  check(
+    "suggest_rule scope=user queues a pending user suggestion",
+    userSuggested.suggestion?.status === "pending" && userSuggested.suggestion?.scope === "user",
+    userSuggested,
+  );
+  const userQueue = await tool("list_suggestions", { status: "pending" });
+  check(
+    "user suggestion appears in the unfiltered queue with scope=user",
+    userQueue.suggestions?.some((s) => s.rule_id === "wsl-env" && s.scope === "user"),
+    userQueue,
+  );
+  const projQueueAfterUser = await tool("list_suggestions", { project_path: projectDir, status: "pending" });
+  check(
+    "user suggestion is excluded from the project-filtered queue",
+    !projQueueAfterUser.suggestions?.some((s) => s.rule_id === "wsl-env"),
+    projQueueAfterUser,
+  );
+  const userRulesBefore = await tool("list_rules", {});
+  check(
+    "user suggestion does not bind before approval",
+    !userRulesBefore.rules?.some((r) => r.id === "wsl-env"),
+    userRulesBefore,
+  );
+  check(
+    "suggest_rule rejects unknown scope",
+    await toolRejects("suggest_rule", { scope: "bogus", id: "x", title: "x", content: "x", agent_id: "a" }),
+  );
+  check(
+    "suggest_rule rejects session scope",
+    await toolRejects("suggest_rule", { scope: "session", id: "x", title: "x", content: "x", agent_id: "a" }),
+  );
+
   const resources = await rpc("resources/list", {});
   check("resources/list works", Array.isArray(resources.result?.resources), resources);
   const prompts = await rpc("prompts/list", {});

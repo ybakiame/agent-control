@@ -1,10 +1,12 @@
 pub mod db;
 pub mod files;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::DataLayout;
@@ -498,30 +500,64 @@ impl Store {
     }
 
     /// Scaffold a project's contract directory plus a bilingual guide and copy-ready rule
-    /// templates. Idempotent: existing rule files, guide, and examples are preserved. Returns the
-    /// rules directory.
+    /// templates, then migrate previously scaffolded files to the current templates.
+    ///
+    /// Migration is hash-guarded by `.scaffold.json`: a generated file is refreshed only when its
+    /// on-disk content still matches the hash we recorded when we wrote it (i.e. the user never
+    /// edited it). User-modified files are always preserved. Legacy scaffolds with no marker are
+    /// adopted only when their content already equals the current template. Returns the rules dir.
     pub fn init_project_contracts(&self, path: &Path) -> Result<PathBuf> {
         let rules_dir = DataLayout::project_rules_dir(path);
         std::fs::create_dir_all(&rules_dir)
             .with_context(|| format!("creating project rules dir {}", rules_dir.display()))?;
-        let guide = DataLayout::project_config_dir(path).join("README.md");
-        if !guide.exists() {
-            std::fs::write(&guide, PROJECT_GUIDE)
-                .with_context(|| format!("writing project guide {}", guide.display()))?;
-        }
+        let config_dir = DataLayout::project_config_dir(path);
         let examples_dir = DataLayout::project_examples_dir(path);
         std::fs::create_dir_all(&examples_dir)
             .with_context(|| format!("creating project examples dir {}", examples_dir.display()))?;
-        for (name, template) in [
-            ("contract-example.md", EXAMPLE_CONTRACT),
-            ("constraint-example.md", EXAMPLE_CONSTRAINT),
+
+        let marker_path = DataLayout::project_scaffold_marker(path);
+        let mut marker = read_scaffold_marker(&marker_path);
+
+        for (rel, template) in [
+            ("README.md", PROJECT_GUIDE),
+            ("examples/contract-example.md", EXAMPLE_CONTRACT),
+            ("examples/constraint-example.md", EXAMPLE_CONSTRAINT),
         ] {
-            let file = examples_dir.join(name);
+            let file = config_dir.join(rel);
+            let new_hash = sha256_hex(template.as_bytes());
             if !file.exists() {
                 std::fs::write(&file, template)
-                    .with_context(|| format!("writing example {}", file.display()))?;
+                    .with_context(|| format!("writing scaffold file {}", file.display()))?;
+                marker.files.insert(rel.to_string(), new_hash);
+                continue;
+            }
+            let current_hash = sha256_hex(
+                &std::fs::read(&file)
+                    .with_context(|| format!("reading scaffold file {}", file.display()))?,
+            );
+            match marker.files.get(rel) {
+                // We wrote it and it is untouched: refresh when the template has changed.
+                Some(recorded) if *recorded == current_hash => {
+                    if current_hash != new_hash {
+                        std::fs::write(&file, template).with_context(|| {
+                            format!("migrating scaffold file {}", file.display())
+                        })?;
+                    }
+                    marker.files.insert(rel.to_string(), new_hash);
+                }
+                // Legacy unmodified scaffold (no marker yet): adopt it for future upgrades.
+                None if current_hash == new_hash => {
+                    marker.files.insert(rel.to_string(), new_hash);
+                }
+                // User-edited or unknown older content: preserve, stop managing it.
+                _ => {
+                    marker.files.remove(rel);
+                }
             }
         }
+
+        marker.version = TEMPLATE_VERSION;
+        write_scaffold_marker(&marker_path, &marker)?;
         Ok(rules_dir)
     }
 
@@ -537,7 +573,13 @@ impl Store {
         if suggestion.content.trim().is_empty() {
             bail!("suggestion content cannot be empty");
         }
-        suggestion.project_path = normalize_project_path(&suggestion.project_path)?;
+        match suggestion.scope {
+            Scope::User => suggestion.project_path = PathBuf::new(),
+            Scope::Project => {
+                suggestion.project_path = normalize_project_path(&suggestion.project_path)?;
+            }
+            Scope::Session => bail!("session scope cannot be suggested as a durable rule"),
+        }
         let now = Utc::now();
         suggestion.id = Uuid::new_v4();
         suggestion.status = SuggestionStatus::Pending;
@@ -610,13 +652,23 @@ impl Store {
             &title,
             &content,
             kind,
-            Scope::Project,
+            suggestion.scope,
             Some(suggestion.agent_id.clone()),
         );
         rule.topic = edits.topic.or_else(|| suggestion.topic.clone());
         rule.tags = edits.tags.unwrap_or_else(|| suggestion.tags.clone());
         rule.source.origin = Some("agent-suggestion".to_string());
-        let (saved, path) = self.upsert_rule(&rule, Some(&suggestion.project_path))?;
+        let project_path = match suggestion.scope {
+            Scope::User => None,
+            Scope::Project => {
+                if suggestion.project_path.as_os_str().is_empty() {
+                    bail!("project-scope suggestion has no project path");
+                }
+                Some(suggestion.project_path.clone())
+            }
+            Scope::Session => bail!("session scope cannot be approved as a durable rule"),
+        };
+        let (saved, path) = self.upsert_rule(&rule, project_path.as_deref())?;
 
         let now = Utc::now();
         suggestion.status = SuggestionStatus::Approved;
@@ -731,11 +783,13 @@ pub fn new_suggestion(
     title: &str,
     content: &str,
     kind: RuleKind,
+    scope: Scope,
 ) -> RuleSuggestion {
     let now = Utc::now();
     RuleSuggestion {
         id: Uuid::nil(),
         project_path: project_path.to_path_buf(),
+        scope,
         agent_id: agent_id.to_string(),
         rule_id: rule_id.to_string(),
         title: title.to_string(),
@@ -784,6 +838,47 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
 #[cfg(not(windows))]
 fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     path
+}
+
+/// Bump when the scaffold templates below change so untouched projects migrate on next init.
+const TEMPLATE_VERSION: u32 = 1;
+
+/// Records the template version and the sha256 of each generated file's content at the time we
+/// wrote it. A file is only auto-refreshed while its on-disk hash still equals the recorded one.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ScaffoldMarker {
+    version: u32,
+    files: BTreeMap<String, String>,
+}
+
+impl Default for ScaffoldMarker {
+    fn default() -> Self {
+        Self {
+            version: TEMPLATE_VERSION,
+            files: BTreeMap::new(),
+        }
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// A missing or corrupt marker is treated as "no prior scaffold" (legacy): existing files are
+/// preserved unless they already match the current template.
+fn read_scaffold_marker(path: &Path) -> ScaffoldMarker {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_scaffold_marker(path: &Path, marker: &ScaffoldMarker) -> Result<()> {
+    let text = serde_json::to_string_pretty(marker).context("serializing scaffold marker")?;
+    std::fs::write(path, text)
+        .with_context(|| format!("writing scaffold marker {}", path.display()))
 }
 
 const PROJECT_GUIDE: &str = "\

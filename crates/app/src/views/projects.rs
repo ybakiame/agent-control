@@ -33,13 +33,20 @@ impl Console {
                             .gap_2()
                             .items_center()
                             .pl(px(depth as f32 * 14.))
-                            .child(div().w(px(12.)).text_xs().text_color(muted).child(
-                                if is_folder {
-                                    if expanded { "▾" } else { "▸" }
-                                } else {
-                                    ""
-                                },
-                            ))
+                            .child(
+                                h_flex()
+                                    .size(px(22.))
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(muted)
+                                    .child(if is_folder {
+                                        if expanded { "▾" } else { "▸" }
+                                    } else {
+                                        ""
+                                    }),
+                            )
                             .child(div().text_sm().child(label.to_string())),
                     )
                     .on_click(move |_, window, cx| {
