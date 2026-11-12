@@ -16,6 +16,26 @@ agents touch one codebase:
 它不只是存储用户喜欢什么，还能说明：这个 Agent 为什么使用了这条规则？规则来自用户还是项目？
 有没有与当前代码冲突？任务交给另一个 Harness 后，是否仍然遵守同样的约束？
 
+**Why not just AGENTS.md, Agent Skills, or per-agent memory?** Those are *delivery formats* — an
+agent reads them if it chooses. Agent Control is a *resolution layer* over one rule store that
+**compiles into** those formats and adds what they lack: it decides **which** rules bind **this**
+agent in **this** context (file paths, languages, task tags), records **why** each rule won, was
+superseded, filtered out, or disabled (provenance), checks rules against **real repo state** and
+against each other (conflict detection), and freezes the binding set into a snapshot that stays
+binding **across harnesses**. The resolved contracts reach agents three ways: **exported** into the
+project's `AGENTS.md` / `CLAUDE.md` / `.cursor/rules` (a managed block, so hand-written prose is
+preserved), **pushed** into a Claude Code session at start via a SessionStart hook, or **queried**
+over MCP / injected over ACP. The differentiator is **traceable provenance + conflict detection + a
+frozen cross-harness snapshot**, delivered into the tools agents already read.
+
+与 AGENTS.md / Agent Skills / 各家 memory 的区别：那些是**交付格式**——agent 愿意读才读。
+Agent Control 是同一规则库之上的**解析层**，会**编译进**这些格式并补足它们缺失的能力：按上下文判定
+哪些规则生效、记录每条规则为何胜出 / 被取代 / 被过滤 / 被禁用（溯源）、对照**真实仓库状态**与彼此
+检测冲突，并把生效集冻结成跨 harness 仍然绑定的快照。解析后的契约通过三种方式触达 agent：**导出**进
+项目的 `AGENTS.md` / `CLAUDE.md` / `.cursor/rules`（托管块，保留手写内容）、在 Claude Code 会话开始时
+经 SessionStart hook **主动推送**、或经 MCP **查询** / ACP 注入。卖点是**可追溯溯源 + 冲突检测 +
+跨 harness 冻结快照**，并交付进 agent 本就会读取的工具。
+
 ---
 
 ## The four layers / 四层架构
@@ -24,8 +44,15 @@ agents touch one codebase:
 |---|-------|----|-----------|
 | 1 | Personal preferences | 个人偏好 | User-scope rules that follow you across projects |
 | 2 | Project contracts | 项目契约 | Project-scope rules that bind every agent working in a repo |
-| 3 | Cross-harness continuity | 跨 harness 连续性 | Frozen constraint snapshots + signed handoff bundles |
+| 3 | Cross-harness continuity | 跨 harness 连续性 | Frozen constraint snapshots + hash-sealed handoff bundles |
 | 4 | Verifiable evidence | 可验证证据 | SHA-256 hash chain; tampering and gaps are detectable |
+
+> **What "verifiable" means here.** The evidence chain and handoff-bundle hashes are SHA-256
+> *integrity* seals: they prove a record was not altered after it was written, and detect gaps or
+> reordering. They are **not cryptographic signatures** — there is no signer identity or key, and on
+> a single machine with one writer they cannot prove the reporting agent was truthful. Independent
+> verification comes from `code_checks`, which read the *actual* repo files instead of trusting the
+> agent's report.
 
 ## Highlights
 
@@ -39,16 +66,22 @@ agents touch one codebase:
   under `<project>/.agent-control/`. A **tree view** organizes each project's contracts, sessions
   and conflicts; the header chip shows the **current project** that user- and project-scope
   actions bind to.
-- **Clear user / project separation.** The Rules view has **Personal** and **Project** tabs.
-  Personal rules follow you across projects; project contracts are written into the *current*
-  project's repo (no free-text path juggling) and are meant to be committed and reviewed.
+- **Context-aware rule resolution.** The engine filters by `applies_to` (agents, file paths,
+  languages, task tags), resolves competition by scope → priority → recency, and flags conflicts
+  both rule-vs-rule and **rule-vs-code**: `code_checks` independently read real config files
+  (JSON/TOML/YAML/INI/.editorconfig) and compare expected vs actual values. A rule can be paused with
+  an **enable/disable** toggle instead of being deleted.
+- **Clear user / project separation.** Scope is driven by the **sidebar nav**, not an in-view tab
+  toggle: **Preferences** (个人偏好) shows user-scope rules that follow you across projects, and
+  **Project Contracts** (项目契约) shows project-scope rules written into the *current* project's repo
+  (no free-text path juggling), meant to be committed and reviewed.
 - **Agent suggestions, human review.** Agents can propose rules with `suggest_rule` instead of
   writing them directly. Drafts land in a SQLite-backed review queue (the **Suggestions** view,
   with a pending-count badge in the sidebar). A user edits, **approves** (the draft becomes a
   binding project rule) or **rejects** it — keeping humans in the loop for inferred contracts.
 - **Bilingual UI (English / 简体中文)** with a runtime switcher in Settings; the choice is
   persisted to `<data root>/ui.json`.
-- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 15 tools plus
+- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 16 tools plus
   resources and prompts.
 - **ACP client / harness manager** (agent-client-protocol) that launches real agent CLIs,
   injects the constraint briefing as system prompt, wires the MCP endpoint, streams session
@@ -108,7 +141,8 @@ Recommended call order for a harness:
 
 `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`, `record_evidence`,
 `acknowledge_rules`, `get_session_context`, `export_handoff`, `import_handoff`,
-`verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`, `list_suggestions`.
+`verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`, `list_suggestions`,
+`export_native`.
 
 `save_rule` lets an agent **actively record** a discovered project contract (or personal
 preference) as a rule file: pass `id`, `title`, `content`, `agent_id`, and for project contracts
@@ -133,6 +167,52 @@ across projects — the right home for environment notes such as "I run my CLIs 
 Windows-native tools are callable for compile/verify". `list_suggestions` lets agents poll the review
 queue (`pending` / `approved` / `rejected`) and see the `approved_rule_id` once accepted.
 
+`export_native` **compiles the binding set into each harness's native entry point** so agents that
+never call MCP still inherit the contracts. Pass `project_path` (and optionally `include_user`).
+It writes a *managed block* — `<!-- agent-control:begin --> … <!-- agent-control:end -->` — into the
+project's `AGENTS.md`, `CLAUDE.md` and `.cursor/rules/agent-control.mdc`; with `include_user: true` it
+also writes personal preferences to the user-global `~/.claude/CLAUDE.md`. Only **enabled** rules are
+exported, everything **outside** the block is preserved (a hand-written `AGENTS.md` is safe), and
+re-export is **idempotent** (an up-to-date file is reported `unchanged` and not rewritten). The
+console exposes the same action as **Export to harnesses** in the Projects detail pane.
+
+## Native export & hooks / 原生导出与 hooks
+
+Rule files in `.agent-control/rules/` are the source of truth, but most agents read their own
+entry points (`AGENTS.md`, `CLAUDE.md`, `.cursor/rules`) rather than calling MCP. Agent Control
+bridges that gap with two delivery mechanisms:
+
+- **Native export (pull-friendly).** `export_native` / the **Export to harnesses** button renders the
+  enabled contracts into a managed block inside those files. The block is the management boundary:
+  re-export replaces only the block, so frontmatter and hand-written prose around it survive. The
+  Cursor target keeps its `---` frontmatter outside the block. This makes the contracts visible to
+  any agent that reads the file, with no MCP integration required.
+- **SessionStart hook (push).** [`scripts/agent-control-hook.mjs`](scripts/agent-control-hook.mjs) is
+  a dependency-free Node hook for Claude Code. At session start it calls `get_applicable_rules` over
+  the local MCP HTTP endpoint and injects a concise briefing (binding rules + conflicts) into the
+  session context via `hookSpecificOutput.additionalContext`. It is **read-only** and exits `0`
+  silently if the daemon is unreachable, so it never blocks a session. Wire it by adding a
+  `SessionStart` command hook to `.claude/settings.json` (the script header carries a copy-ready
+  snippet); point `AGENT_CONTROL_MCP_URL` at your endpoint if it is not the default
+  `http://127.0.0.1:9870/mcp`.
+
+> **Reach is not enforcement.** Export and the hook make rules *reach* the agent; they do not *force*
+> compliance — a cooperative agent still has to follow them. Independent verification comes from
+> `code_checks` (which read real repo files) and the evidence hash chain (which detects tampering /
+> gaps after the fact). Hard enforcement only exists where Agent Control mediates the action itself,
+> i.e. the ACP permission round-trip; it cannot compel an uncooperative agent running outside that
+> mediation.
+
+规则文件（`.agent-control/rules/`）是唯一事实来源，但多数 agent 读取自己的入口文件
+（`AGENTS.md`、`CLAUDE.md`、`.cursor/rules`）而非调用 MCP。Agent Control 用两种交付机制弥合：
+**原生导出**（`export_native` / 「导出到 harness」按钮）把启用的契约渲染进这些文件的**托管块**，
+块外内容与 Cursor frontmatter 均保留，重复导出幂等；**SessionStart hook**
+（`scripts/agent-control-hook.mjs`，无依赖 Node）在 Claude Code 会话开始时经本地 MCP HTTP 调用
+`get_applicable_rules`，把绑定规则与冲突摘要注入会话上下文，只读、守护进程不可达时静默退出 0、绝不阻塞会话。
+**触达不等于强制**：导出与 hook 让规则*触达* agent，但不*强制*遵守；独立校验来自 `code_checks`
+（读取真实仓库文件）与证据哈希链（事后检测篡改 / 缺口），硬性强制仅存在于 Agent Control 亲自中介动作之处
+（ACP 权限往返），无法强迫在该中介之外运行的不合作 agent。
+
 ## Projects & onboarding / 项目接入
 
 Project-level rules are organized **per project**, not by a free-text path. The workflow:
@@ -150,19 +230,21 @@ The left **tree** lists every registered project; expanding one reveals its **Co
 (project-scope rules), **Sessions**, and **Conflicts**. Clicking a node jumps to the matching
 view with that project activated. The right pane shows project metadata (path, created /
 last-opened, rule and session counts) and actions: **set current**, **reveal contracts folder**,
-**rename**, and **remove**. Removing a project only unregisters it — it never deletes repo files.
+**export to harnesses**, **rename**, and **remove**. Removing a project only unregisters it — it
+never deletes repo files.
 
 项目级规则以**项目**为单位组织，而非手填路径。在 **Projects** 视图点击 **Add project**，浏览选择
 仓库目录并命名；接入时会注册项目并在 `<project>/.agent-control/` 生成 `rules/` 目录、`examples/`
 模板目录（可复制的规则示例，不生效，复制进 `rules/` 即启用）与中英双语 `README.md` 契约指南
 （幂等，保留已有文件）。该项目随即成为**当前项目**（顶栏芯片显示），会话、
 项目级规则编辑、冲突消解都自动绑定到它。左侧**树**展开每个项目的契约 / 会话 / 冲突，点击节点跳转
-到对应视图；右侧提供设为当前、打开契约目录、重命名、移除（仅注销，不删除仓库文件）。
+到对应视图；右侧提供设为当前、打开契约目录、导出到 harness、重命名、移除（仅注销，不删除仓库文件）。
 
-**User vs project scope.** The Rules view splits into **Personal** (user-scope, stored in
-`~/.agent-control/rules/user/`, follows you everywhere) and **Project** (project-scope, stored in
-the current project's repo). With no current project, the Project tab shows guidance and a
-shortcut to Projects instead of an editor.
+**User vs project scope.** The same Rules editor is scoped by the sidebar nav: **Preferences**
+(个人偏好) edits user-scope rules (stored in `~/.agent-control/rules/user/`, follow you everywhere),
+and **Project Contracts** (项目契约) edits project-scope rules (stored in the current project's repo).
+With no current project, Project Contracts shows guidance and a shortcut to Projects instead of an
+editor.
 
 ## Suggestions review / 建议审核
 

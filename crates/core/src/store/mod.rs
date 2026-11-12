@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::config::DataLayout;
 use crate::engine::RuleEngine;
+use crate::export;
 use crate::model::{
     AgentRegistration, ConstraintSnapshot, EvidenceEntry, EvidenceKind, HandoffBundle,
     HandoffRecord, Project, ProvenanceRecord, QueryContext, Resolution, Rule, RuleKind,
@@ -592,6 +593,62 @@ impl Store {
         Ok(rules_dir)
     }
 
+    /// Compile the binding rule set into each harness's native entry point so agents that never
+    /// call MCP still inherit the contracts. Project contracts (enabled, project scope) are injected
+    /// as a managed block into the project's `AGENTS.md`, `CLAUDE.md` and
+    /// `.cursor/rules/agent-control.mdc`; when `include_user` is set, personal preferences (enabled,
+    /// user scope) go to the user-global `~/.claude/CLAUDE.md`. Everything outside the block markers
+    /// is preserved, so a hand-written `AGENTS.md` is safe to export into. Re-export is idempotent.
+    pub fn export_native(
+        &self,
+        project_path: &Path,
+        include_user: bool,
+    ) -> Result<export::ExportReport> {
+        let rules = self.load_rules(Some(project_path))?;
+        let project_rules: Vec<Rule> = rules
+            .iter()
+            .filter(|r| r.enabled && r.scope == Scope::Project)
+            .cloned()
+            .collect();
+        let user_rules: Vec<Rule> = rules
+            .iter()
+            .filter(|r| r.enabled && r.scope == Scope::User)
+            .cloned()
+            .collect();
+
+        let project_block =
+            export::wrap_block(&export::render_body(&project_rules, "Project contracts"));
+        let mut targets = Vec::new();
+        for path in [
+            DataLayout::project_agents_md(project_path),
+            DataLayout::project_claude_md(project_path),
+        ] {
+            targets.push(write_managed_block_file(&path, &project_block, "")?);
+        }
+        targets.push(write_managed_block_file(
+            &DataLayout::project_cursor_rule(project_path),
+            &project_block,
+            export::CURSOR_FRONTMATTER,
+        )?);
+
+        if include_user {
+            let user_block =
+                export::wrap_block(&export::render_body(&user_rules, "Personal preferences"));
+            targets.push(write_managed_block_file(
+                &DataLayout::claude_user_md()?,
+                &user_block,
+                "",
+            )?);
+        }
+
+        Ok(export::ExportReport {
+            project_path: project_path.to_path_buf(),
+            project_rules: project_rules.len(),
+            user_rules: user_rules.len(),
+            targets,
+        })
+    }
+
     /// Queue an agent-proposed rule for human review. The draft is stored in SQLite as `pending`;
     /// nothing is written to the project until a human approves it.
     pub fn submit_suggestion(&self, mut suggestion: RuleSuggestion) -> Result<RuleSuggestion> {
@@ -910,6 +967,49 @@ fn write_scaffold_marker(path: &Path, marker: &ScaffoldMarker) -> Result<()> {
     let text = serde_json::to_string_pretty(marker).context("serializing scaffold marker")?;
     std::fs::write(path, text)
         .with_context(|| format!("writing scaffold marker {}", path.display()))
+}
+
+/// Write `block` into `path` as a managed block, preserving everything outside the markers.
+/// `create_prefix` is prepended only when the file does not yet exist (e.g. Cursor frontmatter),
+/// never to an existing file. Returns created | updated | unchanged; an unchanged file is not
+/// rewritten, so re-exporting an up-to-date set is a no-op on disk.
+fn write_managed_block_file(
+    path: &Path,
+    block: &str,
+    create_prefix: &str,
+) -> Result<export::TargetOutcome> {
+    let existed = path.exists();
+    let existing = if existed {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("reading export target {}", path.display()))?
+    } else {
+        String::new()
+    };
+    let base = if existed {
+        existing.clone()
+    } else {
+        format!("{create_prefix}{existing}")
+    };
+    let new_content = export::upsert_managed_block(&base, block)?;
+    let action = if !existed {
+        "created"
+    } else if new_content == existing {
+        "unchanged"
+    } else {
+        "updated"
+    };
+    if action != "unchanged" {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+        std::fs::write(path, &new_content)
+            .with_context(|| format!("writing export target {}", path.display()))?;
+    }
+    Ok(export::TargetOutcome {
+        path: path.to_path_buf(),
+        action: action.to_string(),
+    })
 }
 
 const PROJECT_GUIDE: &str = "\

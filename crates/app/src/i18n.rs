@@ -550,6 +550,12 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("proj.set_current", "Set as current", "设为当前"),
     ("proj.rename", "Rename", "重命名"),
     ("proj.reveal", "Open contracts folder", "打开契约目录"),
+    ("proj.export", "Export to harnesses", "导出到 harness"),
+    (
+        "proj.export_hint",
+        "Compiles enabled project contracts into a managed block in AGENTS.md, CLAUDE.md and .cursor/rules so agents inherit them without calling MCP. Content outside the block is preserved; re-export is idempotent.",
+        "将启用的项目契约编译进 AGENTS.md、CLAUDE.md 与 .cursor/rules 的托管块，让代理无需调用 MCP 即可继承。块外内容会保留，重复导出幂等。",
+    ),
     ("proj.remove", "Remove", "移除"),
     (
         "proj.remove_hint",
@@ -641,6 +647,12 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "项目已重命名为 '{}'",
     ),
     ("log.current_project", "current project: {}", "当前项目：{}"),
+    (
+        "log.export_done",
+        "exported {} project contract(s) to native entry points → {}",
+        "已导出 {} 条项目契约到原生入口 → {}",
+    ),
+    ("log.export_failed", "export failed: {}", "导出失败：{}"),
     (
         "log.scaffold_failed",
         "contract scaffold update failed: {}",

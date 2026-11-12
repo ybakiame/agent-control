@@ -2,7 +2,7 @@
 // and exercises the full protocol lifecycle (rules -> session -> evidence -> handoff).
 // Usage: node scripts/mcp-e2e.mjs [path-to-agent-control-mcp binary]
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -119,11 +119,12 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  check("tools/list has 15 tools", names.length === 15, names);
+  check("tools/list has 16 tools", names.length === 16, names);
   check("save_rule registered", names.includes("save_rule"), names);
   check("set_rule_enabled registered", names.includes("set_rule_enabled"), names);
   check("suggest_rule registered", names.includes("suggest_rule"), names);
   check("list_suggestions registered", names.includes("list_suggestions"), names);
+  check("export_native registered", names.includes("export_native"), names);
 
   const rules = await tool("list_rules", { project_path: projectDir });
   check("list_rules returns user + project rule", rules.rules?.length === 2, rules);
@@ -381,6 +382,47 @@ try {
   check(
     "suggest_rule rejects session scope",
     await toolRejects("suggest_rule", { scope: "session", id: "x", title: "x", content: "x", agent_id: "a" }),
+  );
+
+  // export_native: compile binding contracts into native harness entry points as a managed block,
+  // preserving hand-written prose outside it. include_user=false keeps every write inside the
+  // throwaway project dir (never the real ~/.claude/CLAUDE.md).
+  const agentsPath = join(projectDir, "AGENTS.md");
+  writeFileSync(agentsPath, "# Hand-written repo guide\n\nKeep this prose.\n");
+  const exported = await tool("export_native", { project_path: projectDir, include_user: false });
+  check(
+    "export_native reports enabled project rules and 3 targets",
+    exported.report?.project_rules === 2 && exported.report?.targets?.length === 3,
+    exported,
+  );
+  const agentsText = readFileSync(agentsPath, "utf8");
+  check(
+    "export_native preserves prose and injects the managed block with both contracts",
+    agentsText.startsWith("# Hand-written repo guide\n\nKeep this prose.\n") &&
+      agentsText.includes("agent-control:begin") &&
+      agentsText.includes("use-tabs") &&
+      agentsText.includes("api-isasc"),
+    agentsText.slice(0, 200),
+  );
+  const cursorPath = join(projectDir, ".cursor", "rules", "agent-control.mdc");
+  check(
+    "export_native writes a Cursor rule with frontmatter outside the block",
+    existsSync(cursorPath) && readFileSync(cursorPath, "utf8").startsWith("---\n"),
+    cursorPath,
+  );
+  check(
+    "export_native writes project CLAUDE.md",
+    existsSync(join(projectDir, "CLAUDE.md")),
+  );
+  const reexported = await tool("export_native", { project_path: projectDir, include_user: false });
+  check(
+    "export_native re-export is idempotent (all targets unchanged)",
+    reexported.report?.targets?.every((t) => t.action === "unchanged"),
+    reexported,
+  );
+  check(
+    "export_native rejects an empty project_path",
+    await toolRejects("export_native", { project_path: "  ", include_user: false }),
   );
 
   const resources = await rpc("resources/list", {});

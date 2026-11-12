@@ -83,7 +83,7 @@ try {
   await rpc("notifications/initialized", {}, true);
 
   const tools = await rpc("tools/list", {});
-  check("tools/list over HTTP", tools.result?.tools?.length === 15, tools);
+  check("tools/list over HTTP", tools.result?.tools?.length === 16, tools);
   check(
     "save_rule available over HTTP",
     tools.result?.tools?.some((t) => t.name === "save_rule"),
@@ -99,6 +99,11 @@ try {
     tools.result?.tools?.some((t) => t.name === "suggest_rule"),
     tools,
   );
+  check(
+    "export_native available over HTTP",
+    tools.result?.tools?.some((t) => t.name === "export_native"),
+    tools,
+  );
 
   const res = await rpc("tools/call", {
     name: "create_session",
@@ -106,6 +111,18 @@ try {
   });
   const data = res.result?.structuredContent ?? JSON.parse(res.result?.content?.[0]?.text ?? "{}");
   check("create_session over HTTP", !!data.session_id, res);
+
+  // export_native over HTTP against the throwaway root (include_user=false: no writes outside it).
+  const exp = await rpc("tools/call", {
+    name: "export_native",
+    arguments: { project_path: root, include_user: false },
+  });
+  const expData = exp.result?.structuredContent ?? JSON.parse(exp.result?.content?.[0]?.text ?? "{}");
+  check(
+    "export_native over HTTP writes 3 native targets",
+    expData.report?.targets?.length === 3,
+    exp,
+  );
 } catch (e) {
   failures++;
   console.error("ERROR:", e.message);

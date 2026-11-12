@@ -1198,6 +1198,36 @@ impl Console {
         cx.reveal_path(&rules_dir);
     }
 
+    /// Compile the selected project's enabled contracts into native harness entry points
+    /// (AGENTS.md / CLAUDE.md / .cursor/rules) as a managed block. Project-only: personal
+    /// preferences are not written to the user-global Claude memory from this action.
+    pub fn export_native_for_selected_project(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .selected_project
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .map(|p| p.path.clone())
+        else {
+            self.log(self.t("log.no_project"));
+            return;
+        };
+        match self.store.export_native(&path, false) {
+            Ok(report) => {
+                let targets = report
+                    .targets
+                    .iter()
+                    .map(|t| format!("{} ({})", t.path.display(), t.action))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.log(self.tr(
+                    "log.export_done",
+                    &[&report.project_rules.to_string(), &targets],
+                ));
+            }
+            Err(e) => self.log(self.tr("log.export_failed", &[&e.to_string()])),
+        }
+        cx.notify();
+    }
+
     pub fn confirm_remove_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_project.is_none() {
             return;

@@ -152,6 +152,30 @@ List rule suggestions submitted by agents; check whether your proposals were rev
   `review_note` and `reviewed_at`.
 - Errors (`isError`): unknown status.
 
+### export_native
+Compile the resolved **enabled** rules into agents' native entry points so a harness that never
+calls MCP still receives the contracts. This is **reach**, not enforcement — the exported text is
+guidance the agent reads like any AGENTS.md; only the ACP permission round-trip actually enforces.
+- `project_path` (string, required) — absolute project path; its enabled project contracts are
+  rendered into a managed block.
+- `include_user` (bool, default `false`) — also export enabled **user** preferences. When `true`,
+  writes a user block to `~/.claude/CLAUDE.md` (global, follows the user). Leave `false` for a
+  project-only export so nothing outside the repo is touched.
+- Writes an in-place **managed block** delimited by `<!-- agent-control:begin -->` /
+  `<!-- agent-control:end -->`. Everything **outside** the block is preserved verbatim; the block is
+  replaced on re-export and appended if absent. **Byte-idempotent**: re-exporting unchanged rules
+  yields `unchanged` (no newline growth). Targets:
+  - `<project>/AGENTS.md` — project contracts block.
+  - `<project>/CLAUDE.md` — project contracts block.
+  - `<project>/.cursor/rules/agent-control.mdc` — same block with Cursor MDC frontmatter outside it.
+  - `~/.claude/CLAUDE.md` — personal-preferences block (**only when `include_user: true`**).
+  Disabled rules are never exported. A lone begin/end marker (malformed block) is an error, not a
+  silent overwrite.
+- Returns: `report` (`ExportReport`: `project_path`, `project_rules` count, `user_rules` count,
+  `targets[]` each `{ path, action }` where action is `created` | `updated` | `unchanged`) and an
+  `instruction`.
+- Errors (`isError`): empty `project_path`, or a malformed existing managed block.
+
 ## Resources
 
 - `control://overview` — JSON: `user_rules`, `sessions`, `active_sessions` counts.
@@ -227,6 +251,15 @@ set_rule_enabled { "id": "api-isasc", "enabled": false, "scope": "project", "pro
 // -> { "rule": { "enabled": false, ... } }; get_applicable_rules no longer returns it
 set_rule_enabled { "id": "api-isasc", "enabled": true, "scope": "project", "project_path": "/abs/repo" }
 // -> { "rule": { "enabled": true, ... } }; it binds sessions again
+
+// 11. compile enabled contracts into native entry points (reach for harnesses that don't call MCP)
+export_native { "project_path": "/abs/repo" }   // include_user defaults to false (project-only)
+// -> { "report": { "project_rules": 2, "user_rules": 0,
+//        "targets": [ { "path": "/abs/repo/AGENTS.md", "action": "created" },
+//                     { "path": "/abs/repo/CLAUDE.md", "action": "created" },
+//                     { "path": "/abs/repo/.cursor/rules/agent-control.mdc", "action": "created" } ] }, ... }
+// Hand-written prose outside the managed block is preserved; re-exporting unchanged rules -> all "unchanged".
+// export_native { "project_path": "/abs/repo", "include_user": true } additionally writes ~/.claude/CLAUDE.md.
 ```
 
 A partial `acknowledge_rules` (omitting a snapshot rule) is flagged in the report — acknowledge

@@ -62,13 +62,13 @@ Four crates under `crates/`. Dependency direction: `app → {mcp, acp, core}`, `
 
 | Crate | Package | Kind | Responsibility | Key files |
 |-------|---------|------|----------------|-----------|
-| core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs`, `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
-| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 15 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
+| core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native export | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs`, `export.rs` (`render_body`, `upsert_managed_block`, `ExportReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
+| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 16 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
 | acp | `agent-control-acp` | lib | ACP client / harness manager: launches agent CLIs, injects constraint briefing, streams events, permission round-trips, file-change evidence | `lib.rs` (`HarnessManager`), `connection.rs` (`run_harness`, `HarnessConfig`, `constraint_briefing`), `events.rs`, `fs.rs`, `terminal.rs` |
 | app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
 
 Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`, `Store`,
-`RuleExplanation`, `AcknowledgmentReport`, and all of `model::*`.
+`RuleExplanation`, `AcknowledgmentReport`, `ExportReport`, `TargetOutcome`, and all of `model::*`.
 
 `Store` entry points: `Store::open(layout)`, `Store::open_default()` (`~/.agent-control`),
 `Store::open_with_root(path)`. Rules load via `load_rules(project_path: Option<&Path>)`
@@ -82,6 +82,26 @@ the only write path for `enabled` (bumps version, preserves content; backs the M
 never silently re-enables them. Build fresh rules with
 `store::new_rule(id, title, content, kind, scope, author)` (`new_user_rule` is a preference/user
 wrapper).
+
+**Native export** (`core/src/export.rs` + `Store::export_native`): compiles the binding set into each
+harness's native entry point so agents that never call MCP still inherit the contracts.
+`export_native(project_path, include_user) -> ExportReport` loads **enabled** project rules (and user
+rules when `include_user`) and writes a *managed block* — `<!-- agent-control:begin --> …
+<!-- agent-control:end -->` — into `DataLayout::project_agents_md` / `project_claude_md` /
+`project_cursor_rule` (the Cursor file gets `CURSOR_FRONTMATTER` *outside* the block); `include_user`
+also writes personal preferences to `DataLayout::claude_user_md()` (`~/.claude/CLAUDE.md`). The pure
+helpers `render_body(rules, heading)` (priority desc then id), `wrap_block(body)` and
+`upsert_managed_block(existing, block)` preserve everything outside the markers, append when absent,
+and error on a lone marker. The block carries **no trailing newline**; the file's terminating newline
+is added on append so it survives as the suffix after the end marker — this keeps re-export
+**byte-idempotent** (`TargetOutcome.action` = `created` | `updated` | `unchanged`; unchanged files are
+not rewritten). Backs the MCP `export_native` tool and the Projects-view **Export to harnesses**
+button (`Console::export_native_for_selected_project`, project-only). The companion
+`scripts/agent-control-hook.mjs` is a dependency-free Claude Code **SessionStart** hook that calls
+`get_applicable_rules` over MCP HTTP and injects a briefing via `hookSpecificOutput.additionalContext`;
+it is read-only and exits `0` silently when the daemon is unreachable. Reach ≠ enforcement: export /
+hook deliver rules, `code_checks` + the evidence chain verify them, and hard enforcement only exists
+at the ACP permission round-trip.
 
 **Rule suggestions** (`Store`, backed by the SQLite `rule_suggestions` table): the human-in-the-loop
 authoring path. `submit_suggestion(draft)` queues a `Pending` draft (build it with
@@ -155,7 +175,10 @@ isolate test runs; `open_with_root` / `--data-dir` still override everything.
 
 `DataLayout` (`core/src/config.rs`) owns every path — add new paths there, don't scatter
 `join()` literals (`project_rules_dir`, `project_examples_dir`, `project_config_dir`,
-`project_scaffold_marker`, `logs_dir`). Rule files
+`project_scaffold_marker`, `logs_dir`, and the native-export targets `project_agents_md`,
+`project_claude_md`, `project_cursor_rule`, `claude_user_md`). The export targets live at the project
+root (`AGENTS.md`, `CLAUDE.md`, `.cursor/rules/agent-control.mdc`) and user-global `~/.claude/CLAUDE.md`,
+**not** under `.agent-control/`; `export_native` only ever touches the managed block inside them. Rule files
 carry frontmatter: `id`, `title`, `kind`, `scope`, `source`, optional `code_checks`, filters,
 priority. `init_project_contracts` scaffolds `rules/`, `examples/` (contract + constraint
 templates), and the guide, then **migrates** previously scaffolded files to the current templates
@@ -195,10 +218,10 @@ cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 **Single-instance:** the TCP bind is the lock — a second HTTP launch on a busy address logs
 "already serving" and exits cleanly (`AddrInUse` guard), so daemon spawns are idempotent.
 
-**15 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
+**16 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
 `record_evidence`, `acknowledge_rules`, `get_session_context`, `export_handoff`,
 `import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`,
-`list_suggestions` (plus resources & prompts).
+`list_suggestions`, `export_native` (plus resources & prompts).
 `save_rule` is the active rule-authoring path: an agent records a discovered project contract
 (`scope=project`, `kind=contract`, `project_path`) or personal preference (`scope=user`) as a rule
 file via `Store::upsert_rule`; reusing an id updates + bumps version. Use it for durable project
@@ -214,6 +237,16 @@ and approval writes a project contract; `scope=user` needs no `project_path` and
 personal preference that follows the user across projects (the right home for environment notes).
 `list_suggestions` reads the queue (`pending|approved|rejected`) plus a pending count. Prefer
 `suggest_rule` when a human should sign off first, `save_rule` when the rule is confident knowledge.
+`export_native` (`project_path`, optional `include_user`) compiles the enabled binding set into native
+harness entry points via `Store::export_native`: a managed block in the project's `AGENTS.md`,
+`CLAUDE.md` and `.cursor/rules/agent-control.mdc` (plus `~/.claude/CLAUDE.md` when `include_user`).
+Everything outside the block is preserved and re-export is idempotent; it returns an `ExportReport`
+with per-target `created|updated|unchanged`. Use it so agents that read those files inherit the
+contracts without an MCP call. The Claude Code **SessionStart** hook
+(`scripts/agent-control-hook.mjs`) is the push counterpart: it calls `get_applicable_rules` over MCP
+HTTP and injects a briefing into session context, read-only and graceful (exit 0) when the daemon is
+down. Neither *forces* compliance — they deliver rules; `code_checks` + the evidence chain verify,
+and hard enforcement is limited to the ACP permission round-trip.
 
 Recommended harness call order:
 

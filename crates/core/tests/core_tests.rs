@@ -946,3 +946,85 @@ fn portable_env_flag_routes_default_layout_away_from_global() {
     assert!(layout.root.ends_with("data"));
     assert_eq!(layout.db_path(), layout.root.join("db").join("control.db"));
 }
+
+#[test]
+fn export_native_injects_managed_block_preserving_prose() {
+    use agent_control_core::export::{BLOCK_BEGIN, BLOCK_END, CURSOR_FRONTMATTER};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    // A hand-written AGENTS.md must survive export; only the managed block is ours.
+    let agents = project.path().join("AGENTS.md");
+    std::fs::write(&agents, "# My repo\n\nHand-written guidance. Keep me.\n").unwrap();
+
+    store
+        .save_rule(
+            &make_rule("contract-1", Scope::Project, 100, None),
+            Some(project.path()),
+        )
+        .unwrap();
+    let mut disabled = make_rule("off-rule", Scope::Project, 100, None);
+    disabled.enabled = false;
+    store.save_rule(&disabled, Some(project.path())).unwrap();
+
+    let report = store.export_native(project.path(), false).unwrap();
+    assert_eq!(report.project_rules, 1, "disabled rules are not exported");
+    assert_eq!(report.user_rules, 0);
+    assert_eq!(report.targets.len(), 3, "AGENTS.md + CLAUDE.md + cursor");
+
+    let agents_text = std::fs::read_to_string(&agents).unwrap();
+    assert!(agents_text.starts_with("# My repo\n\nHand-written guidance. Keep me.\n"));
+    assert!(agents_text.contains(BLOCK_BEGIN) && agents_text.contains(BLOCK_END));
+    assert!(agents_text.contains("contract-1"));
+    assert!(!agents_text.contains("off-rule"));
+
+    let cursor = project.path().join(".cursor/rules/agent-control.mdc");
+    let cursor_text = std::fs::read_to_string(&cursor).unwrap();
+    assert!(cursor_text.starts_with(CURSOR_FRONTMATTER));
+    assert!(cursor_text.contains("contract-1"));
+
+    let claude = std::fs::read_to_string(project.path().join("CLAUDE.md")).unwrap();
+    assert!(claude.contains(BLOCK_BEGIN) && claude.contains("contract-1"));
+}
+
+#[test]
+fn export_native_reexport_unchanged_then_updated() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    store
+        .save_rule(
+            &make_rule("r1", Scope::Project, 100, None),
+            Some(project.path()),
+        )
+        .unwrap();
+
+    let first = store.export_native(project.path(), false).unwrap();
+    assert!(first.targets.iter().all(|t| t.action == "created"));
+
+    let second = store.export_native(project.path(), false).unwrap();
+    assert!(
+        second.targets.iter().all(|t| t.action == "unchanged"),
+        "idempotent re-export must not rewrite files"
+    );
+
+    // Change the rule content and add user prose outside the block, then re-export.
+    let mut updated = make_rule("r1", Scope::Project, 100, None);
+    updated.content = "revised contract body".into();
+    store.save_rule(&updated, Some(project.path())).unwrap();
+    let agents = project.path().join("AGENTS.md");
+    let mut text = std::fs::read_to_string(&agents).unwrap();
+    text.push_str("\n## User notes\n\nadded by hand\n");
+    std::fs::write(&agents, &text).unwrap();
+
+    let third = store.export_native(project.path(), false).unwrap();
+    let agents_outcome = third.targets.iter().find(|t| t.path == agents).unwrap();
+    assert_eq!(agents_outcome.action, "updated");
+    let out = std::fs::read_to_string(&agents).unwrap();
+    assert!(out.contains("revised contract body"));
+    assert!(out.contains("## User notes\n\nadded by hand"));
+    assert!(!out.contains("content of r1"));
+}

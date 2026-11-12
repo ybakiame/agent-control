@@ -248,6 +248,16 @@ pub struct ListSuggestionsRequest {
     pub status: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExportNativeRequest {
+    /// Absolute path of the project whose contracts are compiled into native harness entry points
+    pub project_path: String,
+    /// Also export personal preferences to the user-global ~/.claude/CLAUDE.md. Defaults to false
+    /// so a project export never writes outside the project unless explicitly requested.
+    #[serde(default)]
+    pub include_user: bool,
+}
+
 #[tool_router]
 impl ControlServer {
     #[tool(
@@ -690,6 +700,29 @@ impl ControlServer {
                     "pending_count": pending,
                 }))
             }
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Compile the binding rule set into each harness's native entry point so agents that never call MCP still inherit the contracts. Injects a managed block (agent-control:begin … agent-control:end) into the project's AGENTS.md, CLAUDE.md and .cursor/rules/agent-control.mdc, preserving everything outside the block; only enabled rules are exported and re-export is idempotent. Set include_user=true to also write personal preferences to the user-global ~/.claude/CLAUDE.md. Use this to make contracts reach Claude Code / Cursor / Codex without requiring an MCP call."
+    )]
+    async fn export_native(
+        &self,
+        Parameters(req): Parameters<ExportNativeRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if req.project_path.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "project_path is required and cannot be empty",
+                None,
+            ));
+        }
+        let project = PathBuf::from(req.project_path.trim());
+        match self.store.export_native(&project, req.include_user) {
+            Ok(report) => json_result(&serde_json::json!({
+                "report": report,
+                "instruction": "Contracts compiled into native entry points. Everything outside the agent-control managed block was preserved and re-running is idempotent. Agents that read AGENTS.md / CLAUDE.md / .cursor rules now inherit these contracts without calling MCP.",
+            })),
             Err(e) => tool_err(e),
         }
     }

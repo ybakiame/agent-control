@@ -118,4 +118,28 @@ impl DataLayout {
     pub fn project_scaffold_marker(project_path: &Path) -> PathBuf {
         Self::project_config_dir(project_path).join(SCAFFOLD_MARKER)
     }
+
+    /// Native harness entry points the binding set is compiled into (managed-block targets).
+    pub fn project_agents_md(project_path: &Path) -> PathBuf {
+        project_path.join("AGENTS.md")
+    }
+
+    pub fn project_claude_md(project_path: &Path) -> PathBuf {
+        project_path.join("CLAUDE.md")
+    }
+
+    /// Dedicated Cursor rule file (frontmatter + managed block).
+    pub fn project_cursor_rule(project_path: &Path) -> PathBuf {
+        project_path
+            .join(".cursor")
+            .join("rules")
+            .join("agent-control.mdc")
+    }
+
+    /// User-global Claude Code memory; personal preferences export here so they are not committed
+    /// into a project repo.
+    pub fn claude_user_md() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".claude").join("CLAUDE.md"))
+    }
 }

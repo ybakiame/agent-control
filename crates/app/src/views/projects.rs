@@ -118,6 +118,14 @@ impl Console {
                                     })),
                             )
                             .child(
+                                Button::new("project-export")
+                                    .label(self.t("proj.export"))
+                                    .small()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.export_native_for_selected_project(cx);
+                                    })),
+                            )
+                            .child(
                                 Button::new("project-remove")
                                     .label(self.t("proj.remove"))
                                     .danger()
@@ -127,6 +135,12 @@ impl Console {
                                         cx.notify();
                                     })),
                             ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(self.t("proj.export_hint")),
                     )
                     .child(
                         v_flex()

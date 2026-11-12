@@ -1,6 +1,6 @@
 ---
 name: agent-control
-description: Connect to and operate the Agent Control local-first engineering console over MCP and ACP. Use when acting as an agent or harness that must resolve binding rules with provenance, create a constraint session, acknowledge rules, record tamper-evident evidence, author durable project contracts as rules, propose uncertain rules for human review, hand off across harnesses, and verify the evidence chain; or when registering an ACP agent CLI (agents.yaml) to integrate with the console. Triggers include "connect to agent-control", "get applicable rules", "create a session", "acknowledge rules", "record evidence", "save a project rule/contract", "suggest a rule for review", "export/import handoff", "verify evidence", and "integrate my agent with the console". This skill is for USING a running console, not for developing the console's own source.
+description: Connect to and operate the Agent Control local-first engineering console over MCP and ACP. Use when acting as an agent or harness that must resolve binding rules with provenance, create a constraint session, acknowledge rules, record tamper-evident evidence, author durable project contracts as rules, propose uncertain rules for human review, hand off across harnesses, verify the evidence chain, export the binding set into native AGENTS.md/CLAUDE.md/.cursor files, or wire a Claude Code SessionStart hook; or when registering an ACP agent CLI (agents.yaml) to integrate with the console. Triggers include "connect to agent-control", "get applicable rules", "create a session", "acknowledge rules", "record evidence", "save a project rule/contract", "suggest a rule for review", "export/import handoff", "export to harnesses", "SessionStart hook", "verify evidence", and "integrate my agent with the console". This skill is for USING a running console, not for developing the console's own source.
 when_to_use: An agent/harness is about to work on a project governed by Agent Control, or is being wired into the console over MCP/ACP.
 ---
 
@@ -22,7 +22,7 @@ work). It is not the guide for editing the console's Rust source — that lives 
 
 ## Connect
 
-The console exposes an **MCP server** (15 tools + resources + prompts). Pick one transport:
+The console exposes an **MCP server** (16 tools + resources + prompts). Pick one transport:
 
 - **Streamable HTTP** — the desktop app runs a **background daemon** at `http://127.0.0.1:9870/mcp`
   (`mcp-session-id` header). It reuses an already-running daemon or spawns the sibling
@@ -38,7 +38,7 @@ next to the binary switches to `<exe dir>/data`). Both binaries run with **no co
 Windows and log to `<root>/logs/{app,mcp}.log`. Build the binary
 with `mise run build` (→ `target/debug/agent-control-mcp`), or run via `mise run mcp` (stdio).
 
-Verify the connection by listing tools (expect 15) or reading resource `control://overview`.
+Verify the connection by listing tools (expect 16) or reading resource `control://overview`.
 If your client cannot reach the server, confirm the desktop app is running (HTTP) or that your
 harness spawned the stdio binary correctly.
 
@@ -109,6 +109,39 @@ contract or session evidence. Propose it with `suggest_rule { scope: "user", kin
 are injected proactively through the ACP `constraint_briefing` and `get_applicable_rules`, so the
 agent is told up front rather than needing a mid-task reminder.
 
+## Reaching agents that don't call MCP (native export + hook)
+
+Most agents read their own entry points (`AGENTS.md`, `CLAUDE.md`, `.cursor/rules`) instead of
+calling MCP. Two mechanisms deliver the binding set to them:
+
+- **`export_native`** (`project_path`, optional `include_user: true`) compiles the **enabled**
+  contracts into a *managed block* (`<!-- agent-control:begin --> … <!-- agent-control:end -->`)
+  inside the project's `AGENTS.md`, `CLAUDE.md` and `.cursor/rules/agent-control.mdc`; with
+  `include_user` it also writes personal preferences to `~/.claude/CLAUDE.md`. Everything outside the
+  block is preserved (hand-written prose and Cursor frontmatter survive) and re-export is idempotent
+  (`created` / `updated` / `unchanged` per target). The console's Projects pane has the same action as
+  **Export to harnesses**. Call it after authoring contracts so file-reading agents inherit them.
+- **Claude Code SessionStart hook** — `scripts/agent-control-hook.mjs` (dependency-free Node) calls
+  `get_applicable_rules` over the MCP HTTP endpoint at session start and injects a briefing into
+  context. It is read-only and exits `0` silently if the daemon is down, so it never blocks a session.
+  Wire it in `.claude/settings.json` (project) or `~/.claude/settings.json` (user):
+
+  ```json
+  {
+    "hooks": {
+      "SessionStart": [
+        { "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control/scripts/agent-control-hook.mjs\"" } ] }
+      ]
+    }
+  }
+  ```
+
+  Set `AGENT_CONTROL_MCP_URL` if your endpoint differs from `http://127.0.0.1:9870/mcp`.
+
+**Reach is not enforcement.** Export and the hook make rules *reach* an agent; they do not force
+compliance. Verify with `code_checks` (reads real repo files) and `verify_evidence` (hash chain);
+hard enforcement only exists where the console mediates the action (the ACP permission round-trip).
+
 ## ACP harness integration
 
 Instead of calling MCP tools yourself, an agent can be **launched by the console over ACP**: the
@@ -120,7 +153,7 @@ permission policies, and how to make your CLI ACP-compatible.
 
 ## Resources
 
-- [references/mcp-tools.md](references/mcp-tools.md) — all 15 tools (parameters + returns), the 3
+- [references/mcp-tools.md](references/mcp-tools.md) — all 16 tools (parameters + returns), the 3
   resources, the `constraint-briefing` prompt, and concrete call examples.
 - [references/acp-harness.md](references/acp-harness.md) — `agents.yaml`, harness config, permission
   flow, constraint briefing, automatic evidence, and writing an ACP agent.
