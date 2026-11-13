@@ -157,6 +157,25 @@ function renderBriefing(data, cwd) {
   return lines.join("\n");
 }
 
+function renderStaleWarning(report) {
+  const stale = Array.isArray(report?.targets) ? report.targets.filter((t) => t.stale) : [];
+  const lines = [
+    "## Agent Control — native export is stale",
+    "",
+    "The managed agent-control blocks in this project's native entry points (AGENTS.md / CLAUDE.md / .cursor rules) no longer match the current enabled rules. Rules resolved live from Agent Control are authoritative for this session; the exported files are out of date.",
+    "",
+  ];
+  for (const t of stale) {
+    if (t?.path) lines.push(`- stale: ${t.path}`);
+  }
+  lines.push(
+    "",
+    "Re-run the MCP `export_native` tool (or the console's Export to harnesses button) to refresh them. This hook is read-only and rewrote nothing. This detects file-vs-store drift only, not whether an already-running session's context is stale.",
+    "",
+  );
+  return lines.join("\n");
+}
+
 async function main() {
   const input = await readStdin();
   let cwd = process.cwd();
@@ -174,7 +193,22 @@ async function main() {
     languages: [],
     task_tags: [],
   });
-  const briefing = renderBriefing(data, cwd);
+  let briefing = renderBriefing(data, cwd);
+
+  // Best-effort staleness check (layer 1: file-vs-store). Never blocks the session.
+  try {
+    const drift = await callMcp("check_export_drift", {
+      project_path: cwd,
+      include_user: false,
+    });
+    if (drift?.report?.stale) {
+      const warning = renderStaleWarning(drift.report);
+      briefing = briefing ? `${briefing}\n${warning}` : warning;
+    }
+  } catch (e) {
+    debug(`drift check skipped: ${e?.message ?? String(e)}`);
+  }
+
   if (!briefing) return null;
   return JSON.stringify({
     hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: briefing },

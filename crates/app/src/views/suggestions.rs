@@ -1,4 +1,4 @@
-use agent_control_core::model::{RuleKind, Scope, SuggestionStatus};
+use agent_control_core::model::{Enforcement, RuleKind, Scope, SuggestionStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
@@ -61,6 +61,11 @@ impl Console {
                 Scope::Project => Tag::primary().child(self.t("scope.project.tag")),
                 Scope::Session => Tag::secondary().child(self.t("scope.session.tag")),
             };
+            let enforcement_tag = match s.enforcement {
+                Enforcement::Advisory => None,
+                Enforcement::Verify => Some(Tag::info().child(self.t("enforcement.verify"))),
+                Enforcement::Hard => Some(Tag::warning().child(self.t("enforcement.hard"))),
+            };
             v_flex()
                 .id(format!("sugg-row-{id}"))
                 .role(Role::Button)
@@ -84,6 +89,7 @@ impl Console {
                         .items_center()
                         .child(status_tag)
                         .child(scope_tag)
+                        .children(enforcement_tag)
                         .child(Tag::secondary().child(self.t(kind_key))),
                 )
                 .child(
@@ -214,6 +220,11 @@ impl Console {
             Scope::Session => Tag::secondary().child(self.t("scope.session.tag")),
         };
         let is_user = s.scope == Scope::User;
+        let enforcement_tag = match s.enforcement {
+            Enforcement::Advisory => Tag::secondary().child(self.t("enforcement.advisory")),
+            Enforcement::Verify => Tag::info().child(self.t("enforcement.verify")),
+            Enforcement::Hard => Tag::warning().child(self.t("enforcement.hard")),
+        };
 
         let header = v_flex()
             .gap_1()
@@ -225,6 +236,7 @@ impl Console {
                     .items_center()
                     .child(ui::mono(cx, s.rule_id.clone()))
                     .child(scope_tag)
+                    .child(enforcement_tag)
                     .child(Tag::secondary().child(self.t(kind_key)))
                     .child(
                         div()

@@ -83,7 +83,7 @@ try {
   await rpc("notifications/initialized", {}, true);
 
   const tools = await rpc("tools/list", {});
-  check("tools/list over HTTP", tools.result?.tools?.length === 16, tools);
+  check("tools/list over HTTP", tools.result?.tools?.length === 18, tools);
   check(
     "save_rule available over HTTP",
     tools.result?.tools?.some((t) => t.name === "save_rule"),
@@ -104,6 +104,16 @@ try {
     tools.result?.tools?.some((t) => t.name === "export_native"),
     tools,
   );
+  check(
+    "check_export_drift available over HTTP",
+    tools.result?.tools?.some((t) => t.name === "check_export_drift"),
+    tools,
+  );
+  check(
+    "verify_constraints available over HTTP",
+    tools.result?.tools?.some((t) => t.name === "verify_constraints"),
+    tools,
+  );
 
   const res = await rpc("tools/call", {
     name: "create_session",
@@ -122,6 +132,18 @@ try {
     "export_native over HTTP writes 3 native targets",
     expData.report?.targets?.length === 3,
     exp,
+  );
+
+  // check_export_drift over HTTP: right after export the targets are in sync (no rewrite).
+  const drift = await rpc("tools/call", {
+    name: "check_export_drift",
+    arguments: { project_path: root, include_user: false },
+  });
+  const driftData = drift.result?.structuredContent ?? JSON.parse(drift.result?.content?.[0]?.text ?? "{}");
+  check(
+    "check_export_drift over HTTP reports in-sync after export",
+    driftData.report?.stale === false && driftData.report?.targets?.length === 3,
+    drift,
   );
 } catch (e) {
   failures++;

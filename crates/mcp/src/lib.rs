@@ -52,6 +52,18 @@ fn parse_uuid(s: &str) -> Result<Uuid, ErrorData> {
     Uuid::parse_str(s).map_err(|e| ErrorData::invalid_params(format!("invalid UUID: {e}"), None))
 }
 
+fn parse_enforcement(
+    raw: Option<String>,
+) -> Result<agent_control_core::model::Enforcement, ErrorData> {
+    let value = raw.unwrap_or_else(|| "advisory".into());
+    serde_json::from_value(serde_json::Value::String(value.clone())).map_err(|_| {
+        ErrorData::invalid_params(
+            format!("unknown enforcement '{value}'; use advisory|verify|hard"),
+            None,
+        )
+    })
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RulesQuery {
     /// Absolute path of the project to resolve project contracts for
@@ -190,6 +202,28 @@ pub struct SaveRuleRequest {
     /// Optional tags
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Declared enforcement intent: advisory (semantic, default) | verify (mechanically checkable
+    /// via code_checks) | hard (must be mediated at a chokepoint that can deny). Declaring hard does
+    /// NOT by itself achieve the Enforced tier — without a chokepoint it caps at Advisory/Verified.
+    #[serde(default)]
+    pub enforcement: Option<String>,
+    /// Mechanical checks evaluated against repo files by verify_constraints. Each reads `key` from
+    /// `file` and passes when the value agrees with `expect`. Supply these when enforcement=verify.
+    #[serde(default)]
+    pub code_checks: Vec<CodeCheckInput>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CodeCheckInput {
+    /// Repo-relative file to read (e.g. ".editorconfig", "package.json")
+    pub file: String,
+    /// Config key to inspect within the file
+    pub key: String,
+    /// Expected value; the check passes when the file's value agrees
+    pub expect: String,
+    /// Optional human-readable description of what this check guards
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -236,6 +270,10 @@ pub struct SuggestRuleRequest {
     /// Why this rule is proposed (discovery context, evidence); shown to the human reviewer
     #[serde(default)]
     pub rationale: Option<String>,
+    /// Declared enforcement intent: advisory (semantic, default) | verify | hard. The human reviewer
+    /// can override it on approval. Declaring hard does not by itself achieve the Enforced tier.
+    #[serde(default)]
+    pub enforcement: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -256,6 +294,23 @@ pub struct ExportNativeRequest {
     /// so a project export never writes outside the project unless explicitly requested.
     #[serde(default)]
     pub include_user: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExportDriftRequest {
+    /// Absolute path of the project whose native export targets are checked for staleness
+    pub project_path: String,
+    /// Also check the user-global ~/.claude/CLAUDE.md against personal preferences. Defaults to false.
+    #[serde(default)]
+    pub include_user: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VerifyConstraintsRequest {
+    /// Session UUID whose frozen constraint snapshot is verified against the repository
+    pub session_id: String,
+    /// Harness running the verification (recorded in the evidence chain)
+    pub agent_id: String,
 }
 
 #[tool_router]
@@ -439,11 +494,23 @@ impl ControlServer {
             serde_json::from_value(req.bundle)
                 .map_err(|e| ErrorData::invalid_params(format!("invalid bundle: {e}"), None))?;
         match self.store.import_handoff(&bundle, &req.new_agent) {
-            Ok(session) => json_result(&serde_json::json!({
-                "session_id": session.id,
-                "agent_id": session.agent_id,
-                "rules_to_acknowledge": session.constraint_snapshot.rules.iter().map(|r| &r.id).collect::<Vec<_>>(),
-            })),
+            Ok(session) => {
+                let carried = session.assurance.clone();
+                let needs_reverify = carried
+                    .iter()
+                    .any(|a| a.achieved != agent_control_core::model::AssuranceTier::Advisory);
+                json_result(&serde_json::json!({
+                    "session_id": session.id,
+                    "agent_id": session.agent_id,
+                    "rules_to_acknowledge": session.constraint_snapshot.rules.iter().map(|r| &r.id).collect::<Vec<_>>(),
+                    "carried_assurance": carried,
+                    "tier_warning": if needs_reverify {
+                        Some("Carried assurance tiers were achieved by the SOURCE harness, not this one. Re-run verify_constraints under the new harness to re-establish achieved tiers; a tier may drop if the new environment differs. This is a warning, not a block.")
+                    } else {
+                        None
+                    },
+                }))
+            }
             Err(e) => tool_err(e),
         }
     }
@@ -535,6 +602,17 @@ impl ControlServer {
         );
         rule.topic = req.topic.clone().filter(|t| !t.trim().is_empty());
         rule.tags = req.tags.clone();
+        rule.enforcement = parse_enforcement(req.enforcement.clone())?;
+        rule.code_checks = req
+            .code_checks
+            .iter()
+            .map(|c| agent_control_core::model::CodeCheck {
+                file: c.file.clone(),
+                key: c.key.clone(),
+                expect: c.expect.clone(),
+                description: c.description.clone(),
+            })
+            .collect();
         rule.source.origin = Some("agent-control-mcp".into());
         match self.store.upsert_rule(&rule, project_path.as_deref()) {
             Ok((saved, path)) => json_result(&serde_json::json!({
@@ -658,6 +736,7 @@ impl ControlServer {
         draft.topic = req.topic.clone().filter(|t| !t.trim().is_empty());
         draft.tags = req.tags.clone();
         draft.rationale = req.rationale.clone().filter(|r| !r.trim().is_empty());
+        draft.enforcement = parse_enforcement(req.enforcement.clone())?;
         match self.store.submit_suggestion(draft) {
             Ok(suggestion) => json_result(&serde_json::json!({
                 "suggestion": suggestion,
@@ -723,6 +802,50 @@ impl ControlServer {
                 "report": report,
                 "instruction": "Contracts compiled into native entry points. Everything outside the agent-control managed block was preserved and re-running is idempotent. Agents that read AGENTS.md / CLAUDE.md / .cursor rules now inherit these contracts without calling MCP.",
             })),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Check whether the project's native export targets (AGENTS.md, CLAUDE.md, .cursor/rules/agent-control.mdc) are stale relative to the current enabled rule set. Compares the ruleset hash embedded in each managed block against the hash of the rules as they stand now and returns per-target staleness. It does NOT rewrite anything. This detects file-vs-store drift only (layer 1) — it cannot tell whether a running session's context is stale. When stale, re-run export_native to refresh the managed blocks."
+    )]
+    async fn check_export_drift(
+        &self,
+        Parameters(req): Parameters<ExportDriftRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if req.project_path.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "project_path is required and cannot be empty",
+                None,
+            ));
+        }
+        let project = PathBuf::from(req.project_path.trim());
+        match self.store.export_drift(&project, req.include_user) {
+            Ok(report) => {
+                let stale = report.stale;
+                json_result(&serde_json::json!({
+                    "report": report,
+                    "instruction": if stale {
+                        "Native export is stale: the managed blocks no longer match the current enabled rules. Re-run export_native to refresh them. Nothing was rewritten by this check."
+                    } else {
+                        "Native export is in sync (or not yet exported). No re-export needed."
+                    },
+                }))
+            }
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Verify a session's frozen constraints against the repository and compute the ACHIEVED assurance tier per rule. Runs each rule's code_checks against the project files: all pass => Verified; no checks (a semantic rule) or any failure => Advisory. Declaring enforcement=hard does NOT by itself achieve Enforced — without a chokepoint that can deny, hard rules cap at Advisory/Verified. Records the result in the evidence chain. This is distinct from verify_evidence, which only recomputes hash-chain integrity. Call after acknowledge_rules and before handing off."
+    )]
+    async fn verify_constraints(
+        &self,
+        Parameters(req): Parameters<VerifyConstraintsRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let session_id = parse_uuid(&req.session_id)?;
+        match self.store.verify_constraints(session_id, &req.agent_id) {
+            Ok(report) => json_result(&serde_json::to_value(report).unwrap()),
             Err(e) => tool_err(e),
         }
     }

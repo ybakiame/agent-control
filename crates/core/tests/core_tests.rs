@@ -30,6 +30,7 @@ fn make_rule(id: &str, scope: Scope, priority: i32, topic: Option<&str>) -> Rule
         conflicts_with: vec![],
         code_checks: vec![],
         enabled: true,
+        enforcement: Default::default(),
         checksum: String::new(),
     }
     .with_checksum()
@@ -1027,4 +1028,176 @@ fn export_native_reexport_unchanged_then_updated() {
     assert!(out.contains("revised contract body"));
     assert!(out.contains("## User notes\n\nadded by hand"));
     assert!(!out.contains("content of r1"));
+}
+
+#[test]
+fn export_drift_flags_stale_targets_and_clears_on_reexport() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    store
+        .save_rule(
+            &make_rule("r1", Scope::Project, 100, None),
+            Some(project.path()),
+        )
+        .unwrap();
+
+    // Never exported: targets do not exist, so nothing is "stale" yet.
+    let fresh = store.export_drift(project.path(), false).unwrap();
+    assert!(!fresh.stale);
+    assert_eq!(fresh.targets.len(), 3);
+    assert!(fresh.targets.iter().all(|t| !t.exists));
+
+    store.export_native(project.path(), false).unwrap();
+    let synced = store.export_drift(project.path(), false).unwrap();
+    assert!(!synced.stale, "freshly exported files are in sync");
+    assert!(synced.targets.iter().all(|t| t.exists));
+    assert!(
+        synced
+            .targets
+            .iter()
+            .all(|t| t.exported_hash.as_deref() == Some(t.current_hash.as_str()))
+    );
+
+    // Edit the rule without re-exporting: the managed blocks are now stale.
+    let mut updated = make_rule("r1", Scope::Project, 100, None);
+    updated.content = "revised body".into();
+    store.save_rule(&updated, Some(project.path())).unwrap();
+    let drifted = store.export_drift(project.path(), false).unwrap();
+    assert!(drifted.stale);
+    assert!(drifted.targets.iter().all(|t| t.stale));
+
+    // Re-export clears the drift.
+    store.export_native(project.path(), false).unwrap();
+    let resynced = store.export_drift(project.path(), false).unwrap();
+    assert!(!resynced.stale);
+}
+
+#[test]
+fn verify_constraints_computes_achieved_tiers_and_records_evidence() {
+    use agent_control_core::model::{AssuranceTier, Enforcement};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".editorconfig"),
+        "[*]\nindent_style = space\n",
+    )
+    .unwrap();
+
+    let mut passing = make_rule("pass-check", Scope::Project, 100, None);
+    passing.code_checks = vec![CodeCheck {
+        file: ".editorconfig".into(),
+        key: "indent_style".into(),
+        expect: "space".into(),
+        description: None,
+    }];
+    // A semantic rule declared `hard` still caps at Advisory: no chokepoint, no check.
+    let mut semantic = make_rule("semantic", Scope::Project, 90, None);
+    semantic.enforcement = Enforcement::Hard;
+    let mut failing = make_rule("fail-check", Scope::Project, 80, None);
+    failing.code_checks = vec![CodeCheck {
+        file: ".editorconfig".into(),
+        key: "indent_style".into(),
+        expect: "tab".into(),
+        description: None,
+    }];
+    for rule in [&passing, &semantic, &failing] {
+        store.save_rule(rule, Some(project.path())).unwrap();
+    }
+
+    let session = store
+        .create_session("verify", project.path(), "tester", vec![])
+        .unwrap();
+    assert_eq!(session.constraint_snapshot.rules.len(), 3);
+
+    let report = store.verify_constraints(session.id, "tester").unwrap();
+    assert_eq!(report.verified, 1);
+    assert_eq!(report.advisory, 2);
+    assert_eq!(report.enforced, 0);
+
+    let pass = report
+        .assurances
+        .iter()
+        .find(|a| a.rule_id == "pass-check")
+        .unwrap();
+    assert_eq!(pass.achieved, AssuranceTier::Verified);
+    let sem = report
+        .assurances
+        .iter()
+        .find(|a| a.rule_id == "semantic")
+        .unwrap();
+    assert_eq!(sem.declared, Enforcement::Hard);
+    assert_eq!(sem.achieved, AssuranceTier::Advisory);
+    let fail = report
+        .assurances
+        .iter()
+        .find(|a| a.rule_id == "fail-check")
+        .unwrap();
+    assert_eq!(fail.achieved, AssuranceTier::Advisory);
+
+    // Achieved tiers persist on the session, separate from the frozen snapshot.
+    let reloaded = store.get_session(session.id).unwrap().unwrap();
+    assert_eq!(reloaded.assurance.len(), 3);
+    assert_eq!(
+        reloaded.constraint_snapshot.snapshot_hash,
+        session.constraint_snapshot.snapshot_hash
+    );
+
+    // Verification is recorded in the evidence chain, including the failure.
+    assert!(store.verify_chain(session.id).unwrap().valid);
+    let evidence = store.get_evidence(session.id).unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e.kind == EvidenceKind::ConstraintViolation)
+    );
+}
+
+#[test]
+fn handoff_carries_assurance_baseline() {
+    use agent_control_core::model::AssuranceTier;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".editorconfig"),
+        "[*]\nindent_style = space\n",
+    )
+    .unwrap();
+    let mut rule = make_rule("checked", Scope::Project, 100, None);
+    rule.code_checks = vec![CodeCheck {
+        file: ".editorconfig".into(),
+        key: "indent_style".into(),
+        expect: "space".into(),
+        description: None,
+    }];
+    store.save_rule(&rule, Some(project.path())).unwrap();
+
+    let session = store
+        .create_session("handoff", project.path(), "harness-a", vec![])
+        .unwrap();
+    store.verify_constraints(session.id, "harness-a").unwrap();
+
+    let bundle = store
+        .export_handoff(
+            session.id,
+            "harness-b",
+            serde_json::json!({"summary": "verified"}),
+        )
+        .unwrap();
+    assert!(bundle.verify_integrity());
+    assert_eq!(bundle.assurance.len(), 1);
+    assert_eq!(bundle.assurance[0].achieved, AssuranceTier::Verified);
+
+    let resumed = store.import_handoff(&bundle, "harness-b").unwrap();
+    assert_eq!(resumed.agent_id, "harness-b");
+    assert_eq!(
+        resumed.assurance.len(),
+        1,
+        "source baseline carries across the handoff"
+    );
 }

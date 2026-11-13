@@ -125,6 +125,9 @@ impl Console {
                                         this.export_native_for_selected_project(cx);
                                     })),
                             )
+                            .when(self.export_stale, |this| {
+                                this.child(Tag::warning().child(self.t("proj.export_stale")))
+                            })
                             .child(
                                 Button::new("project-remove")
                                     .label(self.t("proj.remove"))
@@ -142,6 +145,14 @@ impl Console {
                             .text_color(muted)
                             .child(self.t("proj.export_hint")),
                     )
+                    .when(self.export_stale, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().warning)
+                                .child(self.t("proj.export_stale_hint")),
+                        )
+                    })
                     .child(
                         v_flex()
                             .gap_1()

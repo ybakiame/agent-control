@@ -9,11 +9,16 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
+use sha2::{Digest, Sha256};
 
 use crate::model::Rule;
 
 pub const BLOCK_BEGIN: &str = "<!-- agent-control:begin -->";
 pub const BLOCK_END: &str = "<!-- agent-control:end -->";
+
+/// Prefix of the in-block ruleset hash line. The hash is the sha256 of the rendered body, so drift
+/// means exactly "re-exporting would change this file" — never a false alarm from reformatting.
+pub const RULESET_PREFIX: &str = "<!-- agent-control:ruleset sha256:";
 
 /// Frontmatter for the dedicated Cursor rule file. It sits *outside* the managed block, so a user
 /// who tweaks it keeps their edits across re-exports.
@@ -41,6 +46,28 @@ pub struct ExportReport {
     pub project_rules: usize,
     pub user_rules: usize,
     pub targets: Vec<TargetOutcome>,
+}
+
+/// Drift state of one exported file: whether it exists, the hash embedded in it (if any), the hash
+/// of the body we would render now, and whether they differ. A missing file is not "stale" — it was
+/// simply never exported.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TargetDrift {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub exported_hash: Option<String>,
+    pub current_hash: String,
+    pub stale: bool,
+}
+
+/// Result of comparing the exported managed blocks against the current binding set. `stale` is true
+/// when any existing target's embedded hash differs from what we would render now. Detection only:
+/// the caller prompts a re-export, never rewrites files silently.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DriftReport {
+    pub project_path: PathBuf,
+    pub stale: bool,
+    pub targets: Vec<TargetDrift>,
 }
 
 /// Render the inner markdown body for a rule set (no block markers). Rules are ordered by priority
@@ -86,11 +113,36 @@ fn applies_summary(rule: &Rule) -> String {
     parts.join(", ")
 }
 
-/// Wrap a rendered body in the managed-block markers plus a generated-note. The block carries no
-/// trailing newline: the file's terminating newline is added by `upsert_managed_block` so that it
-/// survives as the suffix after the end marker and re-export stays byte-idempotent.
+/// sha256 of a rendered body. Embedded in the block so a reader can detect drift without re-resolving
+/// rules: the file is stale iff this differs from the hash of the body we would render now.
+pub fn content_hash(body: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(body.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Wrap a rendered body in the managed-block markers plus a generated-note and the ruleset hash. The
+/// block carries no trailing newline: the file's terminating newline is added by `upsert_managed_block`
+/// so that it survives as the suffix after the end marker and re-export stays byte-idempotent.
 pub fn wrap_block(body: &str) -> String {
-    format!("{BLOCK_BEGIN}\n{GENERATED_NOTE}\n{body}{BLOCK_END}")
+    format!(
+        "{BLOCK_BEGIN}\n{GENERATED_NOTE}\n{RULESET_PREFIX}{} -->\n{body}{BLOCK_END}",
+        content_hash(body)
+    )
+}
+
+/// Read the ruleset hash embedded in an exported file's managed block, if present. Returns `None`
+/// for a file with no block or a block written before hash embedding (treated as stale on compare).
+pub fn read_exported_hash(existing: &str) -> Option<String> {
+    let start = existing.find(RULESET_PREFIX)? + RULESET_PREFIX.len();
+    let rest = &existing[start..];
+    let end = rest.find(" -->")?;
+    let hash = rest[..end].trim();
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash.to_string())
+    }
 }
 
 /// Insert or replace the managed block in `existing`, preserving everything outside it. A file with
@@ -146,6 +198,7 @@ mod tests {
             conflicts_with: vec![],
             code_checks: vec![],
             enabled: true,
+            enforcement: Default::default(),
             checksum: String::new(),
         }
     }
@@ -232,5 +285,45 @@ mod tests {
         assert!(upsert_managed_block(&only_end, "block").is_err());
         let reversed = format!("{BLOCK_END}\n{BLOCK_BEGIN}");
         assert!(upsert_managed_block(&reversed, "block").is_err());
+    }
+
+    #[test]
+    fn wrap_block_embeds_readable_hash() {
+        let body = "## Contracts\n\nbody\n\n";
+        let block = wrap_block(body);
+        assert!(block.contains(RULESET_PREFIX));
+        assert_eq!(
+            read_exported_hash(&block).as_deref(),
+            Some(content_hash(body).as_str())
+        );
+    }
+
+    #[test]
+    fn content_hash_is_stable_and_sensitive() {
+        assert_eq!(content_hash("a"), content_hash("a"));
+        assert_ne!(content_hash("a"), content_hash("b"));
+    }
+
+    #[test]
+    fn read_exported_hash_absent_without_block() {
+        assert_eq!(read_exported_hash("# plain doc\nno block here"), None);
+        assert_eq!(read_exported_hash(""), None);
+    }
+
+    #[test]
+    fn drift_reflects_body_change_not_reformat() {
+        let body = "## Contracts\n\nrule body\n\n";
+        let exported = wrap_block(body);
+        // Same body re-rendered → same hash → not stale.
+        assert_eq!(
+            read_exported_hash(&exported).as_deref(),
+            Some(content_hash(body).as_str())
+        );
+        // Changed body → different hash → stale.
+        let changed = "## Contracts\n\nnew rule body\n\n";
+        assert_ne!(
+            read_exported_hash(&exported).as_deref(),
+            Some(content_hash(changed).as_str())
+        );
     }
 }

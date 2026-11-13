@@ -1,4 +1,4 @@
-use agent_control_core::model::{Scope, SessionStatus};
+use agent_control_core::model::{AssuranceTier, Scope, SessionStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
@@ -186,6 +186,28 @@ impl Console {
                     .child(div().text_sm().child(rule.title.clone()))
                     .into_any_element()
             });
+            let assurance_rows = session.assurance.iter().map(|a| {
+                let tier_tag = match a.achieved {
+                    AssuranceTier::Advisory => Tag::secondary().child(self.t("tier.advisory")),
+                    AssuranceTier::Verified => Tag::success().child(self.t("tier.verified")),
+                    AssuranceTier::Enforced => Tag::primary().child(self.t("tier.enforced")),
+                };
+                v_flex()
+                    .p_2()
+                    .gap_1()
+                    .border_1()
+                    .border_color(border)
+                    .rounded_sm()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(tier_tag)
+                            .child(div().text_sm().child(a.rule_id.clone())),
+                    )
+                    .child(div().text_xs().text_color(muted).child(a.basis.clone()))
+                    .into_any_element()
+            });
             let handoff_rows = session.handoffs.iter().map(|h| {
                 let ack = if h.acknowledged {
                     Tag::success().child(self.t("sess.ack"))
@@ -252,6 +274,43 @@ impl Console {
                 )
                 .child(ui::section_label(cx, self.t("sess.binding_title")))
                 .child(v_flex().gap_1().children(binding_rules))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(ui::section_label(cx, self.t("sess.assurance_title")))
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new("session-verify-constraints")
+                                        .label(self.t("sess.verify_constraints"))
+                                        .small()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if let Some((verified, advisory)) =
+                                                this.verify_selected_session_constraints(cx)
+                                            {
+                                                let msg = this.tr(
+                                                    "sess.verified_toast",
+                                                    &[&verified.to_string(), &advisory.to_string()],
+                                                );
+                                                this.notify(window, cx, &msg);
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(if session.assurance.is_empty() {
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(self.t("sess.assurance_empty"))
+                                .into_any_element()
+                        } else {
+                            v_flex().gap_1().children(assurance_rows).into_any_element()
+                        }),
+                )
                 .child(
                     v_flex()
                         .gap_2()

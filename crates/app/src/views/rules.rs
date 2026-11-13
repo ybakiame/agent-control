@@ -1,10 +1,10 @@
-use agent_control_core::model::Scope;
+use agent_control_core::model::{Enforcement, Scope};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, Sizable, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Selectable, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -44,6 +44,11 @@ impl Console {
                 } else {
                     Tag::secondary().child(self.t("rules.off"))
                 };
+                let enforcement_tag = match rule.enforcement {
+                    Enforcement::Advisory => None,
+                    Enforcement::Verify => Some(Tag::info().child(self.t("enforcement.verify"))),
+                    Enforcement::Hard => Some(Tag::warning().child(self.t("enforcement.hard"))),
+                };
                 v_flex()
                     .id(format!("rule-row-{index}"))
                     .role(Role::Button)
@@ -67,6 +72,7 @@ impl Console {
                             .items_center()
                             .child(scope_tag)
                             .child(enabled_tag)
+                            .children(enforcement_tag)
                             .child(Tag::secondary().child(rule.kind.to_string())),
                     )
                     .into_any_element()
@@ -131,6 +137,47 @@ impl Console {
                     )
                     .into_any_element()
             });
+
+        let enforcement_selector = v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(self.t("rules.enforcement")),
+            )
+            .child(
+                h_flex().gap_1().children(
+                    [
+                        Enforcement::Advisory,
+                        Enforcement::Verify,
+                        Enforcement::Hard,
+                    ]
+                    .into_iter()
+                    .map(|level| {
+                        let key = match level {
+                            Enforcement::Advisory => "enforcement.advisory",
+                            Enforcement::Verify => "enforcement.verify",
+                            Enforcement::Hard => "enforcement.hard",
+                        };
+                        Button::new(format!("rule-enforcement-{}", level.label()))
+                            .label(self.t(key))
+                            .ghost()
+                            .small()
+                            .selected(self.rule_enforcement == level)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_rule_enforcement(level, cx);
+                            }))
+                            .into_any_element()
+                    }),
+                ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(self.t("enforcement.hint")),
+            );
 
         let tab_desc = if tab == Scope::Project {
             match self.current_project() {
@@ -205,6 +252,7 @@ impl Console {
                 )
                 .children(selected_meta)
                 .children(enabled_switch)
+                .child(enforcement_selector)
                 .child(
                     h_flex()
                         .gap_2()

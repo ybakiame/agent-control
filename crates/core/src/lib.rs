@@ -7,6 +7,6 @@ pub mod store;
 
 pub use config::DataLayout;
 pub use engine::RuleEngine;
-pub use export::{ExportReport, TargetOutcome};
+pub use export::{DriftReport, ExportReport, TargetDrift, TargetOutcome};
 pub use model::*;
-pub use store::{AcknowledgmentReport, RuleExplanation, Store};
+pub use store::{AcknowledgmentReport, ConstraintVerificationReport, RuleExplanation, Store};

@@ -62,13 +62,14 @@ Four crates under `crates/`. Dependency direction: `app → {mcp, acp, core}`, `
 
 | Crate | Package | Kind | Responsibility | Key files |
 |-------|---------|------|----------------|-----------|
-| core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native export | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs`, `export.rs` (`render_body`, `upsert_managed_block`, `ExportReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
-| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 16 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
+| core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native export + drift, assurance tiers | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Enforcement`, `AssuranceTier`, `ConstraintAssurance`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs` (`evaluate_code_checks`), `export.rs` (`render_body`, `upsert_managed_block`, `ExportReport`, `DriftReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
+| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 18 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
 | acp | `agent-control-acp` | lib | ACP client / harness manager: launches agent CLIs, injects constraint briefing, streams events, permission round-trips, file-change evidence | `lib.rs` (`HarnessManager`), `connection.rs` (`run_harness`, `HarnessConfig`, `constraint_briefing`), `events.rs`, `fs.rs`, `terminal.rs` |
 | app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
 
 Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`, `Store`,
-`RuleExplanation`, `AcknowledgmentReport`, `ExportReport`, `TargetOutcome`, and all of `model::*`.
+`RuleExplanation`, `AcknowledgmentReport`, `ConstraintVerificationReport`, `ExportReport`,
+`TargetOutcome`, `DriftReport`, `TargetDrift`, and all of `model::*`.
 
 `Store` entry points: `Store::open(layout)`, `Store::open_default()` (`~/.agent-control`),
 `Store::open_with_root(path)`. Rules load via `load_rules(project_path: Option<&Path>)`
@@ -99,9 +100,39 @@ not rewritten). Backs the MCP `export_native` tool and the Projects-view **Expor
 button (`Console::export_native_for_selected_project`, project-only). The companion
 `scripts/agent-control-hook.mjs` is a dependency-free Claude Code **SessionStart** hook that calls
 `get_applicable_rules` over MCP HTTP and injects a briefing via `hookSpecificOutput.additionalContext`;
-it is read-only and exits `0` silently when the daemon is unreachable. Reach ≠ enforcement: export /
-hook deliver rules, `code_checks` + the evidence chain verify them, and hard enforcement only exists
-at the ACP permission round-trip.
+it is read-only and exits `0` silently when the daemon is unreachable. The hook also calls
+`check_export_drift` and appends a staleness warning when the exported files lag the store (it prompts
+a re-export, never rewrites). Reach ≠ verify ≠ enforce — see **Assurance tiers** below.
+
+**Export drift** (`core/src/export.rs` + `Store::export_drift`): the managed block embeds a ruleset
+hash (`RULESET_PREFIX = "<!-- agent-control:ruleset sha256:"`, the `content_hash` of the rendered
+body); `read_exported_hash` extracts it. `export_drift(project_path, include_user) -> DriftReport`
+compares each target's embedded hash against the current enabled ruleset: `TargetDrift { path, exists,
+exported_hash: Option<String>, current_hash, stale }`, `DriftReport { project_path, stale, targets }`.
+`stale = exists && exported_hash != Some(current_hash)` — a never-exported file is **not** stale. This
+detects **file-vs-store** staleness (layer 1) only, **not** whether a running session's injected
+context is stale (layer 2). Backs the MCP `check_export_drift` tool, the hook warning, and the
+Projects-view **export stale** badge (`Console::export_stale`, refreshed in
+`refresh_data`/`select_project`/export — never at render time).
+
+**Assurance tiers** (`core/src/model.rs` + `Store::verify_constraints`): two orthogonal axes.
+`Rule.enforcement: Enforcement` (`Advisory` | `Verify` | `Hard`, serde lowercase, `#[serde(default)]`
+→ `Advisory`) is the *declared intent* — whether a rule is mechanically checkable; it round-trips
+through frontmatter and is accepted by `save_rule` / `suggest_rule`. `AssuranceTier` (`Advisory` <
+`Verified` < `Enforced`) is the *achieved* tier, computed from evidence. `ConstraintAssurance {
+rule_id, declared, achieved, basis }` is recorded per session in `Session.assurance:
+Vec<ConstraintAssurance>` **beside** the frozen snapshot (the `snapshot_hash` over rules is unchanged)
+and carried in `HandoffBundle.assurance`. `verify_constraints(session_id, agent_id) ->
+ConstraintVerificationReport { session_id, agent_id, assurances, verified, advisory, enforced }`
+evaluates the snapshot's `code_checks` via `conflict::evaluate_code_checks` and sets each rule's
+achieved tier: no checks → `Advisory` (semantic), all pass → `Verified`, any fail/inconclusive →
+`Advisory`. It appends a `TestResult` evidence (checks + assurance) and a `ConstraintViolation`
+evidence when any check failed. **`Enforced` is never assigned here** — it requires a chokepoint, so
+declaring `Hard` does not enforce; without one it caps at `Advisory`/`Verified`. `import_handoff`
+surfaces the carried tiers and **warns** on a drop (warn, not block) — the new harness must re-verify.
+DB: guarded `ALTER` adds `sessions.assurance_json` (DEFAULT `'[]'`) and `rule_suggestions.enforcement`
+(DEFAULT `'advisory'`). Backs the MCP `verify_constraints` tool, the Rules-view enforcement selector +
+declared tag, and the Sessions-view achieved tiers + **Verify constraints** button.
 
 **Rule suggestions** (`Store`, backed by the SQLite `rule_suggestions` table): the human-in-the-loop
 authoring path. `submit_suggestion(draft)` queues a `Pending` draft (build it with
@@ -218,10 +249,10 @@ cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 **Single-instance:** the TCP bind is the lock — a second HTTP launch on a busy address logs
 "already serving" and exits cleanly (`AddrInUse` guard), so daemon spawns are idempotent.
 
-**16 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
+**18 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
 `record_evidence`, `acknowledge_rules`, `get_session_context`, `export_handoff`,
 `import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`,
-`list_suggestions`, `export_native` (plus resources & prompts).
+`list_suggestions`, `export_native`, `check_export_drift`, `verify_constraints` (plus resources & prompts).
 `save_rule` is the active rule-authoring path: an agent records a discovered project contract
 (`scope=project`, `kind=contract`, `project_path`) or personal preference (`scope=user`) as a rule
 file via `Store::upsert_rule`; reusing an id updates + bumps version. Use it for durable project
@@ -246,7 +277,13 @@ contracts without an MCP call. The Claude Code **SessionStart** hook
 (`scripts/agent-control-hook.mjs`) is the push counterpart: it calls `get_applicable_rules` over MCP
 HTTP and injects a briefing into session context, read-only and graceful (exit 0) when the daemon is
 down. Neither *forces* compliance — they deliver rules; `code_checks` + the evidence chain verify,
-and hard enforcement is limited to the ACP permission round-trip.
+and hard enforcement is limited to the ACP permission round-trip (see **Assurance tiers** above).
+`check_export_drift` (`project_path`, optional `include_user`) returns a `DriftReport` flagging stale
+native targets (embedded ruleset hash ≠ current); read-only, prompts re-export, never rewrites.
+`verify_constraints` (`session_id`, `agent_id`) runs the frozen snapshot's `code_checks` against the
+repo, records achieved tiers + evidence, and returns a `ConstraintVerificationReport`
+(`verified`/`advisory`/`enforced` counts). `save_rule` / `suggest_rule` accept `enforcement`
+(`advisory|verify|hard`); `save_rule` also accepts `code_checks`.
 
 Recommended harness call order:
 
@@ -254,8 +291,9 @@ Recommended harness call order:
 2. `create_session` — freeze the constraint snapshot.
 3. `acknowledge_rules` — prove you received exactly the snapshot's rules.
 4. `record_evidence` — append tool calls / file changes / test results to the hash chain.
-5. `export_handoff` → `import_handoff` + `acknowledge_rules` — move between harnesses.
-6. `verify_evidence` — recompute the chain, detect tampering.
+5. `verify_constraints` — run the snapshot's `code_checks` against the repo, record achieved tiers.
+6. `export_handoff` → `import_handoff` + `acknowledge_rules` — move between harnesses (re-verify tiers).
+7. `verify_evidence` — recompute the chain, detect tampering.
 
 When adding a tool: implement the handler in `crates/mcp/src/lib.rs` with the rmcp `#[tool]`
 macro, keep it a thin adapter over `Store`/`RuleEngine` (no business logic in the transport

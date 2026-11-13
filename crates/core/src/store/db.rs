@@ -54,7 +54,8 @@ impl Db {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 snapshot_json TEXT NOT NULL,
-                handoffs_json TEXT NOT NULL DEFAULT '[]'
+                handoffs_json TEXT NOT NULL DEFAULT '[]',
+                assurance_json TEXT NOT NULL DEFAULT '[]'
             );
             CREATE TABLE IF NOT EXISTS evidence (
                 session_id TEXT NOT NULL,
@@ -96,6 +97,7 @@ impl Db {
                 topic TEXT,
                 content TEXT NOT NULL,
                 kind TEXT NOT NULL,
+                enforcement TEXT NOT NULL DEFAULT 'advisory',
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 rationale TEXT,
                 status TEXT NOT NULL,
@@ -119,14 +121,32 @@ impl Db {
                 "ALTER TABLE rule_suggestions ADD COLUMN scope TEXT NOT NULL DEFAULT 'project';",
             )?;
         }
+        // Assurance tiers (per-constraint achieved assurance) and rule enforcement intent were added
+        // later; backfill the columns once for older databases.
+        let has_assurance = conn
+            .prepare("SELECT assurance_json FROM sessions LIMIT 0")
+            .is_ok();
+        if !has_assurance {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN assurance_json TEXT NOT NULL DEFAULT '[]';",
+            )?;
+        }
+        let has_enforcement = conn
+            .prepare("SELECT enforcement FROM rule_suggestions LIMIT 0")
+            .is_ok();
+        if !has_enforcement {
+            conn.execute_batch(
+                "ALTER TABLE rule_suggestions ADD COLUMN enforcement TEXT NOT NULL DEFAULT 'advisory';",
+            )?;
+        }
         Ok(())
     }
 
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 task = excluded.task,
                 project_path = excluded.project_path,
@@ -134,7 +154,8 @@ impl Db {
                 status = excluded.status,
                 updated_at = excluded.updated_at,
                 snapshot_json = excluded.snapshot_json,
-                handoffs_json = excluded.handoffs_json",
+                handoffs_json = excluded.handoffs_json,
+                assurance_json = excluded.assurance_json",
             rusqlite::params![
                 session.id.to_string(),
                 session.task,
@@ -145,6 +166,7 @@ impl Db {
                 session.updated_at.to_rfc3339(),
                 serde_json::to_string(&session.constraint_snapshot)?,
                 serde_json::to_string(&session.handoffs)?,
+                serde_json::to_string(&session.assurance)?,
             ],
         )?;
         Ok(())
@@ -153,7 +175,7 @@ impl Db {
     pub fn get_session(&self, id: Uuid) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json FROM sessions WHERE id = ?1",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id.to_string()])?;
         match rows.next()? {
@@ -165,7 +187,7 @@ impl Db {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json FROM sessions ORDER BY updated_at DESC",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json FROM sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], session_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -388,8 +410,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let params = suggestion_params(suggestion)?;
         conn.execute(
-            "INSERT INTO rule_suggestions (id, project_path, agent_id, rule_id, title, topic, content, kind, tags_json, rationale, status, created_at, updated_at, reviewed_at, review_note, approved_rule_id, scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO rule_suggestions (id, project_path, agent_id, rule_id, title, topic, content, kind, tags_json, rationale, status, created_at, updated_at, reviewed_at, review_note, approved_rule_id, scope, enforcement)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
         )?;
         Ok(())
@@ -403,7 +425,7 @@ impl Db {
                 project_path = ?2, agent_id = ?3, rule_id = ?4, title = ?5, topic = ?6,
                 content = ?7, kind = ?8, tags_json = ?9, rationale = ?10, status = ?11,
                 created_at = ?12, updated_at = ?13, reviewed_at = ?14, review_note = ?15,
-                approved_rule_id = ?16, scope = ?17
+                approved_rule_id = ?16, scope = ?17, enforcement = ?18
              WHERE id = ?1",
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
         )?;
@@ -452,7 +474,7 @@ impl Db {
     }
 }
 
-const SUGGESTION_SELECT: &str = "SELECT id, project_path, agent_id, rule_id, title, topic, content, kind, tags_json, rationale, status, created_at, updated_at, reviewed_at, review_note, approved_rule_id, scope FROM rule_suggestions";
+const SUGGESTION_SELECT: &str = "SELECT id, project_path, agent_id, rule_id, title, topic, content, kind, tags_json, rationale, status, created_at, updated_at, reviewed_at, review_note, approved_rule_id, scope, enforcement FROM rule_suggestions";
 
 fn suggestion_filter_query(
     project_path: Option<&str>,
@@ -504,6 +526,7 @@ fn suggestion_params(suggestion: &RuleSuggestion) -> Result<Vec<Box<dyn rusqlite
         Box::new(suggestion.review_note.clone()),
         Box::new(suggestion.approved_rule_id.clone()),
         Box::new(suggestion.scope.label().to_string()),
+        Box::new(suggestion.enforcement.label().to_string()),
     ])
 }
 
@@ -516,6 +539,7 @@ fn suggestion_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuleSuggesti
     let updated: String = row.get(12)?;
     let reviewed: Option<String> = row.get(13)?;
     let scope_raw: String = row.get(16)?;
+    let enforcement_raw: String = row.get(17)?;
     Ok(RuleSuggestion {
         id: Uuid::parse_str(&id).map_err(invalid_uuid)?,
         project_path: std::path::PathBuf::from(row.get::<_, String>(1)?),
@@ -526,6 +550,7 @@ fn suggestion_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuleSuggesti
         topic: row.get(5)?,
         content: row.get(6)?,
         kind: serde_json::from_str(&format!("\"{kind_raw}\"")).map_err(json_err)?,
+        enforcement: serde_json::from_str(&format!("\"{enforcement_raw}\"")).map_err(json_err)?,
         tags: serde_json::from_str(&tags_json).map_err(json_err)?,
         rationale: row.get(9)?,
         status: serde_json::from_str(&format!("\"{status_raw}\"")).map_err(json_err)?,
@@ -559,6 +584,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     let updated: String = row.get(6)?;
     let snapshot_json: String = row.get(7)?;
     let handoffs_json: String = row.get(8)?;
+    let assurance_json: String = row.get(9)?;
     Ok(Session {
         id: Uuid::parse_str(&id).map_err(invalid_uuid)?,
         task: row.get(1)?,
@@ -569,6 +595,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         updated_at: parse_time(&updated)?,
         constraint_snapshot: serde_json::from_str(&snapshot_json).map_err(json_err)?,
         handoffs: serde_json::from_str(&handoffs_json).map_err(json_err)?,
+        assurance: serde_json::from_str(&assurance_json).map_err(json_err)?,
     })
 }
 

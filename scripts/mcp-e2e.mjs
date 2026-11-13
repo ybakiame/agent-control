@@ -119,12 +119,14 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  check("tools/list has 16 tools", names.length === 16, names);
+  check("tools/list has 18 tools", names.length === 18, names);
   check("save_rule registered", names.includes("save_rule"), names);
   check("set_rule_enabled registered", names.includes("set_rule_enabled"), names);
   check("suggest_rule registered", names.includes("suggest_rule"), names);
   check("list_suggestions registered", names.includes("list_suggestions"), names);
   check("export_native registered", names.includes("export_native"), names);
+  check("check_export_drift registered", names.includes("check_export_drift"), names);
+  check("verify_constraints registered", names.includes("verify_constraints"), names);
 
   const rules = await tool("list_rules", { project_path: projectDir });
   check("list_rules returns user + project rule", rules.rules?.length === 2, rules);
@@ -423,6 +425,132 @@ try {
   check(
     "export_native rejects an empty project_path",
     await toolRejects("export_native", { project_path: "  ", include_user: false }),
+  );
+
+  // check_export_drift: detect file-vs-store staleness (layer 1) without rewriting anything.
+  const driftSync = await tool("check_export_drift", { project_path: projectDir, include_user: false });
+  check(
+    "check_export_drift reports in-sync right after export",
+    driftSync.report?.stale === false && driftSync.report?.targets?.length === 3,
+    driftSync,
+  );
+  check(
+    "check_export_drift embeds a matching ruleset hash per target",
+    driftSync.report?.targets?.every((t) => t.exists && t.exported_hash === t.current_hash),
+    driftSync,
+  );
+  // Edit a rule without re-exporting -> the managed blocks become stale.
+  await tool("save_rule", {
+    id: "api-isasc",
+    title: "Upstream isAsc type is ambiguous",
+    content: "Edited again to induce export drift.",
+    agent_id: "harness-b",
+    scope: "project",
+    project_path: projectDir,
+  });
+  const driftStale = await tool("check_export_drift", { project_path: projectDir, include_user: false });
+  check(
+    "check_export_drift flags staleness after a rule edit",
+    driftStale.report?.stale === true && driftStale.report?.targets?.every((t) => t.stale),
+    driftStale,
+  );
+  await tool("export_native", { project_path: projectDir, include_user: false });
+  const driftResync = await tool("check_export_drift", { project_path: projectDir, include_user: false });
+  check("check_export_drift clears after re-export", driftResync.report?.stale === false, driftResync);
+  check(
+    "check_export_drift rejects an empty project_path",
+    await toolRejects("check_export_drift", { project_path: "  ", include_user: false }),
+  );
+
+  // enforcement + code_checks passthrough on save_rule, then verify_constraints achieves a tier.
+  const verifiedRule = await tool("save_rule", {
+    id: "editorconfig-space",
+    title: "Editorconfig uses spaces",
+    content: "The repo .editorconfig sets indent_style = space; keep it consistent.",
+    agent_id: "harness-b",
+    kind: "contract",
+    scope: "project",
+    project_path: projectDir,
+    enforcement: "verify",
+    code_checks: [{ file: ".editorconfig", key: "indent_style", expect: "space" }],
+  });
+  check(
+    "save_rule persists enforcement=verify and code_checks",
+    verifiedRule.rule?.enforcement === "verify" && verifiedRule.rule?.code_checks?.length === 1,
+    verifiedRule,
+  );
+  check(
+    "save_rule rejects unknown enforcement",
+    await toolRejects("save_rule", { id: "x", title: "x", content: "x", agent_id: "a", scope: "user", enforcement: "bogus" }),
+  );
+
+  const session2 = await tool("create_session", {
+    task: "e2e: verify constraints",
+    project_path: projectDir,
+    agent_id: "harness-a",
+  });
+  const sid2 = session2.session_id;
+  const vc = await tool("verify_constraints", { session_id: sid2, agent_id: "harness-a" });
+  const byRule = (id) => vc.assurances?.find((a) => a.rule_id === id);
+  check(
+    "verify_constraints achieves Verified for a passing code_check",
+    byRule("editorconfig-space")?.achieved === "verified" && byRule("editorconfig-space")?.declared === "verify",
+    vc,
+  );
+  check(
+    "verify_constraints caps a failing check at Advisory (use-tabs expects tab, repo is space)",
+    byRule("use-tabs")?.achieved === "advisory",
+    vc,
+  );
+  check(
+    "verify_constraints caps a semantic rule at Advisory",
+    byRule("prefer-concise")?.achieved === "advisory",
+    vc,
+  );
+  check("verify_constraints counts verified >= 1 and enforced == 0", vc.verified >= 1 && vc.enforced === 0, vc);
+  const vcChain = await tool("verify_evidence", { session_id: sid2 });
+  check("evidence chain still valid after verify_constraints", vcChain.valid === true, vcChain);
+
+  // A hard-declared suggestion still only reaches Advisory once approved without a chokepoint;
+  // here we just confirm the declared intent round-trips through the review queue.
+  const hardSuggested = await tool("suggest_rule", {
+    project_path: projectDir,
+    agent_id: "harness-b",
+    id: "hard-semantic",
+    title: "A hard-declared semantic rule",
+    content: "Never push to main without review.",
+    kind: "constraint",
+    enforcement: "hard",
+    rationale: "Testing enforcement passthrough on suggestions.",
+  });
+  check(
+    "suggest_rule persists enforcement=hard",
+    hardSuggested.suggestion?.enforcement === "hard",
+    hardSuggested,
+  );
+
+  // Handoff carries the achieved assurance baseline and warns the new harness to re-verify.
+  const bundle2 = await tool("export_handoff", {
+    session_id: sid2,
+    to_agent: "harness-c",
+    context: { summary: "verified constraints" },
+  });
+  check(
+    "export_handoff carries assurance baseline",
+    Array.isArray(bundle2.assurance) && bundle2.assurance.some((a) => a.achieved === "verified"),
+    bundle2,
+  );
+  const resumed2 = await tool("import_handoff", { bundle: bundle2, new_agent: "harness-c" });
+  check(
+    "import_handoff carries assurance and warns to re-verify (warn-not-block)",
+    resumed2.agent_id === "harness-c" &&
+      Array.isArray(resumed2.carried_assurance) &&
+      typeof resumed2.tier_warning === "string" && resumed2.tier_warning.length > 0,
+    resumed2,
+  );
+  check(
+    "verify_constraints rejects an unknown session",
+    await toolRejects("verify_constraints", { session_id: "00000000-0000-0000-0000-000000000000", agent_id: "a" }),
   );
 
   const resources = await rpc("resources/list", {});

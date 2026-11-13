@@ -61,18 +61,37 @@ Resume work started by another harness.
 Produce a bundle to transfer the session to another harness.
 - `session_id` (UUID string, required), `to_agent` (string, required), `context` (object, default
   `{}`) — carry-over summary (conversation state, files touched, decisions).
-- Returns the bundle (includes `bundle_hash`, frozen constraints, evidence head).
+- Returns the bundle (includes `bundle_hash`, frozen constraints, evidence head, and the source
+  session's achieved `assurance[]` tiers as a baseline).
 
 ### import_handoff
 Resume a session under a new harness; verifies bundle integrity + snapshot consistency.
 - `bundle` (object, required) — the full JSON from `export_handoff`.
 - `new_agent` (string, required).
-- Returns: `session_id`, `agent_id`, `rules_to_acknowledge[]`. Call `acknowledge_rules` next.
+- Returns: `session_id`, `agent_id`, `rules_to_acknowledge[]`, `carried_assurance[]` (the source
+  tiers) and `tier_warning` (set when any carried tier is above Advisory). The warning is
+  **warn-not-block**: the new harness must re-run `verify_constraints` to re-earn the tiers — they do
+  not transfer automatically. Call `acknowledge_rules` next.
 
 ### verify_evidence
 Recompute every entry hash; detect tampering or gaps.
 - `session_id` (UUID string, required).
 - Returns a report with `valid` (bool) and any broken/gapped entries.
+
+### verify_constraints
+Evaluate the frozen snapshot's `code_checks` against the **real repo** and record the **achieved
+assurance tier** per rule. Distinct from `verify_evidence`: this asks *did the repo satisfy the
+checks?*, not *is the record intact?*.
+- `session_id` (UUID string, required), `agent_id` (string, required).
+- Tier logic: no `code_checks` → `Advisory` (semantic rule); all checks pass → `Verified`; any
+  fail/inconclusive → `Advisory`. `Enforced` is **never** assigned here — it requires a deny-capable
+  chokepoint (ACP permission round-trip), so a rule declaring `hard` still caps at Advisory/Verified.
+- Persists `Session.assurance[]` (`{ rule_id, declared, achieved, basis }`) beside the frozen snapshot
+  (the `snapshot_hash` over rules is unchanged) and appends a `test_result` evidence entry (checks +
+  assurance), plus a `constraint_violation` entry when any check failed.
+- Returns: `ConstraintVerificationReport` — `session_id`, `agent_id`, `assurances[]`, and `verified` /
+  `advisory` / `enforced` counts.
+- Errors (`isError`): unknown `session_id`.
 
 ### list_rules
 List stored rules (user preferences always; project contracts when `project_path` given).
@@ -93,6 +112,11 @@ project knowledge; use `record_evidence` for session-scoped actions instead.
 - `scope` (string, default `project`) — `user` | `project`. `session` is rejected (snapshots only).
 - `project_path` (string) — **required when `scope` is `project`**; absolute project path.
 - `topic` (string, optional), `tags` (string[], default `[]`).
+- `enforcement` (string, default `advisory`) — declared intent: `advisory` (semantic, not mechanically
+  checkable) | `verify` (carries `code_checks`) | `hard` (claims a deny-capable chokepoint). Declaring
+  `hard` does not itself enforce; the achieved tier is computed separately by `verify_constraints`.
+- `code_checks` (object[], default `[]`) — each `{ file, key, expect, description? }`, evaluated
+  against real repo files by `verify_constraints` and `check_conflicts`.
 - Returns: `path` (written file), `rule` (the saved rule with its final `version`), `instruction`.
   The file lands in `<project>/.agent-control/rules/<id>.md` (project) or
   `~/.agent-control/rules/user/<id>.md` (user). Confirm with `get_applicable_rules` / `list_rules`.
@@ -128,6 +152,8 @@ inferred, uncertain, or needs user confirmation.** A pending suggestion does **n
 - `title` (string, required), `content` (string, required) — proposed Markdown body.
 - `kind` (string, default `contract`) — `preference` | `contract` | `constraint`.
 - `topic` (string, optional), `tags` (string[], default `[]`).
+- `enforcement` (string, default `advisory`) — declared intent (`advisory` | `verify` | `hard`),
+  carried into the rule on approval.
 - `rationale` (string, optional but recommended) — why the rule is proposed (discovery context,
   evidence); shown to the human reviewer.
 - Returns: `suggestion` (the queued draft with `status: "pending"`, `scope`, `id` UUID, `created_at`)
@@ -154,8 +180,9 @@ List rule suggestions submitted by agents; check whether your proposals were rev
 
 ### export_native
 Compile the resolved **enabled** rules into agents' native entry points so a harness that never
-calls MCP still receives the contracts. This is **reach**, not enforcement — the exported text is
-guidance the agent reads like any AGENTS.md; only the ACP permission round-trip actually enforces.
+calls MCP still receives the contracts. This is **reach** (Advisory tier), not verification or
+enforcement — the exported text is guidance the agent reads like any AGENTS.md. `verify_constraints`
+earns `Verified`; only a deny-capable chokepoint (the ACP permission round-trip) earns `Enforced`.
 - `project_path` (string, required) — absolute project path; its enabled project contracts are
   rendered into a managed block.
 - `include_user` (bool, default `false`) — also export enabled **user** preferences. When `true`,
@@ -175,6 +202,20 @@ guidance the agent reads like any AGENTS.md; only the ACP permission round-trip 
   `targets[]` each `{ path, action }` where action is `created` | `updated` | `unchanged`) and an
   `instruction`.
 - Errors (`isError`): empty `project_path`, or a malformed existing managed block.
+
+### check_export_drift
+Detect whether the native exports lag the current rule store (**file-vs-store** staleness).
+Read-only: it prompts a re-export and **never rewrites** files.
+- `project_path` (string, required), `include_user` (bool, default `false`) — same scope as
+  `export_native`.
+- Each managed block embeds a ruleset hash (`<!-- agent-control:ruleset sha256:… -->`); this compares
+  it against the hash of the currently enabled ruleset.
+- Returns: `report` (`DriftReport`: `project_path`, `stale` bool, `targets[]` each
+  `{ path, exists, exported_hash, current_hash, stale }`) and an `instruction`. A target is `stale`
+  only when it exists and its embedded hash differs; a never-exported file is **not** stale.
+- Scope limit: detects layer-1 (exported text out of date) only — **not** whether an already-running
+  session's injected context is stale (layer 2). When stale, re-run `export_native`.
+- Errors (`isError`): empty `project_path`.
 
 ## Resources
 
@@ -260,6 +301,20 @@ export_native { "project_path": "/abs/repo" }   // include_user defaults to fals
 //                     { "path": "/abs/repo/.cursor/rules/agent-control.mdc", "action": "created" } ] }, ... }
 // Hand-written prose outside the managed block is preserved; re-exporting unchanged rules -> all "unchanged".
 // export_native { "project_path": "/abs/repo", "include_user": true } additionally writes ~/.claude/CLAUDE.md.
+
+// 12. verify the snapshot's code_checks against the repo -> achieved assurance tiers (post-hoc)
+verify_constraints { "session_id": "UUID", "agent_id": "harness-b" }
+// -> { "assurances": [ { "rule_id": "use-tabs", "declared": "verify", "achieved": "verified",
+//                        "basis": "1 code_check(s) passed" }, ... ],
+//      "verified": 1, "advisory": 1, "enforced": 0 }
+// A semantic rule (no code_checks) stays "advisory"; a failing check caps at "advisory";
+// "enforced" is never assigned here — it needs a deny-capable chokepoint.
+
+// 13. detect stale native exports after editing rules (read-only; prompts re-export, never rewrites)
+check_export_drift { "project_path": "/abs/repo" }
+// -> { "report": { "stale": true, "targets": [ { "path": "/abs/repo/AGENTS.md", "exists": true,
+//        "exported_hash": "...", "current_hash": "...", "stale": true }, ... ] }, "instruction": "..." }
+// Re-run export_native to refresh. Drift covers file-vs-store staleness only, not a running session's context.
 ```
 
 A partial `acknowledge_rules` (omitting a snapshot rule) is flagged in the report — acknowledge

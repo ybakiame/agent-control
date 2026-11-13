@@ -13,10 +13,10 @@ use crate::config::DataLayout;
 use crate::engine::RuleEngine;
 use crate::export;
 use crate::model::{
-    AgentRegistration, ConstraintSnapshot, EvidenceEntry, EvidenceKind, HandoffBundle,
-    HandoffRecord, Project, ProvenanceRecord, QueryContext, Resolution, Rule, RuleKind,
-    RuleSuggestion, Scope, Session, SessionStatus, SourceKind, SuggestionEdits, SuggestionStatus,
-    VerificationReport, canonical_hash,
+    AgentRegistration, AssuranceTier, ConstraintAssurance, ConstraintSnapshot, EvidenceEntry,
+    EvidenceKind, HandoffBundle, HandoffRecord, Project, ProvenanceRecord, QueryContext,
+    Resolution, Rule, RuleKind, RuleSuggestion, Scope, Session, SessionStatus, SourceKind,
+    SuggestionEdits, SuggestionStatus, VerificationReport, canonical_hash,
 };
 
 pub use db::Db;
@@ -34,6 +34,19 @@ pub struct AcknowledgmentReport {
     pub missing: Vec<String>,
     pub unexpected: Vec<String>,
     pub fully_compliant: bool,
+}
+
+/// Result of post-hoc constraint verification: the achieved assurance tier per rule plus counts.
+/// Distinct from `VerificationReport` (evidence-chain integrity). `Enforced` is never produced here;
+/// it requires a chokepoint outside the model's decision loop.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConstraintVerificationReport {
+    pub session_id: Uuid,
+    pub agent_id: String,
+    pub assurances: Vec<ConstraintAssurance>,
+    pub verified: usize,
+    pub advisory: usize,
+    pub enforced: usize,
 }
 
 impl Store {
@@ -219,6 +232,7 @@ impl Store {
             updated_at: now,
             constraint_snapshot: snapshot,
             handoffs: vec![],
+            assurance: vec![],
         };
         self.db.upsert_session(&session)?;
         self.db.append_evidence(
@@ -341,6 +355,107 @@ impl Store {
         Ok(report)
     }
 
+    /// Evaluate the session's frozen constraints against the real repo and record the achieved
+    /// assurance tier per rule. This is post-hoc verification (the `Verified` tier), distinct from
+    /// `verify_chain` which checks evidence integrity. A rule reaches `Verified` only when it has
+    /// `code_checks` and all of them pass; otherwise it stays `Advisory`. `Enforced` requires a
+    /// chokepoint and is never produced here. Results are appended to the chain and persisted.
+    pub fn verify_constraints(
+        &self,
+        session_id: Uuid,
+        agent_id: &str,
+    ) -> Result<ConstraintVerificationReport> {
+        use crate::conflict::{CheckStatus, evaluate_code_checks};
+
+        let mut session = self
+            .db
+            .get_session(session_id)?
+            .context("session not found")?;
+        let mut assurances = Vec::new();
+        let mut checks_payload = Vec::new();
+        let mut violations = Vec::new();
+        for rule in &session.constraint_snapshot.rules {
+            let results = evaluate_code_checks(rule, &session.project_path);
+            let (achieved, basis) = if results.is_empty() {
+                (
+                    AssuranceTier::Advisory,
+                    "no mechanical check; semantic rule stays advisory".to_string(),
+                )
+            } else if results.iter().all(|r| r.status == CheckStatus::Pass) {
+                (
+                    AssuranceTier::Verified,
+                    format!("{} code_check(s) passed", results.len()),
+                )
+            } else {
+                let failed = results
+                    .iter()
+                    .filter(|r| r.status != CheckStatus::Pass)
+                    .count();
+                (
+                    AssuranceTier::Advisory,
+                    format!(
+                        "{failed} of {} code_check(s) failed or inconclusive",
+                        results.len()
+                    ),
+                )
+            };
+            assurances.push(ConstraintAssurance {
+                rule_id: rule.id.clone(),
+                declared: rule.enforcement,
+                achieved,
+                basis,
+            });
+            if !results.is_empty() {
+                checks_payload.push(serde_json::json!({ "rule_id": rule.id, "checks": results }));
+            }
+            for r in &results {
+                if r.status != CheckStatus::Pass {
+                    violations.push(serde_json::json!({ "rule_id": rule.id, "check": r }));
+                }
+            }
+        }
+        session.assurance = assurances.clone();
+        session.updated_at = Utc::now();
+        self.db.upsert_session(&session)?;
+        self.db.append_evidence(
+            session_id,
+            EvidenceKind::TestResult,
+            agent_id,
+            serde_json::json!({ "constraint_checks": checks_payload, "assurance": assurances }),
+        )?;
+        if !violations.is_empty() {
+            self.db.append_evidence(
+                session_id,
+                EvidenceKind::ConstraintViolation,
+                agent_id,
+                serde_json::json!({
+                    "reason": "constraint verification failed",
+                    "violations": violations,
+                }),
+            )?;
+        }
+        let verified = assurances
+            .iter()
+            .filter(|a| a.achieved == AssuranceTier::Verified)
+            .count();
+        let advisory = assurances
+            .iter()
+            .filter(|a| a.achieved == AssuranceTier::Advisory)
+            .count();
+        let enforced = assurances
+            .iter()
+            .filter(|a| a.achieved == AssuranceTier::Enforced)
+            .count();
+        Ok(ConstraintVerificationReport {
+            session_id,
+            agent_id: agent_id.to_string(),
+            assurances,
+            verified,
+            advisory,
+            enforced,
+        })
+    }
+
     pub fn export_handoff(
         &self,
         session_id: Uuid,
@@ -357,6 +472,7 @@ impl Store {
             task: session.task.clone(),
             project_path: session.project_path.clone(),
             constraint_snapshot: session.constraint_snapshot.clone(),
+            assurance: session.assurance.clone(),
             evidence_head_hash: head_hash,
             context,
             from_agent: session.agent_id.clone(),
@@ -408,6 +524,7 @@ impl Store {
                 updated_at: Utc::now(),
                 constraint_snapshot: bundle.constraint_snapshot.clone(),
                 handoffs: vec![],
+                assurance: vec![],
             },
         };
         let snapshot_hash = canonical_hash(
@@ -418,6 +535,9 @@ impl Store {
                 "constraint snapshot drift detected: local session rules differ from handoff bundle"
             );
         }
+        // Carry the source harness's achieved tiers as the incoming baseline; the new harness must
+        // re-run verify_constraints to sustain them (a harness without chokepoints cannot keep Enforced).
+        session.assurance = bundle.assurance.clone();
         session.agent_id = new_agent.to_string();
         session.status = SessionStatus::Active;
         session.updated_at = Utc::now();
@@ -649,6 +769,51 @@ impl Store {
         })
     }
 
+    /// Compare the exported managed blocks against the current binding set without writing anything.
+    /// A target is stale when it exists and its embedded ruleset hash differs from the body we would
+    /// render now. Detection only: the caller prompts a re-export, never rewrites files silently.
+    pub fn export_drift(
+        &self,
+        project_path: &Path,
+        include_user: bool,
+    ) -> Result<export::DriftReport> {
+        let rules = self.load_rules(Some(project_path))?;
+        let project_rules: Vec<Rule> = rules
+            .iter()
+            .filter(|r| r.enabled && r.scope == Scope::Project)
+            .cloned()
+            .collect();
+        let project_hash =
+            export::content_hash(&export::render_body(&project_rules, "Project contracts"));
+
+        let mut targets = vec![
+            target_drift(&DataLayout::project_agents_md(project_path), &project_hash),
+            target_drift(&DataLayout::project_claude_md(project_path), &project_hash),
+            target_drift(
+                &DataLayout::project_cursor_rule(project_path),
+                &project_hash,
+            ),
+        ];
+
+        if include_user {
+            let user_rules: Vec<Rule> = rules
+                .iter()
+                .filter(|r| r.enabled && r.scope == Scope::User)
+                .cloned()
+                .collect();
+            let user_hash =
+                export::content_hash(&export::render_body(&user_rules, "Personal preferences"));
+            targets.push(target_drift(&DataLayout::claude_user_md()?, &user_hash));
+        }
+
+        let stale = targets.iter().any(|t| t.stale);
+        Ok(export::DriftReport {
+            project_path: project_path.to_path_buf(),
+            stale,
+            targets,
+        })
+    }
+
     /// Queue an agent-proposed rule for human review. The draft is stored in SQLite as `pending`;
     /// nothing is written to the project until a human approves it.
     pub fn submit_suggestion(&self, mut suggestion: RuleSuggestion) -> Result<RuleSuggestion> {
@@ -745,6 +910,7 @@ impl Store {
         );
         rule.topic = edits.topic.or_else(|| suggestion.topic.clone());
         rule.tags = edits.tags.unwrap_or_else(|| suggestion.tags.clone());
+        rule.enforcement = edits.enforcement.unwrap_or(suggestion.enforcement);
         rule.source.origin = Some("agent-suggestion".to_string());
         let project_path = match suggestion.scope {
             Scope::User => None,
@@ -857,6 +1023,7 @@ pub fn new_rule(
         conflicts_with: vec![],
         code_checks: vec![],
         enabled: true,
+        enforcement: Default::default(),
         checksum: String::new(),
     }
     .with_checksum()
@@ -884,6 +1051,7 @@ pub fn new_suggestion(
         topic: None,
         content: content.to_string(),
         kind,
+        enforcement: Default::default(),
         tags: vec![],
         rationale: None,
         status: SuggestionStatus::Pending,
@@ -1010,6 +1178,25 @@ fn write_managed_block_file(
         path: path.to_path_buf(),
         action: action.to_string(),
     })
+}
+
+fn target_drift(path: &Path, current_hash: &str) -> export::TargetDrift {
+    let exists = path.exists();
+    let exported_hash = if exists {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| export::read_exported_hash(&raw))
+    } else {
+        None
+    };
+    let stale = exists && exported_hash.as_deref() != Some(current_hash);
+    export::TargetDrift {
+        path: path.to_path_buf(),
+        exists,
+        exported_hash,
+        current_hash: current_hash.to_string(),
+        stale,
+    }
 }
 
 const PROJECT_GUIDE: &str = "\

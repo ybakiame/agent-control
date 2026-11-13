@@ -8,8 +8,8 @@ use agent_control_acp::{
 };
 use agent_control_core::Store;
 use agent_control_core::model::{
-    AgentRegistration, Conflict, EvidenceEntry, Project, ProvenanceRecord, Rule, RuleSuggestion,
-    Scope, Session, SuggestionEdits, SuggestionStatus, VerificationReport,
+    AgentRegistration, Conflict, Enforcement, EvidenceEntry, Project, ProvenanceRecord, Rule,
+    RuleSuggestion, Scope, Session, SuggestionEdits, SuggestionStatus, VerificationReport,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::badge::Badge;
@@ -79,6 +79,7 @@ pub struct Console {
     pub project_tree: Entity<TreeState>,
     pub project_stats: std::collections::HashMap<Uuid, (usize, usize)>,
     pub show_onboarding: bool,
+    pub export_stale: bool,
 
     pub selected_rule: Option<usize>,
     pub selected_provenance: Option<usize>,
@@ -109,6 +110,7 @@ pub struct Console {
     pub rule_topic_input: Entity<InputState>,
     pub rule_content_input: Entity<TextareaState>,
     pub rules_tab: Scope,
+    pub rule_enforcement: Enforcement,
 
     pub project_path_input: Entity<InputState>,
     pub project_name_input: Entity<InputState>,
@@ -173,6 +175,7 @@ impl Console {
             project_tree,
             project_stats: std::collections::HashMap::new(),
             show_onboarding: false,
+            export_stale: false,
             selected_rule: None,
             selected_provenance: None,
             selected_session: None,
@@ -198,6 +201,7 @@ impl Console {
             rule_topic_input,
             rule_content_input,
             rules_tab: Scope::User,
+            rule_enforcement: Enforcement::Advisory,
             project_path_input,
             project_name_input,
             project_rename_input,
@@ -312,6 +316,23 @@ impl Console {
         }
         self.refresh_evidence();
         self.rebuild_project_tree(cx);
+        self.refresh_export_drift();
+    }
+
+    /// Recompute whether the selected project's native export is stale relative to its current
+    /// enabled rules. Cached here (refresh/select/export), never at render time. Project-only:
+    /// the console export action does not write user-global files, so include_user=false.
+    fn refresh_export_drift(&mut self) {
+        self.export_stale = self
+            .selected_project
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .map(|p| {
+                self.store
+                    .export_drift(&p.path, false)
+                    .map(|r| r.stale)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
     }
 
     fn rebuild_project_tree(&mut self, cx: &mut App) {
@@ -567,6 +588,7 @@ impl Console {
         rule.content = content.to_string();
         rule.topic = if topic.is_empty() { None } else { Some(topic) };
         rule.scope = scope;
+        rule.enforcement = self.rule_enforcement;
         rule.version += 1;
         match self.store.save_rule(&rule, project_path.as_deref()) {
             Ok(path) => {
@@ -600,6 +622,7 @@ impl Console {
         });
         self.rule_content_input
             .update(cx, |s, cx| s.set_value(&rule.content, window, cx));
+        self.rule_enforcement = rule.enforcement;
         self.rules_tab = if rule.scope == Scope::Project {
             Scope::Project
         } else {
@@ -617,6 +640,7 @@ impl Console {
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.rule_content_input
             .update(cx, |s, cx| s.set_value("", window, cx));
+        self.rule_enforcement = Enforcement::Advisory;
     }
 
     pub fn confirm_delete_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -707,6 +731,37 @@ impl Console {
             Err(e) => {
                 self.log(self.tr("log.toggle_failed", &[&e.to_string()]));
                 false
+            }
+        }
+    }
+
+    /// Update the editor's declared enforcement intent. The rule is only persisted on save.
+    pub fn set_rule_enforcement(&mut self, enforcement: Enforcement, cx: &mut Context<Self>) {
+        self.rule_enforcement = enforcement;
+        cx.notify();
+    }
+
+    /// Evaluate the selected session's frozen code_checks against the repo and record the achieved
+    /// assurance tiers in the evidence chain. Returns (verified, advisory) counts for the toast.
+    pub fn verify_selected_session_constraints(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<(usize, usize)> {
+        let id = self.selected_session?;
+        let agent_id = self
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.agent_id.clone())
+            .unwrap_or_else(|| "console".to_string());
+        match self.store.verify_constraints(id, &agent_id) {
+            Ok(report) => {
+                self.refresh_data(cx);
+                Some((report.verified, report.advisory))
+            }
+            Err(e) => {
+                self.log(self.tr("log.verify_failed", &[&e.to_string()]));
+                None
             }
         }
     }
@@ -1134,6 +1189,7 @@ impl Console {
                 state.set_selected_index(Some(ix), cx);
             }
         });
+        self.refresh_export_drift();
         cx.notify();
     }
 
@@ -1225,6 +1281,7 @@ impl Console {
             }
             Err(e) => self.log(self.tr("log.export_failed", &[&e.to_string()])),
         }
+        self.refresh_export_drift();
         cx.notify();
     }
 

@@ -81,7 +81,7 @@ Agent Control 是同一规则库之上的**解析层**，会**编译进**这些�
   binding project rule) or **rejects** it — keeping humans in the loop for inferred contracts.
 - **Bilingual UI (English / 简体中文)** with a runtime switcher in Settings; the choice is
   persisted to `<data root>/ui.json`.
-- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 16 tools plus
+- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 18 tools plus
   resources and prompts.
 - **ACP client / harness manager** (agent-client-protocol) that launches real agent CLIs,
   injects the constraint briefing as system prompt, wires the MCP endpoint, streams session
@@ -134,15 +134,16 @@ Recommended call order for a harness:
 2. `create_session` — freeze a constraint snapshot.
 3. `acknowledge_rules` — confirm you received exactly the snapshot's rules.
 4. `record_evidence` — append tool calls / file changes / test results to the hash chain.
-5. `export_handoff` / `import_handoff` + `acknowledge_rules` — move between harnesses.
-6. `verify_evidence` — recompute the chain and detect tampering.
+5. `verify_constraints` — run the snapshot's `code_checks` against the repo, record achieved tiers.
+6. `export_handoff` / `import_handoff` + `acknowledge_rules` — move between harnesses (re-verify tiers).
+7. `verify_evidence` — recompute the chain and detect tampering.
 
 ### MCP tools
 
 `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`, `record_evidence`,
 `acknowledge_rules`, `get_session_context`, `export_handoff`, `import_handoff`,
 `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`, `list_suggestions`,
-`export_native`.
+`export_native`, `check_export_drift`, `verify_constraints`.
 
 `save_rule` lets an agent **actively record** a discovered project contract (or personal
 preference) as a rule file: pass `id`, `title`, `content`, `agent_id`, and for project contracts
@@ -176,6 +177,25 @@ exported, everything **outside** the block is preserved (a hand-written `AGENTS.
 re-export is **idempotent** (an up-to-date file is reported `unchanged` and not rewritten). The
 console exposes the same action as **Export to harnesses** in the Projects detail pane.
 
+`save_rule` and `suggest_rule` also accept an **`enforcement`** intent — `advisory` (default),
+`verify`, or `hard` — declaring whether a rule is mechanically checkable; `save_rule` additionally
+accepts `code_checks`. This is a property of the *rule*, not a guarantee of what a session achieves
+(see **Assurance tiers** below).
+
+`check_export_drift` (`project_path`, optional `include_user`) compares the ruleset hash embedded in
+each managed block against the current enabled ruleset and reports which targets are **stale**. It
+is read-only: it prompts a re-export and **never rewrites** anything. The SessionStart hook calls it
+and appends a staleness warning when the exported files lag the store. It detects **file-vs-store**
+staleness only (the exported text is out of date) — it does **not** tell you whether an
+already-running session's injected context is stale; that boundary is per-session and explicit.
+
+`verify_constraints` (`session_id`, `agent_id`) evaluates the frozen snapshot's `code_checks` against
+the **real repo files**, computes the **achieved assurance tier** for each rule, and records the
+result in the evidence chain. It returns a report with `verified` / `advisory` / `enforced` counts.
+This is distinct from `verify_evidence` (which recomputes the hash chain to detect tampering):
+`verify_constraints` asks *did the repo actually satisfy the checks?*, not *is the record intact?*.
+The console's Sessions pane exposes it as **Verify constraints**.
+
 ## Native export & hooks / 原生导出与 hooks
 
 Rule files in `.agent-control/rules/` are the source of truth, but most agents read their own
@@ -196,12 +216,34 @@ bridges that gap with two delivery mechanisms:
   snippet); point `AGENT_CONTROL_MCP_URL` at your endpoint if it is not the default
   `http://127.0.0.1:9870/mcp`.
 
-> **Reach is not enforcement.** Export and the hook make rules *reach* the agent; they do not *force*
-> compliance — a cooperative agent still has to follow them. Independent verification comes from
-> `code_checks` (which read real repo files) and the evidence hash chain (which detects tampering /
-> gaps after the fact). Hard enforcement only exists where Agent Control mediates the action itself,
-> i.e. the ACP permission round-trip; it cannot compel an uncooperative agent running outside that
-> mediation.
+### Assurance tiers / 保证分级
+
+**Reach is not verification, and verification is not enforcement.** Agent Control keeps two
+orthogonal axes apart so it never overclaims:
+
+- **Declared intent — `Rule.enforcement`** (`advisory` | `verify` | `hard`): a property of the *rule*.
+  `advisory` is semantic guidance (not mechanically checkable); `verify` carries `code_checks`
+  evaluable against the repo; `hard` claims the rule must be mediated at a chokepoint that can deny.
+  Declaring `hard` does **not** by itself enforce anything.
+- **Achieved tier — `AssuranceTier`** (`Advisory` < `Verified` < `Enforced`): what a *session* actually
+  delivered, computed from evidence and recorded beside the frozen snapshot (the `snapshot_hash` over
+  rules stays intact).
+
+| Tier | Meaning | How it is earned |
+|------|---------|------------------|
+| **Advisory** | Delivered, but no mechanical check ran and nothing intercepted the action. | Export / hook / query. Semantic rules stay here forever. |
+| **Verified** | The rule's `code_checks` ran against the real repo and passed; the result is in the chain. | `verify_constraints` (post-hoc). |
+| **Enforced** | The action was mediated at a chokepoint that can deny it. | ACP permission round-trip (pre-emptive). |
+
+Without a chokepoint a `hard` rule still caps at **Advisory/Verified** — there is no pre-emptive deny.
+Export and the hook only make rules *reach* the agent; `code_checks` + the hash chain *verify* after
+the fact; hard enforcement exists only where Agent Control mediates the action itself (the ACP
+permission round-trip), and cannot compel an uncooperative agent running outside that mediation.
+
+**Handoffs carry the baseline, not a guarantee.** `export_handoff` includes the source session's
+achieved tiers; `import_handoff` surfaces them and **warns** that the new harness must re-verify
+(warn, not block). The frozen *rules* transfer; the *assurance* behind them must be re-earned in the
+new runtime — a tier drop is flagged, never silently assumed.
 
 规则文件（`.agent-control/rules/`）是唯一事实来源，但多数 agent 读取自己的入口文件
 （`AGENTS.md`、`CLAUDE.md`、`.cursor/rules`）而非调用 MCP。Agent Control 用两种交付机制弥合：
@@ -209,9 +251,19 @@ bridges that gap with two delivery mechanisms:
 块外内容与 Cursor frontmatter 均保留，重复导出幂等；**SessionStart hook**
 （`scripts/agent-control-hook.mjs`，无依赖 Node）在 Claude Code 会话开始时经本地 MCP HTTP 调用
 `get_applicable_rules`，把绑定规则与冲突摘要注入会话上下文，只读、守护进程不可达时静默退出 0、绝不阻塞会话。
-**触达不等于强制**：导出与 hook 让规则*触达* agent，但不*强制*遵守；独立校验来自 `code_checks`
-（读取真实仓库文件）与证据哈希链（事后检测篡改 / 缺口），硬性强制仅存在于 Agent Control 亲自中介动作之处
-（ACP 权限往返），无法强迫在该中介之外运行的不合作 agent。
+
+**触达 ≠ 校验 ≠ 强制。** 两条正交轴彼此分开，绝不夸大：
+- **声明意图 `Rule.enforcement`**（`advisory` | `verify` | `hard`）是*规则*的属性：`advisory` 为语义指引
+  （不可机械校验）、`verify` 携带可对照仓库评估的 `code_checks`、`hard` 声称须在可拒绝的卡点中介。
+  声明 `hard` 本身并不等于强制。
+- **已达级别 `AssuranceTier`**（`Advisory` < `Verified` < `Enforced`）是*会话*实际交付的结果，由证据计算，
+  记录在冻结快照旁（规则上的 `snapshot_hash` 不变）。**Advisory**＝已触达但无机械校验、无拦截
+  （导出 / hook / 查询；语义规则永远停在此级）；**Verified**＝`code_checks` 已对照真实仓库运行并通过、
+  结果入链（`verify_constraints`，事后）；**Enforced**＝动作在可拒绝的卡点被中介（ACP 权限往返，事前）。
+  没有卡点时 `hard` 规则最高只到 **Advisory/Verified**。`check_export_drift` 只检测**文件对存储**的过期
+  （导出文本滞后），不判断已运行会话的上下文是否过期；只提示重新导出、绝不改写。
+  **交接携带基线而非保证**：`export_handoff` 带上源会话已达级别，`import_handoff` 展示并**警告**新 harness
+  须重新校验（警告而非阻断）——冻结的*规则*可转移，其背后的*保证*须在新运行时重新赢得，级别下降会被标记。
 
 ## Projects & onboarding / 项目接入
 

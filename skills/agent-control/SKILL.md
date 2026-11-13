@@ -1,6 +1,6 @@
 ---
 name: agent-control
-description: Connect to and operate the Agent Control local-first engineering console over MCP and ACP. Use when acting as an agent or harness that must resolve binding rules with provenance, create a constraint session, acknowledge rules, record tamper-evident evidence, author durable project contracts as rules, propose uncertain rules for human review, hand off across harnesses, verify the evidence chain, export the binding set into native AGENTS.md/CLAUDE.md/.cursor files, or wire a Claude Code SessionStart hook; or when registering an ACP agent CLI (agents.yaml) to integrate with the console. Triggers include "connect to agent-control", "get applicable rules", "create a session", "acknowledge rules", "record evidence", "save a project rule/contract", "suggest a rule for review", "export/import handoff", "export to harnesses", "SessionStart hook", "verify evidence", and "integrate my agent with the console". This skill is for USING a running console, not for developing the console's own source.
+description: Connect to and operate the Agent Control local-first engineering console over MCP and ACP. Use when acting as an agent or harness that must resolve binding rules with provenance, create a constraint session, acknowledge rules, record tamper-evident evidence, author durable project contracts as rules, propose uncertain rules for human review, hand off across harnesses, verify the evidence chain, verify constraint assurance tiers, detect stale native exports, export the binding set into native AGENTS.md/CLAUDE.md/.cursor files, or wire a Claude Code SessionStart hook; or when registering an ACP agent CLI (agents.yaml) to integrate with the console. Triggers include "connect to agent-control", "get applicable rules", "create a session", "acknowledge rules", "record evidence", "save a project rule/contract", "suggest a rule for review", "export/import handoff", "export to harnesses", "SessionStart hook", "verify evidence", "verify constraints", "check export drift", and "integrate my agent with the console". This skill is for USING a running console, not for developing the console's own source.
 when_to_use: An agent/harness is about to work on a project governed by Agent Control, or is being wired into the console over MCP/ACP.
 ---
 
@@ -22,7 +22,7 @@ work). It is not the guide for editing the console's Rust source — that lives 
 
 ## Connect
 
-The console exposes an **MCP server** (16 tools + resources + prompts). Pick one transport:
+The console exposes an **MCP server** (18 tools + resources + prompts). Pick one transport:
 
 - **Streamable HTTP** — the desktop app runs a **background daemon** at `http://127.0.0.1:9870/mcp`
   (`mcp-session-id` header). It reuses an already-running daemon or spawns the sibling
@@ -38,7 +38,7 @@ next to the binary switches to `<exe dir>/data`). Both binaries run with **no co
 Windows and log to `<root>/logs/{app,mcp}.log`. Build the binary
 with `mise run build` (→ `target/debug/agent-control-mcp`), or run via `mise run mcp` (stdio).
 
-Verify the connection by listing tools (expect 16) or reading resource `control://overview`.
+Verify the connection by listing tools (expect 18) or reading resource `control://overview`.
 If your client cannot reach the server, confirm the desktop app is running (HTTP) or that your
 harness spawned the stdio binary correctly.
 
@@ -60,10 +60,16 @@ Follow this order for every unit of work. Tool parameters and JSON examples are 
    changes (include `before_sha256` / `after_sha256`), test results. `kind` is one of
    `tool_call`, `file_change`, `test_result`, `constraint_violation`, `session_start`,
    `session_end`, `rule_acknowledgment`, `handoff_out`, `handoff_in`.
-5. **Hand off (when switching harness)** — `export_handoff` (`session_id`, `to_agent`, `context`)
-   produces a bundle; the next harness calls `import_handoff` (`bundle`, `new_agent`) then
-   `acknowledge_rules` again. Use `get_session_context` to resume work another harness started.
-6. **Verify** — `verify_evidence` (`session_id`) recomputes the chain and reports tampering/gaps.
+5. **Verify constraints** — `verify_constraints` (`session_id`, `agent_id`) runs the snapshot's
+   `code_checks` against the real repo and records the **achieved assurance tier** per rule
+   (Advisory / Verified / Enforced). This is post-hoc verification, distinct from `verify_evidence`
+   (chain integrity). A rule that declares `hard` still only reaches Advisory/Verified without a
+   chokepoint that can deny.
+6. **Hand off (when switching harness)** — `export_handoff` (`session_id`, `to_agent`, `context`)
+   produces a bundle carrying the achieved tiers; the next harness calls `import_handoff` (`bundle`,
+   `new_agent`) then `acknowledge_rules` again, and **re-verifies** — a tier drop is warned, not
+   blocked. Use `get_session_context` to resume work another harness started.
+7. **Verify** — `verify_evidence` (`session_id`) recomputes the chain and reports tampering/gaps.
 
 Always pass a stable `agent_id` identifying your harness (e.g. `claude-code`, `gemini-cli`).
 Project contracts live in `<project>/.agent-control/rules/`; user preferences in
@@ -75,7 +81,10 @@ or findings. When you discover a lasting project contract (e.g. "the upstream `i
 bool or string; normalize explicitly"), record it as a rule with **`save_rule`**: pass `id`,
 `title`, `content`, `agent_id`, `scope: "project"`, `kind: "contract"`, and `project_path`. It writes
 a file into the project's `rules/`, shows up in the console, and binds **all future sessions**.
-Reusing an `id` updates the rule and bumps its version. For a personal preference use `scope: "user"`
+Reusing an `id` updates the rule and bumps its version. Optionally pass `enforcement`
+(`advisory` default, `verify`, or `hard`) to declare whether the rule is mechanically checkable, and
+`code_checks` (`file` / `key` / `expect`) so `verify_constraints` can evaluate it against the repo.
+For a personal preference use `scope: "user"`
 (no `project_path`). Do not hand-edit rule files behind the console's back — use `save_rule` so
 provenance and the GUI stay consistent. Onboarded projects ship copy-ready templates in
 `<project>/.agent-control/examples/` (not binding until copied into `rules/`).
@@ -138,9 +147,14 @@ calling MCP. Two mechanisms deliver the binding set to them:
 
   Set `AGENT_CONTROL_MCP_URL` if your endpoint differs from `http://127.0.0.1:9870/mcp`.
 
-**Reach is not enforcement.** Export and the hook make rules *reach* an agent; they do not force
-compliance. Verify with `code_checks` (reads real repo files) and `verify_evidence` (hash chain);
-hard enforcement only exists where the console mediates the action (the ACP permission round-trip).
+**Reach ≠ verify ≠ enforce.** Export and the hook make rules *reach* an agent; they do not force
+compliance. Two axes stay separate: a rule's declared `enforcement` (`advisory` / `verify` / `hard`)
+vs the session's **achieved tier** (`Advisory` < `Verified` < `Enforced`). `verify_constraints` runs
+`code_checks` against the real repo to earn `Verified` (post-hoc); `verify_evidence` checks the hash
+chain. `Enforced` requires a chokepoint that can deny (the ACP permission round-trip) — declaring
+`hard` without one still caps at Advisory/Verified. After editing rules, `check_export_drift` flags
+stale native exports (file-vs-store staleness only, not a running session's context) and prompts a
+re-export; it never rewrites files.
 
 ## ACP harness integration
 
@@ -153,7 +167,7 @@ permission policies, and how to make your CLI ACP-compatible.
 
 ## Resources
 
-- [references/mcp-tools.md](references/mcp-tools.md) — all 16 tools (parameters + returns), the 3
+- [references/mcp-tools.md](references/mcp-tools.md) — all 18 tools (parameters + returns), the 3
   resources, the `constraint-briefing` prompt, and concrete call examples.
 - [references/acp-harness.md](references/acp-harness.md) — `agents.yaml`, harness config, permission
   flow, constraint briefing, automatic evidence, and writing an ACP agent.

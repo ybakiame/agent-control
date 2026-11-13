@@ -51,6 +51,38 @@ impl std::fmt::Display for RuleKind {
     }
 }
 
+/// How a rule is meant to be assured. This is a property of the rule (whether it is mechanically
+/// checkable), not of the harness. The tier actually achieved in a session is recorded separately
+/// as [`AssuranceTier`]: declaring `Hard` does not by itself enforce anything — without a chokepoint
+/// it still only reaches `Advisory`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Enforcement {
+    /// Semantic guidance, not mechanically checkable. Can only ever reach `Advisory`.
+    #[default]
+    Advisory,
+    /// Carries `code_checks` evaluable against the repo post-hoc; can reach `Verified`.
+    Verify,
+    /// Must be mediated at a chokepoint that can deny; can reach `Enforced`. Needs an executable check.
+    Hard,
+}
+
+impl Enforcement {
+    pub fn label(self) -> &'static str {
+        match self {
+            Enforcement::Advisory => "advisory",
+            Enforcement::Verify => "verify",
+            Enforcement::Hard => "hard",
+        }
+    }
+}
+
+impl std::fmt::Display for Enforcement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceKind {
@@ -127,6 +159,8 @@ pub struct Rule {
     pub code_checks: Vec<CodeCheck>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub enforcement: Enforcement,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub checksum: String,
 }
@@ -392,6 +426,47 @@ pub enum SessionStatus {
     Failed,
 }
 
+/// The assurance actually achieved for a constraint in a session, computed from evidence rather than
+/// merely declared. Ordered so a handoff can detect a drop: `Advisory < Verified < Enforced`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AssuranceTier {
+    /// Delivered (export / hook / query) but no mechanical check ran and no chokepoint mediated it.
+    #[default]
+    Advisory,
+    /// The rule's `code_checks` were evaluated against the repo and passed; the result is in the chain.
+    Verified,
+    /// Mediated at a chokepoint (ACP permission round-trip / PreToolUse / repo gate) that can deny.
+    Enforced,
+}
+
+impl AssuranceTier {
+    pub fn label(self) -> &'static str {
+        match self {
+            AssuranceTier::Advisory => "advisory",
+            AssuranceTier::Verified => "verified",
+            AssuranceTier::Enforced => "enforced",
+        }
+    }
+}
+
+impl std::fmt::Display for AssuranceTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Per-constraint assurance recorded on a session: what the rule declared vs what was actually
+/// achieved, with a human-readable basis. Lives beside the frozen snapshot so the snapshot hash
+/// (computed over rules only) stays intact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintAssurance {
+    pub rule_id: String,
+    pub declared: Enforcement,
+    pub achieved: AssuranceTier,
+    pub basis: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstraintSnapshot {
     pub rules: Vec<Rule>,
@@ -422,6 +497,8 @@ pub struct Session {
     pub constraint_snapshot: ConstraintSnapshot,
     #[serde(default)]
     pub handoffs: Vec<HandoffRecord>,
+    #[serde(default)]
+    pub assurance: Vec<ConstraintAssurance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,6 +517,8 @@ pub struct HandoffBundle {
     pub task: String,
     pub project_path: PathBuf,
     pub constraint_snapshot: ConstraintSnapshot,
+    #[serde(default)]
+    pub assurance: Vec<ConstraintAssurance>,
     pub evidence_head_hash: String,
     pub context: serde_json::Value,
     pub from_agent: String,
@@ -537,6 +616,8 @@ pub struct RuleSuggestion {
     pub topic: Option<String>,
     pub content: String,
     pub kind: RuleKind,
+    #[serde(default)]
+    pub enforcement: Enforcement,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -567,6 +648,8 @@ pub struct SuggestionEdits {
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<RuleKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement: Option<Enforcement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

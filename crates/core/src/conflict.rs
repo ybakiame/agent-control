@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::model::{Conflict, ConflictKind, QueryContext, RuleMatch};
+use crate::model::{Conflict, ConflictKind, QueryContext, Rule, RuleMatch};
 
 pub fn detect_code_conflicts(applied: &[RuleMatch], ctx: &QueryContext) -> Vec<Conflict> {
     let mut conflicts = Vec::new();
@@ -32,6 +32,61 @@ pub fn detect_code_conflicts(applied: &[RuleMatch], ctx: &QueryContext) -> Vec<C
         }
     }
     conflicts
+}
+
+/// Outcome of evaluating a single `code_check` against the repo. Unlike conflict detection (which
+/// silently skips missing/unreadable files), verification distinguishes them so a missing file can
+/// never masquerade as a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Pass,
+    Fail,
+    Missing,
+    Unreadable,
+}
+
+/// The result of one `code_check`: what was expected, what was found (if anything), and the verdict.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CheckResult {
+    pub file: String,
+    pub key: String,
+    pub expect: String,
+    pub actual: Option<String>,
+    pub status: CheckStatus,
+}
+
+/// Evaluate every `code_check` on a rule against real repo files. Used by session verification to
+/// compute the achieved assurance tier: a rule reaches `Verified` only when all checks `Pass`.
+pub fn evaluate_code_checks(rule: &Rule, project_path: &Path) -> Vec<CheckResult> {
+    let mut results = Vec::new();
+    for check in &rule.code_checks {
+        let file_path = project_path.join(&check.file);
+        let (actual, status) = if !file_path.exists() {
+            (None, CheckStatus::Missing)
+        } else {
+            match read_config_value(&file_path, &check.key) {
+                Ok(Some(value)) => {
+                    let status = if values_agree(&check.expect, &value) {
+                        CheckStatus::Pass
+                    } else {
+                        CheckStatus::Fail
+                    };
+                    (Some(value), status)
+                }
+                Ok(None) => (None, CheckStatus::Missing),
+                Err(_) => (None, CheckStatus::Unreadable),
+            }
+        };
+        results.push(CheckResult {
+            file: check.file.clone(),
+            key: check.key.clone(),
+            expect: check.expect.clone(),
+            actual,
+            status,
+        });
+    }
+    results
 }
 
 fn values_agree(expected: &str, actual: &str) -> bool {

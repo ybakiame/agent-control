@@ -163,6 +163,38 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ),
     ("rules.enabled_toast", "Rule enabled", "规则已启用"),
     ("rules.disabled_toast", "Rule disabled", "规则已禁用"),
+    // Enforcement intent (declared on a rule) & achieved assurance tiers (computed per session).
+    ("enforcement.label", "Enforcement", "强制级别"),
+    ("enforcement.advisory", "advisory", "建议"),
+    ("enforcement.verify", "verify", "可验证"),
+    ("enforcement.hard", "hard", "强制"),
+    (
+        "enforcement.hint",
+        "Declaring hard does not by itself enforce: without a chokepoint that can deny, it caps at Advisory/Verified.",
+        "声明「强制」本身并不等于强制：没有可拒绝的卡点时，最高只到「建议/已验证」。",
+    ),
+    ("rules.enforcement", "Enforcement intent", "强制意图"),
+    ("tier.advisory", "Advisory", "建议"),
+    ("tier.verified", "Verified", "已验证"),
+    ("tier.enforced", "Enforced", "已强制"),
+    ("sess.assurance_title", "Achieved assurance", "已达保证级别"),
+    ("sess.verify_constraints", "Verify constraints", "验证约束"),
+    (
+        "sess.verified_toast",
+        "Constraints verified: {} verified, {} advisory",
+        "约束已验证：{} 已验证，{} 建议",
+    ),
+    (
+        "sess.assurance_empty",
+        "Not verified yet. Run Verify constraints to evaluate code_checks against the repo.",
+        "尚未验证。运行「验证约束」以针对仓库评估 code_checks。",
+    ),
+    ("proj.export_stale", "export stale", "导出过期"),
+    (
+        "proj.export_stale_hint",
+        "Native export is out of date with the current rules. Re-export to refresh the managed blocks.",
+        "原生导出与当前规则不一致。重新导出以刷新托管块。",
+    ),
     // Provenance
     ("prov.title", "Provenance", "溯源"),
     ("prov.rules_count", "{} rules", "{} 条规则"),
