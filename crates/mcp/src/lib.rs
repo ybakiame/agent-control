@@ -90,9 +90,9 @@ fn parse_targets(
     Ok(out)
 }
 
-/// Resolve the requested hook targets. Omitted or empty defaults to all three harnesses (each reads
-/// only its own settings.json, so writing all is safe); unknown names are rejected, duplicates
-/// collapse preserving first-seen order.
+/// Resolve the requested hook targets. Omitted or empty defaults to all nine harnesses (each reads
+/// only its own config, so writing all is safe); unknown names are rejected, duplicates collapse
+/// preserving first-seen order.
 fn parse_hook_targets(
     raw: Option<Vec<String>>,
 ) -> Result<Vec<agent_control_core::HookTarget>, ErrorData> {
@@ -105,7 +105,9 @@ fn parse_hook_targets(
     for name in names {
         let target = HookTarget::parse(&name).ok_or_else(|| {
             ErrorData::invalid_params(
-                format!("unknown hook target '{name}'; use claude|codebuddy|workbuddy|qoder"),
+                format!(
+                    "unknown hook target '{name}'; use claude|codebuddy|workbuddy|qoder|qoder-cn|codex|cursor|antigravity|kimi"
+                ),
                 None,
             )
         })?;
@@ -456,10 +458,13 @@ pub struct CheckToolCallRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RegisterHooksRequest {
-    /// Absolute project path whose harness settings.json files receive the hook
+    /// Absolute project path whose harness config files receive the hook
     pub project_path: String,
-    /// Which harnesses to register: claude | codebuddy | workbuddy | qoder. Omitted defaults to
-    /// all four; each reads only its own settings.json, so there is no cross-harness conflict.
+    /// Which harnesses to register: claude | codebuddy | workbuddy | qoder | qoder-cn | codex |
+    /// cursor | antigravity | kimi. Omitted defaults to all nine. Each reads only its own config, so
+    /// there is no cross-harness conflict. Kimi and Antigravity are user-scope: they write the
+    /// user-global config, but the gate still evaluates per project_path (cwd), so enforcement is
+    /// project-aware even though registration is global.
     #[serde(default)]
     pub targets: Option<Vec<String>>,
     /// Full command line that runs the hook script (e.g. node "/abs/agent-control-hook.mjs"). Omitted
@@ -470,16 +475,19 @@ pub struct RegisterHooksRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RevokeHooksRequest {
-    /// Absolute project path whose harness settings.json files should have the hook removed
+    /// Absolute project path whose harness config files should have the hook removed
     pub project_path: String,
-    /// Which harnesses to revoke: claude | codebuddy | workbuddy | qoder. Omitted defaults to all four.
+    /// Which harnesses to revoke: claude | codebuddy | workbuddy | qoder | qoder-cn | codex |
+    /// cursor | antigravity | kimi. Omitted defaults to all nine.
     #[serde(default)]
     pub targets: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DetectHooksRequest {
-    /// Absolute project path to inspect for installed harnesses and existing hook registration
+    /// Absolute project path to inspect for installed harnesses and existing hook registration.
+    /// Reports all nine targets with their scope (project or user); user-scope targets (kimi,
+    /// antigravity) inspect the user-global config.
     pub project_path: String,
 }
 
@@ -1185,7 +1193,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Register the Agent Control hook into the selected harnesses' project settings.json so the harness itself drives enforcement. Writes a SessionStart hook (injects the binding-rule briefing) and a PreToolUse hook (runs check_tool_call to deny calls that violate hard rules) — this is what turns a hard rule into an Enforced one. Choose targets (claude | codebuddy | workbuddy | qoder); omitted registers all four (each reads only its own settings.json; CodeBuddy and WorkBuddy are separate products). The hook command defaults to the bundled agent-control-hook.mjs beside the executable; override with `command`. Every other settings key and user-authored hook is preserved; re-registering is idempotent. The daemon must be reachable at the hook endpoint (default http://127.0.0.1:9870/mcp). Use revoke_hooks to undo, detect_hooks to inspect."
+        description = "Register the Agent Control hook into the selected harnesses' config so each harness drives enforcement itself. Writes a start hook (freezes the constraint snapshot and, where supported, injects the binding-rule briefing) and a gate hook (runs check_tool_call to deny calls that violate hard rules) — this is what turns a hard rule into an Enforced one. Nine targets: claude | codebuddy | workbuddy | qoder | qoder-cn | codex | cursor | antigravity | kimi; omitted registers all nine. Each writes its own config in its own schema: nested settings.json hooks (claude, codebuddy, workbuddy, qoder, qoder-cn, codex), Cursor flat hooks.json (version:1, sessionStart/preToolUse), Antigravity named bundle in ~/.gemini/config/hooks.json (PreInvocation/PreToolUse), Kimi [[hooks]] block in ~/.kimi-code/config.toml. Kimi and Antigravity are user-scope (write the user-global config) but the gate evaluates per project_path/cwd, so enforcement stays project-aware. Deny shapes are vendor-native: exit 2 + stderr for the claude family, {permission:deny} JSON for Cursor, {decision:deny} JSON for Antigravity. The hook command defaults to the bundled agent-control-hook.mjs beside the executable (vendor + event baked into argv); override with `command`. Every other config key and user-authored hook is preserved; re-registering is idempotent. The daemon must be reachable at the hook endpoint (default http://127.0.0.1:9870/mcp). Use revoke_hooks to undo, detect_hooks to inspect."
     )]
     async fn register_hooks(
         &self,
@@ -1219,7 +1227,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Revoke (remove) the Agent Control hook from the selected harnesses' project settings.json — the explicit undo of register_hooks. Other config and user-authored hooks are preserved; a settings file that held only our hook is deleted. Choose targets (claude | codebuddy | workbuddy | qoder); omitted defaults to all four. A target with no managed hook is left unchanged, so re-running is safe. After revoking, hard rules are no longer mediated and cap at Advisory/Verified."
+        description = "Revoke (remove) the Agent Control hook from the selected harnesses' config — the explicit undo of register_hooks. Other config and user-authored hooks are preserved; a config file that held only our hook is deleted (for Kimi, only our managed [[hooks]] block is stripped from config.toml, leaving the rest byte-for-byte). Choose targets (claude | codebuddy | workbuddy | qoder | qoder-cn | codex | cursor | antigravity | kimi); omitted defaults to all nine. Kimi and Antigravity are user-scope, so this edits the user-global config. A target with no managed hook is left unchanged, so re-running is safe. After revoking, hard rules are no longer mediated and cap at Advisory/Verified."
     )]
     async fn revoke_hooks(
         &self,
@@ -1243,7 +1251,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Detect which harnesses (Claude Code, CodeBuddy, WorkBuddy, Qoder) are installed and whether the Agent Control hook is already registered in each one's project settings.json. Read-only; drives the console's one-click register/restore UI. Returns per-harness installed/registered flags and the settings path. Use before register_hooks to choose targets."
+        description = "Detect which harnesses are installed and whether the Agent Control hook is already registered in each one's config. Covers all nine: Claude Code, CodeBuddy, WorkBuddy, Qoder, Qoder CN, Codex, Cursor, Antigravity, Kimi Code. Read-only; drives the console's one-click register/restore UI. Returns per-harness installed/registered flags, the config path, and the scope (project or user — kimi and antigravity inspect the user-global config). Use before register_hooks to choose targets."
     )]
     async fn detect_hooks(
         &self,

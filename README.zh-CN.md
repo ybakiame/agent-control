@@ -15,7 +15,7 @@
 Agent Control 是同一规则库之上的**解析层**，会**编译进**这些格式并补足它们缺失的能力：按上下文
 （文件路径、语言、任务标签）判定**哪些**规则绑定**这个** agent，记录每条规则为何胜出 / 被取代 /
 被过滤 / 被禁用（溯源），对照**真实仓库状态**与彼此检测冲突，并把生效集冻结成**跨 harness** 仍然
-绑定的快照。解析后的契约通过三种方式触达 agent：以**指针块导出**进项目的
+绑定的快照。以 MCP 为解析主干；解析后的契约再经 agent 本就在用的渠道触达——以**指针块对齐**进项目的
 `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `.cursor/rules`（引导 agent 去读活规则，保留手写内容）、在 harness
 会话开始时经 SessionStart hook **主动推送**、或经 MCP **查询**；PreToolUse hook 再对每次工具调用把关，
 **强制** hard 规则。卖点是**可追溯溯源 + 冲突检测 + 跨 harness 冻结快照**，并交付进 agent 本就会读取的工具。
@@ -68,10 +68,12 @@ Agent Control 是同一规则库之上的**解析层**，会**编译进**这些�
 - **MCP 服务端**（rmcp），支持 **stdio** 与 **Streamable HTTP** 两种模式，暴露 25 个工具及资源与提示。
   守护进程的回环**端口可在设置中配置**（默认 `9870`）并存于 `config.toml`，因此便携/dev 实例可绑定不同端口、
   与生产隔离；侧栏图标按钮可一眼启停守护进程。
-- **Hooks 强制**，支持 Claude Code / CodeBuddy / WorkBuddy / Qoder：一键 `register_hooks`（或 Projects → Hooks
-  面板）向各 harness 的 `settings.json` 写入 **SessionStart** hook（注入绑定规则简报）与 **PreToolUse** hook
-  （调用 `check_tool_call` 拒绝违反 `hard` 规则的工具调用）。这是赢得 **Enforced** 级别的可拒绝卡点；
-  `detect_hooks` / `revoke_hooks` 检测与撤回。
+- **Hooks 强制**，支持**九家编码 agent**——Claude Code、CodeBuddy、WorkBuddy、Qoder、Qoder CN、Codex、
+  Cursor、Antigravity、Kimi Code：一键 `register_hooks`（或 Projects → Hooks 面板）按各 harness 自己的
+  配置 schema（嵌套 JSON、Cursor 扁平 JSON、Antigravity 命名 bundle、Kimi TOML）写入 **start** hook
+  （注入绑定规则简报）与 **pre-tool** hook（调用 `check_tool_call` 拒绝违反 `hard` 规则的工具调用）。
+  这是 **Enforced** 级别背后的可拒绝卡点；`detect_hooks` / `revoke_hooks` 检测与撤回。七家写入项目级配置；
+  Kimi 与 Antigravity 为用户级，但仍按调用的工作目录逐项目网关。
 - **混合存储**：git 友好的 Markdown/YAML 规则文件 + SQLite 存会话、溯源与证据链。
 - **无障碍优先的自动化**：GUI 暴露完整的 UI Automation（AccessKit）树，测试按元素名 / `InvokePattern`
   驱动，而非合成鼠标点击。
@@ -102,8 +104,9 @@ node scripts/mcp-http-e2e.mjs   # Streamable HTTP MCP 传输
 node scripts/hook-e2e.mjs       # 针对活守护进程的 SessionStart/PreToolUse hook 行为
 ```
 
-hook 检查针对一个临时守护进程 spawning `scripts/agent-control-hook.mjs`，断言拒绝/放行的退出码
-（PreToolUse 拒绝 → 退出 2，放行 → 退出 0，守护进程不可达时 fail-open）。
+hook 检查针对一个临时守护进程运行 `scripts/agent-control-hook.mjs`，断言各厂商的拒绝/放行契约
+（claude 式退出 2 / Cursor `{permission}` / Antigravity `{decision}`）、守护进程不可达时 fail-open，
+以及可选的 fail-closed 模式。
 
 ## 连接代理
 
@@ -115,7 +118,7 @@ hook 检查针对一个临时守护进程 spawning `scripts/agent-control-hook.m
 - **stdio**：`cargo run -p agent-control-mcp -- --stdio`
 - **HTTP**：`http://127.0.0.1:9870/mcp`（Streamable HTTP，`mcp-session-id` 头）
 
-harness 推荐调用顺序：
+harness 推荐调用顺序（**MCP 协作路径**，即 agent 自行调用 MCP；从不调用 MCP 的 agent 则经导出 + hooks 触达）：
 
 1. `get_applicable_rules` — 动手前解析绑定规则 + 溯源 + 冲突。
 2. `create_session` — 冻结约束快照。按 (项目, agent, 任务) get-or-create：相同三元组的活动会话原样返回
@@ -187,11 +190,14 @@ harness 推荐调用顺序：
 并提供**删除会话**动作（顶栏按钮或行右键），在确认对话框后级联删除会话的证据链 + 溯源。
 
 `check_tool_call`（`project_path`、`tool_name`、`tool_input`、`agent_id`、可选 `session_id`）是**可拒绝的 PreToolUse
-网关**——唯一赢得 `Enforced` 级别的路径。它以两种方式评估项目启用的 `hard` 规则：**仓库网关**（hard 规则的
-`code_checks` 失败或不确定时拒绝工具，直到仓库合规）与**工具守卫**（规则的 `tool_guards`——工具名 glob + 输入
-正则——拒绝匹配的调用，例如阻断 `rm -rf`）。PreToolUse hook 在每次工具调用前调用它，拒绝时以退出码 2 + stderr
-原因阻断该调用。无 `hard` 规则时 fail-open。`register_hooks` / `revoke_hooks` / `detect_hooks` 管理各 harness
-`settings.json` 中的 hook 接线（见下文**原生导出与 hooks**）；Projects → Hooks 面板一键完成同样的事。
+网关**——唯一达成 `Enforced` 级别的路径，且**仅在传入 `session_id` 时**按会话记录该级别（见下文**保证分级**）。
+它以两种方式评估项目启用的 `hard` 规则：**仓库网关**（hard 规则的 `code_checks` 失败或不确定时拒绝工具，直到仓库
+合规）与**工具守卫**（规则的 `tool_guards`——工具名 glob + 输入正则——拒绝匹配的调用，例如阻断 `rm -rf`）。
+pre-tool hook 在每次工具调用前调用它，拒绝时以厂商的拒绝形态阻断该调用（claude 式厂商为退出码 2 + stderr）。
+hook 会解析自己的 Agent Control 会话（get-or-create，task `hook`）并传入该 `session_id`，因此即便没有显式 MCP 会话，
+被中介的 `hard` 规则也能达成 **Enforced** 并把裁决写入证据链。无 `hard` 规则时 fail-open。`register_hooks` /
+`revoke_hooks` / `detect_hooks` 管理各 harness 自己配置中的 hook 接线（见下文**原生导出与 hooks**）；
+Projects → Hooks 面板一键完成同样的事。
 
 ## 原生导出与 hooks
 
@@ -204,19 +210,46 @@ harness 推荐调用顺序：
   提交被 git 忽略的环境说明。块是管理边界：重复导出只替换块，故其周围的 frontmatter 与手写正文得以保留，
   `revoke_native` / **撤回**按钮可再次移除它。Cursor 目标把 `---` frontmatter 保留在块外。这让任何读该文件的
   agent 都能发现契约，无需 MCP 集成。
-- **SessionStart + PreToolUse hook（推送 + 强制）。**
-  [`scripts/agent-control-hook.mjs`](scripts/agent-control-hook.mjs) 是面向 Claude Code / CodeBuddy / WorkBuddy / Qoder
-  的无依赖 Node hook。在 **SessionStart** 它经本地 MCP HTTP 端点调用 `get_applicable_rules`，把简明简报
-  （绑定规则 + 冲突 + 机器/项目**工作环境**）经 `hookSpecificOutput.additionalContext` 注入会话上下文。在
-  **PreToolUse** 它带待执行的工具名/输入调用 `check_tool_call`，拒绝时以退出码 2 + stderr 原因**阻断该调用**——
-  这是把 `hard` 规则提升到 `Enforced` 的卡点。它**fail-open**：守护进程不可达/缓慢时静默退出 0，绝不因基础设施
-  阻塞会话或拒绝工具。用 `register_hooks`（或 Projects → **Hooks** 面板）注册这两个事件，它向各 harness 的
-  `settings.json` 写入托管组，保留你的其余配置与 hook；`detect_hooks` 检测、`revoke_hooks` 撤回。若端点不是默认
-  `http://127.0.0.1:9870/mcp`，把 `AGENT_CONTROL_MCP_URL` 指向你的端点。
+- **start + pre-tool hook（推送 + 强制）。**
+  [`scripts/agent-control-hook.mjs`](scripts/agent-control-hook.mjs) 是一个服务全部九家 agent 的无依赖 Node hook；
+  注册命令把厂商 id 与事件名 baked 进 argv，脚本据此选择正确的 stdin 归一与输出形态。厂商分三种 I/O 形态：
+  **claude 式**（Claude Code、CodeBuddy、WorkBuddy、Qoder、Qoder CN、Codex、Kimi——退出 2 + stderr 拒绝，简报经
+  `hookSpecificOutput.additionalContext`）、**Cursor**（合法 JSON 的 `{permission:"allow"|"deny"}` 裁决，简报经
+  `{additional_context}`）、**Antigravity**（`{decision:"ask"|"deny"}`——沉默被视为拒绝，故放行必须输出 `ask`；
+  stdin 把调用嵌套在 `toolCall.{name,args}` 下）。在 **start** 事件它冻结约束快照（get-or-create 会话），并在厂商
+  支持注入时把简明简报（绑定规则 + 冲突 + 机器/项目**工作环境**）推入上下文。在 **pre-tool** 事件它解析同一会话，
+  带待执行的工具名/输入**及该 `session_id`** 调用 `check_tool_call`，因此拒绝时以厂商形态阻断调用，被中介的 `hard`
+  规则达成被记录的 **Enforced** 级别（见**保证分级**）。它默认 **fail-open**：守护进程不可达/缓慢时输出厂商的放行形态，
+  绝不因基础设施阻塞会话或拒绝工具。设置 `AGENT_CONTROL_HOOK_FAIL_CLOSED` 可启用 **fail-closed** 强制——无法取得裁决的
+  *pre-tool* 调用将拒绝（start 事件始终 fail-open，绝不阻塞会话初始化）。用 `register_hooks`（或 Projects → **Hooks**
+  面板）注册这两个事件，它向各 harness 自己的配置写入托管组，保留你的其余配置与 hook；`detect_hooks` 检测、
+  `revoke_hooks` 撤回。若端点不是默认 `http://127.0.0.1:9870/mcp`，把 `AGENT_CONTROL_MCP_URL` 指向你的端点。
+
+**harness 覆盖范围。** `register_hooks` / `revoke_hooks` / `detect_hooks` 接线**九家**编码 agent，各自经自己的
+配置 schema（一个 `ConfigCodec`）、事件名与拒绝形态：
+
+| Agent | 配置文件 | Codec | 作用域 | start / pre-tool 事件 | 拒绝形态 |
+|-------|----------|-------|--------|------------------------|----------|
+| Claude Code | `.claude/settings.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
+| CodeBuddy | `.codebuddy/settings.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
+| WorkBuddy | `.workbuddy/settings.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
+| Qoder | `.qoder/settings.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
+| Qoder CN | `.qoder-cn/settings.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
+| Codex | `.codex/hooks.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
+| Cursor | `.cursor/hooks.json` | 扁平 JSON（`version:1`） | 项目 | `sessionStart` / `preToolUse` | `{permission:"deny",…}` |
+| Antigravity | `~/.gemini/config/hooks.json` | 命名 bundle | 用户 | `PreInvocation` / `PreToolUse` | `{decision:"deny",reason}` |
+| Kimi Code | `~/.kimi-code/config.toml` | TOML 标记块 | 用户 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
+
+七家把 hook 写入**项目级**配置（共享、可提交）。**Kimi** 与 **Antigravity** 为**用户级**（用户全局文件），但网关仍按
+调用的工作目录解析规则，故用户级 hook 只对匹配的项目强制。Antigravity 取代了原先的 Gemini CLI 目标。每次写入都保留
+配置的其余部分与用户自写的 hook，是原子写入，并可经 `revoke_hooks` 撤回；Kimi 的 TOML codec 只编辑自己的 `[[hooks]]`
+标记块，故用户注释得以保留。`detect_hooks` 报告全部九家并带 `scope` 字段（`project` | `user`）。不具备可拒绝 hook 的
+agent 仍经 `export_native`（`AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `.cursor/rules`）加 MCP 协作路径触达。
 
 ### 保证分级
 
-**触达 ≠ 校验，校验 ≠ 强制。** Agent Control 把两条正交轴彼此分开，绝不夸大：
+**触达 ≠ 校验，校验 ≠ 强制。** Agent Control 所做的大部分是*触达*：导出与 SessionStart 简报让规则对 agent 可见，
+但可见的规则只是 **Advisory**，直到有机械校验或卡点中介它。Agent Control 把两条正交轴彼此分开，绝不夸大：
 
 - **声明意图——`Rule.enforcement`**（`advisory` | `verify` | `hard`）：*规则*的属性。`advisory` 为语义指引
   （不可机械校验）；`verify` 携带可对照仓库评估的 `code_checks`；`hard` 声称须在可拒绝的卡点中介。声明 `hard`
@@ -226,13 +259,17 @@ harness 推荐调用顺序：
 
 | 级别 | 含义 | 如何赢得 |
 |------|------|----------|
-| **Advisory** | 已触达，但无机械校验运行、无物拦截动作。 | 导出 / hook / 查询。语义规则永远停在此级。 |
+| **Advisory** | 已触达，但无机械校验运行、无物拦截动作。 | 导出 / SessionStart 简报 / 查询。语义规则永远停在此级。 |
 | **Verified** | 规则的 `code_checks` 已对照真实仓库运行并通过；结果入链。 | `verify_constraints`（事后）。 |
-| **Enforced** | 动作在可拒绝的卡点被中介。 | PreToolUse hook → `check_tool_call`（事前）。 |
+| **Enforced** | 动作在可拒绝的卡点被中介，且裁决已按会话记录。 | 带 `session_id` 的 `check_tool_call`（事前拒绝）。 |
 
-没有卡点时 `hard` 规则最高只到 **Advisory/Verified**——没有事前拒绝。导出与 SessionStart hook 只让规则*触达*
-agent；`code_checks` + 哈希链在事后*校验*；硬强制只存在于 **PreToolUse hook** 中介动作本身之处
-（`check_tool_call` 拒绝调用），且无法强迫运行在该中介之外的不合作 agent。用 `register_hooks` 注册 hook 以启用。
+**强制是行为；`Enforced` *级别*是按会话的记录。** pre-tool 网关（`check_tool_call`）是唯一达成 `Enforced` 的路径，
+且**仅在传入 `session_id` 时**写入该级别（外加一条 `ToolGate` 证据）。随附 hook 会解析自己的 Agent Control 会话——
+`create_session` 是按（项目、agent、task `hook`）的 get-or-create，故同一项目+agent 的每次 hook 调用都落在同一会话
+UUID 上——并把该 id 传给 `check_tool_call`。因此仅部署 hook 时既*强制了动作*又把 `Enforced` *记录*进该会话的证据链；
+harness 经 stdin 传入的 session id 从不被使用（它并非 Agent Control 的 UUID）。MCP 协作路径则记录进 agent 的显式会话。
+没有注册 hook 中介调用时，`hard` 规则最高只到 **Advisory/Verified**，且无法强迫运行在卡点之外的不合作 agent。
+用 `register_hooks` 注册 hook 以启用行为强制。
 
 **交接携带基线，而非保证。** `export_handoff` 带上源会话的已达级别**与其工作态**（经 `update_work_state` 记录的
 `goal` + done/doing/todo `work_items`）；`import_handoff` 展示它们并**警告**新 harness 须重新校验（警告而非阻断）。

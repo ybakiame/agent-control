@@ -251,11 +251,11 @@ try {
     hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo user" }] }] },
   }));
   const hookCmd = 'node "C:/throwaway/agent-control-hook.mjs"';
-  const hookTargets = ["claude", "codebuddy", "workbuddy", "qoder"];
+  const hookTargets = ["claude", "codebuddy", "workbuddy", "qoder", "qoder-cn", "codex", "cursor"];
   const registered = await call("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });
   check(
-    "register_hooks over HTTP writes all four harness settings",
-    registered.report?.targets?.length === 4 && registered.command === hookCmd,
+    "register_hooks over HTTP writes all seven project-scope configs",
+    registered.report?.targets?.length === 7 && registered.command === hookCmd,
     registered,
   );
   const claudeJson = JSON.parse(readFileSync(claudeSettings, "utf8"));
@@ -269,8 +269,9 @@ try {
   );
   const detected = await call("detect_hooks", { project_path: hooksDir });
   check(
-    "detect_hooks over HTTP reports all four registered",
-    detected.harnesses?.length === 4 && detected.harnesses.every((h) => h.registered),
+    "detect_hooks over HTTP reports nine harnesses, seven project-scope registered",
+    detected.harnesses?.length === 9 &&
+      detected.harnesses.filter((h) => h.scope === "project").every((h) => h.registered),
     detected,
   );
   const reregistered = await call("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });
@@ -289,7 +290,10 @@ try {
       claudeAfter.hooks.SessionStart === undefined &&
       !existsSync(join(hooksDir, ".codebuddy", "settings.json")) &&
       !existsSync(join(hooksDir, ".workbuddy", "settings.json")) &&
-      !existsSync(join(hooksDir, ".qoder", "settings.json")),
+      !existsSync(join(hooksDir, ".qoder", "settings.json")) &&
+      !existsSync(join(hooksDir, ".qoder-cn", "settings.json")) &&
+      !existsSync(join(hooksDir, ".codex", "hooks.json")) &&
+      !existsSync(join(hooksDir, ".cursor", "hooks.json")),
     claudeAfter,
   );
 } catch (e) {

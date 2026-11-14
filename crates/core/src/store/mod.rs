@@ -1002,11 +1002,14 @@ impl Store {
         })
     }
 
-    /// Register the Agent Control hook into the selected harnesses' project `settings.json`. Writes
-    /// both a `SessionStart` briefing hook and a `PreToolUse` gate hook that run `command` (the full
-    /// shell command line invoking the hook script). Every other key and user-authored hook is
-    /// preserved; re-registering is idempotent. This is what turns a `Hard` rule into an `Enforced`
-    /// one: the harness now mediates tool calls through `check_tool_call`.
+    /// Register the Agent Control hook into the selected harnesses' config. Writes both a briefing
+    /// hook (reach) and a gate hook (enforce) that run `command` (the base shell invocation of the
+    /// hook script; the vendor id and event are appended per entry). Project-scope vendors write the
+    /// repo config; user-only vendors (Kimi, Antigravity) write a user-global file whose gate still
+    /// only enforces for the matching project (rules resolve by the call's `cwd`). Every other key and
+    /// user-authored hook is preserved; re-registering is idempotent and writes are atomic. This is
+    /// what turns a `Hard` rule into an `Enforced` one: the harness mediates tool calls through
+    /// `check_tool_call`.
     pub fn register_hooks(
         &self,
         project_path: &Path,
@@ -1019,7 +1022,8 @@ impl Store {
         let mut outcomes = Vec::new();
         for target in targets {
             outcomes.push(write_hooks_file(
-                &target.settings_path(project_path),
+                &target.config_path(project_path)?,
+                *target,
                 command,
             )?);
         }
@@ -1029,13 +1033,16 @@ impl Store {
         })
     }
 
-    /// Revoke the Agent Control hook from the selected harnesses' project `settings.json` — the
-    /// explicit undo of `register_hooks`. Other config and user hooks are preserved; a settings file
-    /// that held only our hook is deleted. A target with no managed hook is left unchanged.
+    /// Revoke the Agent Control hook from the selected harnesses' config — the explicit undo of
+    /// `register_hooks`. Other config and user hooks are preserved; a file that held only our hook is
+    /// deleted. A target with no managed hook is left unchanged.
     pub fn revoke_hooks(&self, project_path: &Path, targets: &[HookTarget]) -> Result<HookReport> {
         let mut outcomes = Vec::new();
         for target in targets {
-            outcomes.push(revoke_hooks_file(&target.settings_path(project_path))?);
+            outcomes.push(revoke_hooks_file(
+                &target.config_path(project_path)?,
+                *target,
+            )?);
         }
         Ok(HookReport {
             project_path: project_path.to_path_buf(),
@@ -1044,19 +1051,20 @@ impl Store {
     }
 
     /// Detect which harnesses are installed and whether our hook is already registered in each one's
-    /// project settings. Read-only: drives the console's one-click register/restore UI.
+    /// config (project or user level). Read-only: drives the console's one-click register/restore UI.
     pub fn detect_hooks(&self, project_path: &Path) -> Result<Vec<HookStatus>> {
         let mut statuses = Vec::new();
         for target in HookTarget::ALL {
-            let settings_path = target.settings_path(project_path);
-            let registered = read_settings(&settings_path)?
-                .map(|s| !hooks::registered_events(&s).is_empty())
+            let settings_path = target.config_path(project_path)?;
+            let registered = read_config_text(&settings_path)?
+                .map(|text| hooks::registered(target, &text))
                 .unwrap_or(false);
-            let project_dir = settings_path.parent().map(|p| p.exists()).unwrap_or(false);
-            let installed = project_dir || target.user_dir().map(|d| d.exists()).unwrap_or(false);
+            let config_dir = settings_path.parent().map(|p| p.exists()).unwrap_or(false);
+            let installed = config_dir || target.user_dir().map(|d| d.exists()).unwrap_or(false);
             statuses.push(HookStatus {
                 target,
                 label: target.label().to_string(),
+                scope: target.scope(),
                 installed,
                 settings_path,
                 registered,
@@ -1517,56 +1525,64 @@ fn revoke_managed_block_file(path: &Path) -> Result<export::TargetOutcome> {
     })
 }
 
-/// Read and parse a harness `settings.json`. Returns `None` when the file is absent or empty; errors
-/// on malformed JSON so registration never silently clobbers a file it could not understand.
-fn read_settings(path: &Path) -> Result<Option<serde_json::Value>> {
+/// Read a harness config file as raw text. Returns `None` when the file is absent or empty; the
+/// per-vendor codec parses it (JSON or TOML), so registration never silently clobbers a file it could
+/// not understand.
+fn read_config_text(path: &Path) -> Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
     let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading settings {}", path.display()))?;
+        .with_context(|| format!("reading config {}", path.display()))?;
     if raw.trim().is_empty() {
         return Ok(None);
     }
-    let value = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing settings {}", path.display()))?;
-    Ok(Some(value))
+    Ok(Some(raw))
 }
 
-/// Upsert our managed hook groups into `path`, preserving all other config. Returns created |
-/// updated | unchanged; an unchanged file is not rewritten, so re-registering is a no-op on disk.
-fn write_hooks_file(path: &Path, command: &str) -> Result<export::TargetOutcome> {
+/// Write `contents` to `path` atomically: stage a sibling temp file, then rename over the target so a
+/// crash mid-write never leaves a half-written harness config. The temp name carries the pid to avoid
+/// collisions between the console and the MCP daemon.
+fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "hooks".to_string());
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents).with_context(|| format!("staging config {}", tmp.display()))?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(err).with_context(|| format!("replacing config {}", path.display()))
+        }
+    }
+}
+
+/// Upsert our managed hook entries into `path` via the target's codec, preserving all other config.
+/// Returns created | updated | unchanged; an unchanged file is not rewritten, so re-registering is a
+/// no-op on disk.
+fn write_hooks_file(
+    path: &Path,
+    target: HookTarget,
+    command: &str,
+) -> Result<export::TargetOutcome> {
     let existed = path.exists();
-    let existing_raw = if existed {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("reading settings {}", path.display()))?
-    } else {
-        String::new()
-    };
-    let settings = if existing_raw.trim().is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::from_str(&existing_raw)
-            .with_context(|| format!("parsing settings {}", path.display()))?
-    };
-    let new_settings = hooks::upsert_managed_hooks(&settings, command)?;
-    let mut new_raw = serde_json::to_string_pretty(&new_settings)
-        .with_context(|| format!("serializing settings {}", path.display()))?;
-    new_raw.push('\n');
+    let existing = read_config_text(path)?.unwrap_or_default();
+    let new_raw = hooks::upsert(target, &existing, command)?;
     let action = if !existed {
         "created"
-    } else if new_raw == existing_raw {
+    } else if new_raw == existing {
         "unchanged"
     } else {
         "updated"
     };
     if action != "unchanged" {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating directory {}", parent.display()))?;
-        }
-        std::fs::write(path, &new_raw)
-            .with_context(|| format!("writing settings {}", path.display()))?;
+        atomic_write(path, &new_raw)?;
     }
     Ok(export::TargetOutcome {
         path: path.to_path_buf(),
@@ -1574,28 +1590,21 @@ fn write_hooks_file(path: &Path, command: &str) -> Result<export::TargetOutcome>
     })
 }
 
-/// Strip our managed hook groups from `path`. Returns removed (other config kept) | deleted (file
+/// Strip our managed hook entries from `path`. Returns removed (other config kept) | deleted (file
 /// held only our hook) | unchanged (no managed hook, or file absent).
-fn revoke_hooks_file(path: &Path) -> Result<export::TargetOutcome> {
-    let action = match read_settings(path)? {
+fn revoke_hooks_file(path: &Path, target: HookTarget) -> Result<export::TargetOutcome> {
+    let action = match read_config_text(path)? {
         None => "unchanged".to_string(),
-        Some(settings) => match hooks::remove_managed_hooks(&settings)? {
+        Some(text) => match hooks::remove(target, &text)? {
             None => "unchanged".to_string(),
-            Some(new_settings) => {
-                let stub = new_settings
-                    .as_object()
-                    .map(|m| m.is_empty())
-                    .unwrap_or(false);
-                if stub {
+            Some(new_text) => {
+                let trimmed = new_text.trim();
+                if trimmed.is_empty() || trimmed == "{}" {
                     std::fs::remove_file(path)
-                        .with_context(|| format!("deleting settings {}", path.display()))?;
+                        .with_context(|| format!("deleting config {}", path.display()))?;
                     "deleted".to_string()
                 } else {
-                    let mut raw = serde_json::to_string_pretty(&new_settings)
-                        .with_context(|| format!("serializing settings {}", path.display()))?;
-                    raw.push('\n');
-                    std::fs::write(path, &raw)
-                        .with_context(|| format!("writing settings {}", path.display()))?;
+                    atomic_write(path, &new_text)?;
                     "removed".to_string()
                 }
             }

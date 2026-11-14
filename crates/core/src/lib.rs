@@ -13,6 +13,6 @@ pub use export::{
     DriftReport, ExportReport, ExportTarget, RevokeReport, TargetDrift, TargetOutcome,
     handoff_tier_warning, render_constraint_briefing,
 };
-pub use hooks::{HookReport, HookStatus, HookTarget};
+pub use hooks::{HookReport, HookScope, HookStatus, HookTarget};
 pub use model::*;
 pub use store::{AcknowledgmentReport, ConstraintVerificationReport, RuleExplanation, Store};

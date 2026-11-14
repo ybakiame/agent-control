@@ -1,6 +1,6 @@
 ---
 name: agent-control
-description: Connect to and operate the Agent Control local-first engineering console over MCP. Use when acting as an agent or harness that must resolve binding rules with provenance, create a constraint session, acknowledge rules, record tamper-evident evidence, author durable project contracts as rules, propose uncertain rules for human review, hand off across harnesses, verify the evidence chain, verify constraint assurance tiers, gate a tool call against hard rules, detect outdated-format native exports, export a pointer block into selected native AGENTS.md/CLAUDE.md/GEMINI.md/.cursor files, revoke it, or register/remove the SessionStart + PreToolUse enforcement hooks for Claude Code / CodeBuddy / WorkBuddy / Qoder. Triggers include "connect to agent-control", "get applicable rules", "create a session", "acknowledge rules", "record evidence", "save a project rule/contract", "suggest a rule for review", "export/import handoff", "export to harnesses", "revoke native export", "register hooks", "check tool call", "SessionStart hook", "PreToolUse gate", "verify evidence", "verify constraints", "check export drift", and "integrate my agent with the console". This skill is for USING a running console, not for developing the console's own source.
+description: Connect to and operate the Agent Control local-first engineering console over MCP. Use when acting as an agent or harness that must resolve binding rules with provenance, create a constraint session, acknowledge rules, record tamper-evident evidence, author durable project contracts as rules, propose uncertain rules for human review, hand off across harnesses, verify the evidence chain, verify constraint assurance tiers, gate a tool call against hard rules, detect outdated-format native exports, export/revoke a pointer block into native AGENTS.md/CLAUDE.md/GEMINI.md/.cursor files, or register/remove start + pre-tool enforcement hooks for nine agents (Claude Code, CodeBuddy, WorkBuddy, Qoder, Qoder CN, Codex, Cursor, Antigravity, Kimi Code). Triggers include "connect to agent-control", "get applicable rules", "create a session", "acknowledge rules", "record evidence", "save a project rule/contract", "suggest a rule for review", "export/import handoff", "export to harnesses", "revoke native export", "register hooks", "check tool call", "SessionStart hook", "PreToolUse gate", "verify evidence", "verify constraints", "check export drift", and "integrate my agent with the console". This skill is for USING a running console, not for developing the console's own source.
 when_to_use: An agent/harness is about to work on a project governed by Agent Control, or is being wired into the console over MCP and its enforcement hooks.
 ---
 
@@ -167,35 +167,41 @@ instead of calling MCP. Two mechanisms deliver the binding set to them:
   pane has target checkboxes + **Export to harnesses**, and **Revoke** (`revoke_native`, same
   `targets`) removes the block again — keeping prose, deleting block-only files. Call it after
   authoring contracts so file-reading agents learn where the rules live.
-- **SessionStart + PreToolUse hooks** — `scripts/agent-control-hook.mjs` (dependency-free Node)
-  dispatches on the harness's `hook_event_name`. At **SessionStart** it calls `get_applicable_rules`
-  over the MCP HTTP endpoint and injects the briefing (binding rules + conflicts + the machine/project
-  **work environment**) into context (read-only; exits `0`
-  silently if the daemon is down). At **PreToolUse** it calls `check_tool_call` with the pending
-  `tool_name`/`tool_input`; if the gate denies, it **blocks the call** by exiting `2` with the reason
-  on stderr (the universal deny signal across Claude Code / CodeBuddy / WorkBuddy / Qoder). This is
-  the chokepoint that turns a declared `hard` rule into an **Enforced** one. Register both events with
-  the **`register_hooks`** tool (`project_path`, optional `targets`: `claude` | `codebuddy` | `qoder`)
-  or the console's Projects → **Hooks** panel; it writes a managed group into each harness's
-  `settings.json`, preserving your other config and hooks. **`detect_hooks`** reports what is
-  installed/registered; **`revoke_hooks`** removes the managed group. Manual copy-ready snippet —
-  adjust the absolute path to the script:
+- **Start + pre-tool hooks** — `scripts/agent-control-hook.mjs` (dependency-free Node) serves **nine**
+  agents (Claude Code, CodeBuddy, WorkBuddy, Qoder, Qoder CN, Codex, Cursor, Antigravity, Kimi Code);
+  the registered command bakes in the vendor id + event name so the script picks the right stdin/output
+  shape. At the **start** event it freezes a session and calls `get_applicable_rules` over the MCP HTTP
+  endpoint, injecting the briefing (binding rules + conflicts + the machine/project **work environment**)
+  where the vendor supports it (read-only; fail-open if the daemon is down). At the **pre-tool** event it
+  resolves the same session and calls `check_tool_call` with the pending `tool_name`/`tool_input` **and
+  that `session_id`**; if the gate denies it **blocks the call** in the vendor's deny shape — exit `2` +
+  stderr for the claude-shaped vendors, `{permission:"deny"}` for Cursor, `{decision:"deny"}` for
+  Antigravity. This is the chokepoint that turns a declared `hard` rule into a recorded **Enforced** one.
+  Register both events with the **`register_hooks`** tool (`project_path`, optional `targets`: any of
+  `claude` | `codebuddy` | `workbuddy` | `qoder` | `qoder-cn` | `codex` | `cursor` | `antigravity` |
+  `kimi`; omitted → all nine) or the console's Projects → **Hooks** panel; it writes a managed group into
+  each harness's own config (project-level for seven; user-level for Kimi/Antigravity, still gating
+  per-project by `cwd`), preserving your other config and hooks. **`detect_hooks`** reports what is
+  installed/registered (with a `scope` field); **`revoke_hooks`** removes the managed group. Manual
+  copy-ready snippet for a claude-shaped harness — adjust the absolute path and keep the vendor + event:
 
   ```json
   {
     "hooks": {
       "SessionStart": [
-        { "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control/scripts/agent-control-hook.mjs\"" } ] }
+        { "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control/scripts/agent-control-hook.mjs\" claude SessionStart" } ] }
       ],
       "PreToolUse": [
-        { "matcher": "", "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control/scripts/agent-control-hook.mjs\"" } ] }
+        { "matcher": "", "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control/scripts/agent-control-hook.mjs\" claude PreToolUse" } ] }
       ]
     }
   }
   ```
 
   Set `AGENT_CONTROL_MCP_URL` if your endpoint differs from `http://127.0.0.1:9870/mcp`. The hook is
-  fail-open: an unreachable/slow daemon never blocks a session or denies a tool.
+  fail-open by default: an unreachable/slow daemon never blocks a session or denies a tool. Set
+  `AGENT_CONTROL_HOOK_FAIL_CLOSED` to opt into fail-closed enforcement — a pre-tool call that cannot
+  reach a verdict then denies (the start event always stays fail-open).
 
 **Reach ≠ verify ≠ enforce.** Export and the SessionStart hook make rules *reach* an agent; they do
 not force compliance. Two axes stay separate: a rule's declared `enforcement` (`advisory` / `verify` /
@@ -220,12 +226,14 @@ is allowed. The gate evaluates the project's enabled `hard` rules two ways:
 - **Tool guards** — a rule's `tool_guards` (tool-name glob + input regex) deny matching calls directly
   (e.g. block `rm -rf`).
 
-On deny the hook exits `2` with the reason on stderr, which the harness feeds back to the agent; on
-allow it exits `0`. Each mediated call appends a `tool_gate` evidence entry and can raise the rule's
-achieved tier to **Enforced**. With no `hard` rules the gate is fail-open (allows). `session_id` is
-optional — the gate evaluates project rules regardless of session. Use **`register_hooks`** /
-**`detect_hooks`** / **`revoke_hooks`** to manage the wiring; the console's Projects → Hooks panel
-does the same with one click.
+On deny the hook blocks the call in the vendor's shape (claude-shaped exit `2` + stderr, Cursor
+`{permission:"deny"}`, Antigravity `{decision:"deny"}`), which the harness feeds back to the agent; on
+allow it emits the vendor's allow output. The hook resolves its own session (get-or-create, task `hook`)
+and passes that `session_id`, so each mediated call appends a `tool_gate` evidence entry and raises the
+rule's achieved tier to **Enforced**. With no `hard` rules the gate is fail-open (allows). For a direct
+MCP call `session_id` is optional — the gate evaluates project rules regardless of session. Use
+**`register_hooks`** / **`detect_hooks`** / **`revoke_hooks`** to manage the wiring; the console's
+Projects → Hooks panel does the same with one click.
 
 ## Resources
 

@@ -984,11 +984,14 @@ try {
     hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo user" }] }] },
   }));
   const hookCmd = 'node "C:/throwaway/agent-control-hook.mjs"';
-  const hookTargets = ["claude", "codebuddy", "workbuddy", "qoder"];
+  // The seven project-scope targets write inside the throwaway project dir. Kimi + Antigravity are
+  // user-scope (they resolve to the real home config) and are covered by the core codec unit tests —
+  // never written here, so this e2e stays fully isolated.
+  const hookTargets = ["claude", "codebuddy", "workbuddy", "qoder", "qoder-cn", "codex", "cursor"];
   const registered = await tool("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });
   check(
-    "register_hooks writes all four harness settings",
-    registered.report?.targets?.length === 4 && registered.command === hookCmd,
+    "register_hooks writes all seven project-scope harness configs",
+    registered.report?.targets?.length === 7 && registered.command === hookCmd,
     registered,
   );
   const claudeJson = JSON.parse(readFileSync(claudeSettings, "utf8"));
@@ -1001,17 +1004,52 @@ try {
     claudeJson,
   );
   check(
-    "register_hooks creates codebuddy + workbuddy + qoder settings",
+    "register_hooks creates the nested-JSON stubs (codebuddy/workbuddy/qoder/qoder-cn/codex)",
     existsSync(join(hooksDir, ".codebuddy", "settings.json")) &&
       existsSync(join(hooksDir, ".workbuddy", "settings.json")) &&
-      existsSync(join(hooksDir, ".qoder", "settings.json")),
+      existsSync(join(hooksDir, ".qoder", "settings.json")) &&
+      existsSync(join(hooksDir, ".qoder-cn", "settings.json")) &&
+      existsSync(join(hooksDir, ".codex", "hooks.json")),
+  );
+  // Codex uses the same nested shape as Claude, in a dedicated hooks.json.
+  const codexJson = JSON.parse(readFileSync(join(hooksDir, ".codex", "hooks.json"), "utf8"));
+  check(
+    "register_hooks writes Codex nested hooks.json (SessionStart + PreToolUse)",
+    Array.isArray(codexJson.hooks?.SessionStart) &&
+      Array.isArray(codexJson.hooks?.PreToolUse) &&
+      codexJson.hooks.PreToolUse.some((g) => g.hooks?.[0]?.command?.includes("agent-control-hook.mjs")),
+    codexJson,
+  );
+  // Cursor uses a flat version:1 schema with the command on the definition itself (an array per event).
+  const cursorHooksPath = join(hooksDir, ".cursor", "hooks.json");
+  const cursorJson = JSON.parse(readFileSync(cursorHooksPath, "utf8"));
+  check(
+    "register_hooks writes Cursor flat hooks.json (version:1, command on definition)",
+    cursorJson.version === 1 &&
+      Array.isArray(cursorJson.hooks?.sessionStart) &&
+      cursorJson.hooks.sessionStart.some((d) => d.command?.includes("agent-control-hook.mjs")) &&
+      Array.isArray(cursorJson.hooks?.preToolUse) &&
+      cursorJson.hooks.preToolUse.some((d) => d.command?.includes("agent-control-hook.mjs")),
+    cursorJson,
   );
 
   const detected = await tool("detect_hooks", { project_path: hooksDir });
+  const detectedProject = (detected.harnesses ?? []).filter((h) => h.scope === "project");
+  const detectedUser = (detected.harnesses ?? []).filter((h) => h.scope === "user");
   check(
-    "detect_hooks reports all four registered",
-    detected.harnesses?.length === 4 && detected.harnesses.every((h) => h.registered),
+    "detect_hooks reports all nine harnesses with scope (7 project + 2 user)",
+    detected.harnesses?.length === 9 && detectedProject.length === 7 && detectedUser.length === 2,
     detected,
+  );
+  check(
+    "detect_hooks reports the seven project-scope targets registered",
+    detectedProject.every((h) => h.registered),
+    detectedProject,
+  );
+  check(
+    "detect_hooks marks kimi + antigravity as user-scope",
+    detectedUser.map((h) => h.target).sort().join(",") === "antigravity,kimi",
+    detectedUser,
   );
 
   const reregistered = await tool("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });
@@ -1032,15 +1070,18 @@ try {
     claudeAfter,
   );
   check(
-    "revoke_hooks deletes settings that held only our hook",
+    "revoke_hooks deletes configs that held only our hook",
     !existsSync(join(hooksDir, ".codebuddy", "settings.json")) &&
       !existsSync(join(hooksDir, ".workbuddy", "settings.json")) &&
-      !existsSync(join(hooksDir, ".qoder", "settings.json")),
+      !existsSync(join(hooksDir, ".qoder", "settings.json")) &&
+      !existsSync(join(hooksDir, ".qoder-cn", "settings.json")) &&
+      !existsSync(join(hooksDir, ".codex", "hooks.json")) &&
+      !existsSync(cursorHooksPath),
   );
   const detectedAfter = await tool("detect_hooks", { project_path: hooksDir });
   check(
-    "detect_hooks reports none registered after revoke",
-    detectedAfter.harnesses?.every((h) => !h.registered),
+    "detect_hooks reports the project-scope targets unregistered after revoke",
+    (detectedAfter.harnesses ?? []).filter((h) => h.scope === "project").every((h) => !h.registered),
     detectedAfter,
   );
   check(

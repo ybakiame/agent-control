@@ -71,15 +71,35 @@ function check(name, cond, detail) {
   }
 }
 
-// Run the hook as a one-shot child with the given stdin payload and MCP endpoint.
-function runHook(payload, endpoint = url) {
-  const res = spawnSync(process.execPath, [hook], {
+// Run the hook as a one-shot child with the given stdin payload and MCP endpoint. `argv` bakes in
+// the vendor + event (the registered command shape); when omitted the script defaults to claude and
+// falls back to stdin hook_event_name. `agentId` overrides the per-vendor default agent id.
+// `failClosed` opts into fail-closed enforcement (a gate that cannot reach the daemon denies).
+function runHook(payload, endpoint = url, argv = [], agentId = null, failClosed = false) {
+  const env = {
+    ...process.env,
+    AGENT_CONTROL_MCP_URL: endpoint,
+    AGENT_CONTROL_HOOK_TIMEOUT_MS: "8000",
+  };
+  if (agentId) env.AGENT_CONTROL_AGENT_ID = agentId;
+  else delete env.AGENT_CONTROL_AGENT_ID;
+  if (failClosed) env.AGENT_CONTROL_HOOK_FAIL_CLOSED = "1";
+  else delete env.AGENT_CONTROL_HOOK_FAIL_CLOSED;
+  const res = spawnSync(process.execPath, [hook, ...argv], {
     input: payload === null ? "" : JSON.stringify(payload),
-    env: { ...process.env, AGENT_CONTROL_MCP_URL: endpoint, AGENT_CONTROL_HOOK_TIMEOUT_MS: "8000" },
+    env,
     encoding: "utf8",
     timeout: 15000,
   });
   return { code: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
+function parseOut(res) {
+  try {
+    return JSON.parse(res.stdout);
+  } catch {
+    return null;
+  }
 }
 
 try {
@@ -166,6 +186,25 @@ try {
     start.stdout.slice(0, 300),
   );
 
+  // Item 1 — hook-only enforcement is recorded. PreToolUse resolved a session (get-or-create, task
+  // "hook") and passed its id to check_tool_call, so the mediated hard rule earned Enforced and the
+  // verdicts landed in the evidence chain — without any explicit MCP session from the harness.
+  const hookSession = await tool("create_session", {
+    task: "hook", project_path: proj, agent_id: "claude-code", task_tags: [],
+  });
+  check("hook PreToolUse created a reusable session", hookSession.reused === true, hookSession);
+  const hookCtx = await tool("get_session_context", { session_id: hookSession.session_id });
+  const enforced = (hookCtx?.session?.assurance ?? []).find(
+    (a) => a.rule_id === "no-rm-rf" && a.achieved === "enforced",
+  );
+  check("hook-only gate recorded the Enforced tier", !!enforced, hookCtx?.session?.assurance);
+  const chain = await tool("verify_evidence", { session_id: hookSession.session_id });
+  check(
+    "hook gate verdicts form a valid evidence chain",
+    chain.valid === true && chain.entries_checked > 0,
+    chain,
+  );
+
   // Fail-open: an unreachable daemon must never block a session or deny a tool (exit 0 for both).
   const deadUrl = "http://127.0.0.1:1/mcp";
   const deadDeny = runHook(
@@ -179,6 +218,169 @@ try {
   // No stdin: defaults to SessionStart and fail-open (exit 0) against the dead endpoint.
   const noStdin = runHook(null, deadUrl);
   check("missing stdin fail-open (exit 0)", noStdin.code === 0, noStdin);
+
+  // ---- Per-vendor I/O contracts (vendor + event baked into argv) ----
+  // The same hard rule (no-rm-rf) binds every agent, so each vendor's gate must deny `rm -rf` and
+  // allow `echo hi` — but in its OWN output shape. The repo gate is back to passing (.editorconfig
+  // restored above), so only the tool_guard decides these calls.
+
+  // Cursor: valid-JSON permission decisions on stdout, exit 0 for both deny and allow.
+  const cursorDeny = runHook(
+    { cwd: proj, tool_name: "Bash", tool_input: { command: "rm -rf /tmp/x" } },
+    url, ["cursor", "preToolUse"],
+  );
+  const cursorDenyJson = parseOut(cursorDeny);
+  check("Cursor preToolUse deny exits 0", cursorDeny.code === 0, cursorDeny);
+  check(
+    "Cursor deny emits {permission:deny} with messages",
+    cursorDenyJson?.permission === "deny" &&
+      typeof cursorDenyJson?.user_message === "string" &&
+      cursorDenyJson.user_message.includes("recursive force delete") &&
+      typeof cursorDenyJson?.agent_message === "string",
+    cursorDeny.stdout.slice(0, 300),
+  );
+  const cursorAllow = runHook(
+    { cwd: proj, tool_name: "Bash", tool_input: { command: "echo hi" } },
+    url, ["cursor", "preToolUse"],
+  );
+  check(
+    "Cursor preToolUse allow emits {permission:allow}",
+    cursorAllow.code === 0 && parseOut(cursorAllow)?.permission === "allow",
+    cursorAllow,
+  );
+  const cursorStart = runHook({ cwd: proj }, url, ["cursor", "sessionStart"]);
+  const cursorStartJson = parseOut(cursorStart);
+  check(
+    "Cursor sessionStart injects additional_context with the binding rule",
+    cursorStart.code === 0 &&
+      typeof cursorStartJson?.additional_context === "string" &&
+      cursorStartJson.additional_context.includes("no-rm-rf"),
+    cursorStart.stdout.slice(0, 300),
+  );
+  const cursorDead = runHook(
+    { cwd: proj, tool_name: "Bash", tool_input: { command: "rm -rf /" } },
+    deadUrl, ["cursor", "preToolUse"],
+  );
+  check(
+    "Cursor fail-open emits {permission:allow} (never blocks on a dead daemon)",
+    cursorDead.code === 0 && parseOut(cursorDead)?.permission === "allow",
+    cursorDead,
+  );
+
+  // Antigravity: stdin nests the call under toolCall.{name,args}; silence == deny since agy 1.4.x, so
+  // allow / fail-open MUST emit {decision:ask}. Deny emits {decision:deny,reason}.
+  const agDeny = runHook(
+    { cwd: proj, toolCall: { name: "Bash", args: { command: "rm -rf /tmp/x" } } },
+    url, ["antigravity", "PreToolUse"],
+  );
+  const agDenyJson = parseOut(agDeny);
+  check("Antigravity PreToolUse deny exits 0", agDeny.code === 0, agDeny);
+  check(
+    "Antigravity deny emits {decision:deny,reason}",
+    agDenyJson?.decision === "deny" &&
+      typeof agDenyJson?.reason === "string" &&
+      agDenyJson.reason.includes("recursive force delete"),
+    agDeny.stdout.slice(0, 300),
+  );
+  const agAllow = runHook(
+    { cwd: proj, toolCall: { name: "Bash", args: { command: "echo hi" } } },
+    url, ["antigravity", "PreToolUse"],
+  );
+  check(
+    "Antigravity allow emits {decision:ask} (silence would deny)",
+    agAllow.code === 0 && parseOut(agAllow)?.decision === "ask",
+    agAllow,
+  );
+  const agStart = runHook({ cwd: proj }, url, ["antigravity", "PreInvocation"]);
+  const agStartJson = parseOut(agStart);
+  check(
+    "Antigravity PreInvocation emits {} (no context-injection channel)",
+    agStart.code === 0 && agStartJson !== null && Object.keys(agStartJson).length === 0,
+    agStart.stdout.slice(0, 300),
+  );
+  const agDead = runHook(
+    { cwd: proj, toolCall: { name: "Bash", args: { command: "rm -rf /" } } },
+    deadUrl, ["antigravity", "PreToolUse"],
+  );
+  check(
+    "Antigravity fail-open emits {decision:ask}",
+    agDead.code === 0 && parseOut(agDead)?.decision === "ask",
+    agDead,
+  );
+
+  // Kimi + Codex + Qoder-CN are claude-shaped: deny => exit 2 + stderr, allow => exit 0.
+  for (const vendor of ["kimi", "codex", "qoder-cn"]) {
+    const vDeny = runHook(
+      { cwd: proj, tool_name: "Bash", tool_input: { command: "rm -rf /" } },
+      url, [vendor, "PreToolUse"],
+    );
+    check(
+      `${vendor} PreToolUse deny exits 2 with reason on stderr`,
+      vDeny.code === 2 && vDeny.stderr.includes("recursive force delete"),
+      vDeny,
+    );
+    const vAllow = runHook(
+      { cwd: proj, tool_name: "Bash", tool_input: { command: "echo hi" } },
+      url, [vendor, "PreToolUse"],
+    );
+    check(`${vendor} PreToolUse allow exits 0`, vAllow.code === 0, vAllow);
+  }
+
+  // ---- Fail-closed opt-in (AGENT_CONTROL_HOOK_FAIL_CLOSED) ----
+  // A reachable daemon still decides normally: fail-closed only changes the UNREACHABLE path.
+  const fcLiveAllow = runHook(
+    { cwd: proj, tool_name: "Bash", tool_input: { command: "echo hi" } },
+    url, ["claude", "PreToolUse"], null, true,
+  );
+  check("fail-closed still allows when the daemon reaches a verdict", fcLiveAllow.code === 0, fcLiveAllow);
+
+  // Unreachable daemon + fail-closed: the GATE denies in each vendor's shape.
+  const fcClaude = runHook(
+    { cwd: proj, tool_name: "Bash", tool_input: { command: "echo hi" } },
+    deadUrl, ["claude", "PreToolUse"], null, true,
+  );
+  check(
+    "fail-closed claude gate denies on unreachable daemon (exit 2 + reason)",
+    fcClaude.code === 2 && fcClaude.stderr.includes("fail-closed"),
+    fcClaude,
+  );
+  const fcCursor = runHook(
+    { cwd: proj, tool_name: "Bash", tool_input: { command: "echo hi" } },
+    deadUrl, ["cursor", "preToolUse"], null, true,
+  );
+  const fcCursorJson = parseOut(fcCursor);
+  check(
+    "fail-closed Cursor gate emits {permission:deny}",
+    fcCursor.code === 0 && fcCursorJson?.permission === "deny" &&
+      fcCursorJson.user_message.includes("fail-closed"),
+    fcCursor,
+  );
+  const fcAg = runHook(
+    { cwd: proj, toolCall: { name: "Bash", args: { command: "echo hi" } } },
+    deadUrl, ["antigravity", "PreToolUse"], null, true,
+  );
+  const fcAgJson = parseOut(fcAg);
+  check(
+    "fail-closed Antigravity gate emits {decision:deny}",
+    fcAg.code === 0 && fcAgJson?.decision === "deny" && fcAgJson.reason.includes("fail-closed"),
+    fcAg,
+  );
+
+  // The START/briefing event always stays fail-open, even in fail-closed mode (never blocks init).
+  const fcClaudeStart = runHook({ cwd: proj }, deadUrl, ["claude", "SessionStart"], null, true);
+  check("fail-closed claude SessionStart stays fail-open (exit 0)", fcClaudeStart.code === 0, fcClaudeStart);
+  const fcCursorStart = runHook({ cwd: proj }, deadUrl, ["cursor", "sessionStart"], null, true);
+  check(
+    "fail-closed Cursor sessionStart stays fail-open (not denied)",
+    fcCursorStart.code === 0 && parseOut(fcCursorStart)?.permission !== "deny",
+    fcCursorStart,
+  );
+  const fcAgStart = runHook({ cwd: proj }, deadUrl, ["antigravity", "PreInvocation"], null, true);
+  check(
+    "fail-closed Antigravity PreInvocation stays fail-open (not denied)",
+    fcAgStart.code === 0 && parseOut(fcAgStart)?.decision !== "deny",
+    fcAgStart,
+  );
 } catch (e) {
   failures++;
   console.error("ERROR:", e.message);

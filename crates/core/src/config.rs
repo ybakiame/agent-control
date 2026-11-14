@@ -243,6 +243,22 @@ impl DataLayout {
         project_path.join(".qoder").join("settings.json")
     }
 
+    /// Qoder CN (China build) keeps its own `.qoder-cn/` project settings, separate from the
+    /// international `.qoder/` build, so the two are independent hook targets.
+    pub fn project_qoder_cn_settings(project_path: &Path) -> PathBuf {
+        project_path.join(".qoder-cn").join("settings.json")
+    }
+
+    /// Codex reads a dedicated `hooks.json` (same nested shape as Claude's settings.json).
+    pub fn project_codex_hooks(project_path: &Path) -> PathBuf {
+        project_path.join(".codex").join("hooks.json")
+    }
+
+    /// Cursor reads a flat `hooks.json` (`version: 1`, command on the definition itself).
+    pub fn project_cursor_hooks(project_path: &Path) -> PathBuf {
+        project_path.join(".cursor").join("hooks.json")
+    }
+
     /// User-global harness config dirs, used to detect whether a harness is installed on this machine.
     pub fn claude_user_dir() -> Result<PathBuf> {
         let home = dirs::home_dir().context("cannot determine home directory")?;
@@ -261,6 +277,67 @@ impl DataLayout {
 
     pub fn qoder_user_dir() -> Result<PathBuf> {
         let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".qoder"))
+    }
+
+    pub fn qoder_cn_user_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
         Ok(home.join(".qoder-cn"))
+    }
+
+    pub fn codex_user_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".codex"))
+    }
+
+    pub fn cursor_user_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".cursor"))
+    }
+
+    /// Kimi Code CLI keeps a single user-level TOML config; it has no project-level hook file.
+    pub fn kimi_user_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".kimi-code"))
+    }
+
+    /// Antigravity (Google's agentic IDE) shares the Gemini backend's `~/.gemini` config home.
+    pub fn antigravity_user_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".gemini"))
+    }
+
+    /// User-global hook config files for the vendors that support a user-level registration. The
+    /// project-scope vendors write their project file by default; these are the user-level counterparts.
+    pub fn claude_user_settings() -> Result<PathBuf> {
+        Ok(Self::claude_user_dir()?.join("settings.json"))
+    }
+
+    pub fn qoder_user_settings() -> Result<PathBuf> {
+        Ok(Self::qoder_user_dir()?.join("settings.json"))
+    }
+
+    pub fn qoder_cn_user_settings() -> Result<PathBuf> {
+        Ok(Self::qoder_cn_user_dir()?.join("settings.json"))
+    }
+
+    pub fn codex_user_hooks() -> Result<PathBuf> {
+        Ok(Self::codex_user_dir()?.join("hooks.json"))
+    }
+
+    pub fn cursor_user_hooks() -> Result<PathBuf> {
+        Ok(Self::cursor_user_dir()?.join("hooks.json"))
+    }
+
+    /// Kimi Code CLI: user-level only, hooks live as `[[hooks]]` tables inside `config.toml`.
+    pub fn kimi_user_config() -> Result<PathBuf> {
+        Ok(Self::kimi_user_dir()?.join("config.toml"))
+    }
+
+    /// Antigravity: user-level only, a named bundle inside `~/.gemini/config/hooks.json`.
+    pub fn antigravity_user_hooks() -> Result<PathBuf> {
+        Ok(Self::antigravity_user_dir()?
+            .join("config")
+            .join("hooks.json"))
     }
 }

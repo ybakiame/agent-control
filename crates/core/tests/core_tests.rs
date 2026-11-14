@@ -2092,7 +2092,7 @@ fn detect_hooks_reports_registration() {
     let project = tempfile::tempdir().unwrap();
 
     let before = store.detect_hooks(project.path()).unwrap();
-    assert_eq!(before.len(), 4);
+    assert_eq!(before.len(), 9);
     assert!(before.iter().all(|s| !s.registered));
 
     let cmd = "node \"C:/repo/scripts/agent-control-hook.mjs\"";
@@ -2112,6 +2112,58 @@ fn detect_hooks_reports_registration() {
             .filter(|s| s.target != HookTarget::Qoder)
             .all(|s| !s.registered)
     );
+}
+
+#[test]
+fn register_hooks_cursor_flat_and_codex_nested() {
+    use agent_control_core::HookTarget;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let cmd = "node \"C:/repo/scripts/agent-control-hook.mjs\"";
+
+    // Cursor: flat version:1 hooks.json, command on the definition, lowercase events.
+    let cursor = project.path().join(".cursor").join("hooks.json");
+    let report = store
+        .register_hooks(project.path(), &[HookTarget::Cursor], cmd)
+        .unwrap();
+    assert_eq!(report.targets[0].action, "created");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cursor).unwrap()).unwrap();
+    assert_eq!(v["version"], 1);
+    assert_eq!(
+        v["hooks"]["preToolUse"][0]["command"],
+        format!("{cmd} cursor preToolUse")
+    );
+    assert!(v["hooks"]["sessionStart"].is_array());
+    let again = store
+        .register_hooks(project.path(), &[HookTarget::Cursor], cmd)
+        .unwrap();
+    assert_eq!(again.targets[0].action, "unchanged");
+    let deleted = store
+        .revoke_hooks(project.path(), &[HookTarget::Cursor])
+        .unwrap();
+    assert_eq!(deleted.targets[0].action, "deleted");
+    assert!(!cursor.exists());
+
+    // Codex: nested hooks.json (same shape as Claude settings.json).
+    let codex = project.path().join(".codex").join("hooks.json");
+    store
+        .register_hooks(project.path(), &[HookTarget::Codex], cmd)
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&codex).unwrap()).unwrap();
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        format!("{cmd} codex PreToolUse")
+    );
+    assert!(v["hooks"]["SessionStart"].is_array());
+    let deleted = store
+        .revoke_hooks(project.path(), &[HookTarget::Codex])
+        .unwrap();
+    assert_eq!(deleted.targets[0].action, "deleted");
+    assert!(!codex.exists());
 }
 
 #[test]

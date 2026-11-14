@@ -1,4 +1,4 @@
-use agent_control_core::{ExportTarget, HookTarget};
+use agent_control_core::{ExportTarget, HookScope, HookTarget};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
@@ -339,7 +339,8 @@ impl Console {
                             )
                             .child(h_flex().gap_3().flex_wrap().children(
                                 HookTarget::ALL.iter().map(|t| {
-                                    let (key, id) = match t {
+                                    let target = *t;
+                                    let (key, id) = match target {
                                         HookTarget::Claude => {
                                             ("proj.hook_target_claude", "hook-target-claude")
                                         }
@@ -352,13 +353,29 @@ impl Console {
                                         HookTarget::Qoder => {
                                             ("proj.hook_target_qoder", "hook-target-qoder")
                                         }
+                                        HookTarget::QoderCn => {
+                                            ("proj.hook_target_qoder_cn", "hook-target-qoder-cn")
+                                        }
+                                        HookTarget::Codex => {
+                                            ("proj.hook_target_codex", "hook-target-codex")
+                                        }
+                                        HookTarget::Cursor => {
+                                            ("proj.hook_target_cursor", "hook-target-cursor")
+                                        }
+                                        HookTarget::Antigravity => (
+                                            "proj.hook_target_antigravity",
+                                            "hook-target-antigravity",
+                                        ),
+                                        HookTarget::Kimi => {
+                                            ("proj.hook_target_kimi", "hook-target-kimi")
+                                        }
                                     };
-                                    let target = *t;
                                     let checked = self.hook_targets.contains(&target);
                                     let status =
                                         self.hook_statuses.iter().find(|s| s.target == target);
                                     let registered = status.map(|s| s.registered).unwrap_or(false);
                                     let installed = status.map(|s| s.installed).unwrap_or(false);
+                                    let user_scope = target.scope() == HookScope::User;
                                     h_flex()
                                         .gap_1()
                                         .items_center()
@@ -370,6 +387,11 @@ impl Console {
                                                     this.toggle_hook_target(target, *next, cx);
                                                 })),
                                         )
+                                        .when(user_scope, |this| {
+                                            this.child(
+                                                Tag::info().child(self.t("proj.hook_scope_user")),
+                                            )
+                                        })
                                         .when(registered, |this| {
                                             this.child(
                                                 Tag::success()

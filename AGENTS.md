@@ -63,14 +63,14 @@ Three crates under `crates/`. Dependency direction: `app → {mcp, core}`, `mcp 
 
 | Crate | Package | Kind | Responsibility | Key files |
 |-------|---------|------|----------------|-----------|
-| core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native pointer export + drift + revoke, assurance tiers, tool-call gate, hooks config | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Enforcement`, `AssuranceTier`, `ConstraintAssurance`, `ToolGuard`, `ToolGateReport`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs` (`evaluate_code_checks`), `gate.rs` (`check_tool_call`, repo gate + tool guards), `hooks.rs` (`HookTarget`, `register_hooks`/`revoke_hooks`/`detect_hooks`), `export.rs` (`PROJECT_GUIDANCE`, `render_constraint_briefing`, `handoff_tier_warning`, `render_handoff_brief`, `wrap_block`, `upsert_managed_block`, `remove_managed_block`, `ExportTarget`, `ExportReport`, `RevokeReport`, `DriftReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
+| core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native pointer export + drift + revoke, assurance tiers, tool-call gate, hooks config | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Enforcement`, `AssuranceTier`, `ConstraintAssurance`, `ToolGuard`, `ToolGateReport`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs` (`evaluate_code_checks`), `gate.rs` (`check_tool_call`, repo gate + tool guards), `hooks.rs` (`HookTarget`, `ConfigCodec`, `HookScope`, `HookEvents`, `register`/`revoke`/`detect`), `export.rs` (`PROJECT_GUIDANCE`, `render_constraint_briefing`, `handoff_tier_warning`, `render_handoff_brief`, `wrap_block`, `upsert_managed_block`, `remove_managed_block`, `ExportTarget`, `ExportReport`, `RevokeReport`, `DriftReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
 | mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 25 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
 | app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review, native export + hooks registration | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
 
 Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`, `Store`,
 `RuleExplanation`, `AcknowledgmentReport`, `ConstraintVerificationReport`, `ExportReport`,
 `ExportTarget`, `RevokeReport`, `TargetOutcome`, `DriftReport`, `TargetDrift`, `HookReport`,
-`HookStatus`, `HookTarget`, `render_constraint_briefing`, `handoff_tier_warning`, and all of
+`HookScope`, `HookStatus`, `HookTarget`, `render_constraint_briefing`, `handoff_tier_warning`, and all of
 `model::*`.
 
 `Store` entry points: `Store::open(layout)`, `Store::open_default()` (`~/.agent-control`),
@@ -382,13 +382,15 @@ optional `### Continuity` section (read `.agent-control/handoff/latest.md`, refr
 read those files learn where the contracts live without an MCP call. `revoke_native` (same
 `project_path`/`targets`/`include_user`) is the explicit undo: it strips the block, keeps surrounding
 prose (`removed`), deletes block-only files (`deleted`), and is a safe no-op on block-free targets
-(`unchanged`). The harness hooks (`scripts/agent-control-hook.mjs`, wired by `register_hooks`) are
-the push/enforce counterparts. **SessionStart** calls `get_applicable_rules` over MCP HTTP and injects
-a briefing into session context (reach); **PreToolUse** calls `check_tool_call` and blocks the tool
-with exit code 2 + a stderr reason when a hard rule denies (enforce). Both are read-only and graceful
-(exit 0) when the daemon is down. Export/hook *deliver* rules; `code_checks` + the evidence chain
-*verify*; hard enforcement exists only where the PreToolUse gate mediates the call (see **Assurance
-tiers** above).
+(`unchanged`). The harness hooks (`scripts/agent-control-hook.mjs`, wired by `register_hooks` for nine
+vendors) are the push/enforce counterparts. The **start** event calls `get_applicable_rules` over MCP
+HTTP and injects a briefing into session context where the vendor supports it (reach); the **gate**
+event resolves a session and calls `check_tool_call`, blocking the tool in the vendor's deny shape
+(claude-shaped exit 2 + stderr, Cursor `{permission:deny}`, Antigravity `{decision:deny}`) when a hard
+rule denies (enforce) — and passing `session_id` records the `Enforced` tier. Both are read-only and
+fail-open (the vendor's allow output) when the daemon is down, unless `AGENT_CONTROL_HOOK_FAIL_CLOSED`
+opts the gate into fail-closed. Export/hook *deliver* rules; `code_checks` + the evidence chain
+*verify*; hard enforcement exists only where the gate mediates the call (see **Assurance tiers** above).
 `check_export_drift` (`project_path`, optional `targets`, optional `include_user`) returns a
 `DriftReport` flagging targets missing the current-format block (embedded block-format version ≠
 `BLOCK_FORMAT`, e.g. a legacy v1 full-text block); read-only, prompts re-export, never rewrites, and
@@ -404,14 +406,23 @@ repo, records achieved tiers + evidence, and returns a `ConstraintVerificationRe
 state (deny while a check fails), and its `tool_guards` (tool-name glob + input regex + reason) deny
 matching calls. No hard rules → allowed (fail-open). The hook blocks on `allowed: false` with exit
 code 2 + the joined denial reason on stderr, and records a `ToolGate` evidence entry.
-`register_hooks` (`project_path`, optional `targets`, optional `command`) writes the managed
-SessionStart + PreToolUse hook group into each selected harness's settings (`claude` |
-`codebuddy` | `workbuddy` | `qoder`), preserving all other config and user hooks; idempotent.
+`register_hooks` (`project_path`, optional `targets`, optional `command`) writes the managed start +
+pre-tool hook group into each selected harness's own config, in its own schema, preserving all other
+config and user hooks; idempotent, atomic. `targets` is any of the **nine** `HookTarget` keys (`claude`
+| `codebuddy` | `workbuddy` | `qoder` | `qoder-cn` | `codex` | `cursor` | `antigravity` | `kimi`;
+omitted → all nine). Each target selects a `ConfigCodec` (nested JSON for the Claude family + Codex +
+Qoder CN, flat JSON for Cursor, named bundle for Antigravity, a TOML marker block for Kimi), its event
+names (`SessionStart`/`PreToolUse`, Cursor `sessionStart`/`preToolUse`, Antigravity
+`PreInvocation`/`PreToolUse`) and its `HookScope` (project for seven; **user** for Kimi
+`~/.kimi-code/config.toml` and Antigravity `~/.gemini/config/hooks.json` — a user-level hook still gates
+per-project by the call's `cwd`). The registered command bakes in the vendor id + event so the shared
+Node script picks the right stdin/output shape.
 `revoke_hooks` (same `project_path`/`targets`) removes only the managed group (identified by the
-`agent-control-hook.mjs` command marker), pruning empty events/hooks and deleting block-only files.
-`detect_hooks` (`project_path`) reports per-target `HookStatus` (installed harness, settings path,
-whether the managed group is present) without writing — the read-only counterpart that backs the
-Projects-view Hooks UI.
+`agent-control-hook.mjs` command marker), pruning empty events/hooks and deleting block-only files; the
+Kimi TOML codec strips only its own `[[hooks]]` block so user comments survive.
+`detect_hooks` (`project_path`) reports per-target `HookStatus` (`target`, `label`, `scope`, installed
+harness, `settings_path`, whether the managed group is present) for all nine without writing — the
+read-only counterpart that backs the Projects-view Hooks UI.
 
 Recommended harness call order:
 
@@ -449,35 +460,67 @@ node scripts/mcp-http-e2e.mjs   # Streamable HTTP transport
 ## Enforcement hooks / 强制 hooks
 
 Layer 2 enforcement rides the harness's **own** hooks — no separate runtime host. `core/src/hooks.rs`
-is the JSON counterpart of `export.rs`'s managed block: it upserts/removes only *our* hook groups in
-each harness's project `settings.json`, preserving every other key and every user-authored hook. A
-group is "ours" when a handler command contains `HOOK_MARKER` (`agent-control-hook.mjs`), so no extra
-marker field is needed that a harness might reject.
+is the config counterpart of `export.rs`'s managed block: it upserts/removes only *our* hook groups in
+each harness's own config, preserving every other key and every user-authored hook. A group is "ours"
+when a handler command contains `HOOK_MARKER` (`agent-control-hook.mjs`), so no extra marker field is
+needed that a harness might reject. Nine vendors differ in config schema, so each `HookTarget` maps to
+a `ConfigCodec` that owns the upsert/remove/registered text manipulation:
 
-- **Targets** (`HookTarget`, serde lowercase): `Claude` (`.claude/settings.json`), `CodeBuddy`
-  (`.codebuddy/settings.json`), `WorkBuddy` (`.workbuddy/settings.json` — a separate product shipping
-  the same engine rebranded, so it gets its own target and checkbox), `Qoder`
-  (`.qoder/settings.json`). `register_hooks` /
-  `revoke_hooks` / `detect_hooks` are thin `Store` adapters over `hooks::{register, revoke, detect}`.
-- **Two events written together** (`HOOK_EVENTS`): `SessionStart` (no matcher) injects the binding-rule
-  briefing via `get_applicable_rules` (reach); `PreToolUse` (empty matcher = every tool) runs the gate
-  via `check_tool_call` (enforce). Registering is idempotent (`created|updated|unchanged`); revoking
-  prunes the events/hooks we emptied and deletes block-only files (`removed|deleted|unchanged`).
+- `NestedJson` — `{"hooks":{Event:[{matcher?,hooks:[{type,command,timeout}]}]}}` (Claude family, Codex, Qoder CN).
+- `FlatJson` — `{"version":1,"hooks":{event:[{command,timeout}]}}` (Cursor; command on the definition).
+- `NamedBundleJson` — `{"<bundle>":{Event:[…]}}` (Antigravity).
+- `Toml` — `[[hooks]]` tables inside a user TOML config, owned via a marker block edited as **text** so user comments survive (Kimi).
+
+Writes are atomic (temp file + rename) and reversible. `HookScope` records where the config lives:
+`Project` (in the repo, shared/committed) for seven vendors, `User` (a user-global file) for Kimi and
+Antigravity. A user-level hook still only enforces for the matching project because the gate resolves
+rules by the call's `cwd`.
+
+- **Targets** (`HookTarget`, serde lowercase; `HookTarget::ALL` is the nine-element list):
+  `Claude` (`.claude/settings.json`), `CodeBuddy` (`.codebuddy/settings.json`), `WorkBuddy`
+  (`.workbuddy/settings.json` — a separate product shipping the same engine rebranded), `Qoder`
+  (`.qoder/settings.json`), `QoderCn` (`.qoder-cn/settings.json` — the China build, separate config
+  home), `Codex` (`.codex/hooks.json`), `Cursor` (`.cursor/hooks.json`), `Antigravity`
+  (`~/.gemini/config/hooks.json`, user), `Kimi` (`~/.kimi-code/config.toml`, user). Antigravity replaces
+  the former Gemini CLI target. `register_hooks` / `revoke_hooks` / `detect_hooks` are thin `Store`
+  adapters over `hooks::{register, revoke, detect}`. **Assumption to verify:** Qoder CN's *project*
+  config dir `.qoder-cn/` is inferred from its confirmed user dir `~/.qoder-cn`; if the China build
+  reads a different project path, adjust `DataLayout::project_qoder_cn_settings`.
+- **Two events written together** (`HookTarget::events() -> HookEvents { start, gate }`, default
+  `CLAUDE_EVENTS`): the **start** event (`SessionStart`, Cursor `sessionStart`, Antigravity
+  `PreInvocation`; no matcher) injects the binding-rule briefing via `get_applicable_rules` (reach);
+  the **gate** event (`PreToolUse`, Cursor `preToolUse`; empty matcher = every tool) runs the gate via
+  `check_tool_call` (enforce). Registering is idempotent (`created|updated|unchanged`); revoking prunes
+  the events/hooks we emptied and deletes block-only files (`removed|deleted|unchanged`).
 - **The gate** (`core/src/gate.rs`, `evaluate_gate`): pure evaluation over the enabled `Hard` rules.
   A hard rule denies when its **repo gate** (`code_checks` against real files) finds the repo
   non-compliant/inconclusive, OR a **tool guard** (tool-name glob + input regex + reason) matches the
   call. Otherwise it mediated the call and counts toward `Enforced`. `Store::check_tool_call` wraps it,
   records a `ToolGate` evidence entry + achieved tiers, and returns `ToolGateReport`. No hard rules →
   allowed (fail-open). This is the **only** path that produces `AssuranceTier::Enforced`.
-- **The hook script** (`scripts/agent-control-hook.mjs`, dependency-free Node) dispatches on
-  `hook_event_name`: SessionStart → `get_applicable_rules` briefing + `check_export_drift` warning;
-  PreToolUse → `check_tool_call`, and on `allowed: false` exits **2** with the denial reason on stderr
-  (the universal block contract across Claude / CodeBuddy / WorkBuddy / Qoder). Read-only and graceful
-  (exit 0) when the daemon is unreachable, so it never blocks a session spuriously.
+- **The hook script** (`scripts/agent-control-hook.mjs`, dependency-free Node) serves all nine vendors;
+  the registered command bakes in `vendor` + `event` as argv (authoritative even when a harness omits
+  `hook_event_name` in stdin). It selects one of three I/O shapes: **claude** (Claude family, Codex,
+  Qoder CN, Kimi — exit **2** + stderr deny, briefing via `hookSpecificOutput.additionalContext`),
+  **cursor** (always valid JSON: `{permission:"allow"|"deny",user_message,agent_message}`, briefing via
+  `{additional_context}`), **antigravity** (`{decision:"ask"|"deny",reason}` — silence/`{}` is denial
+  since agy 1.4.x, so allow/fail-open must emit `ask`; stdin nests the call under `toolCall.{name,args}`).
+  The **start** event resolves a session (get-or-create, task `hook`) to freeze the snapshot, then
+  injects the `get_applicable_rules` briefing + a best-effort `check_export_drift` warning where the
+  vendor supports injection (Antigravity's `PreInvocation` has no channel → reach is via the exported
+  `GEMINI.md` pointer). The **gate** event resolves the same session and calls `check_tool_call` with
+  the pending tool name/input **and that `session_id`**, so a mediated hard rule earns `Enforced` and
+  the verdict lands in the evidence chain; on `allowed: false` it blocks in the vendor's deny shape.
+  **Fail-open by default** (unreachable/slow daemon → the vendor's allow output, never a spurious
+  block); set `AGENT_CONTROL_HOOK_FAIL_CLOSED` to opt into **fail-closed**, where a *gate* invocation
+  that cannot reach a verdict denies (the start event always stays fail-open). A hard guard timer
+  (`AGENT_CONTROL_HOOK_TIMEOUT_MS`, default 4000) emits the verdict-shaped output on timeout.
 
-Tested by `scripts/hook-e2e.mjs` (SessionStart briefing + PreToolUse deny/allow against a throwaway
-repo) and the gate/hooks unit tests in `crates/core`. Run with `mise run e2e`. When you change the hook
-flow, update the script + the e2e together.
+Tested by `scripts/hook-e2e.mjs` (start briefing + gate deny/allow in each vendor's shape, hook-only
+`Enforced` recording, fail-open and opt-in fail-closed against a throwaway repo) and the gate/hooks
+codec unit tests in `crates/core` (per-codec upsert/remove/registered text manipulation, no disk writes
+to the real user home). Run with `mise run e2e`. When you change the hook flow, update the script + the
+e2e together.
 
 ---
 

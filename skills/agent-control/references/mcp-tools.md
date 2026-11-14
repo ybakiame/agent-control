@@ -302,9 +302,10 @@ The explicit undo of `export_native`: remove the pointer block from the selected
 - Errors (`isError`): empty `project_path`, an unknown `targets` name, or a malformed existing block.
 
 ### check_tool_call
-The deny-capable **PreToolUse gate** — the only path that achieves the `Enforced` tier. The hook calls
-this before each tool call; on deny it exits `2` with the reason on stderr so the harness blocks the
-call. Evaluates the project's enabled `hard` rules two ways: a **repo gate** (a hard rule's
+The deny-capable **pre-tool gate** — the only path that achieves the `Enforced` tier. The hook calls
+this before each tool call; on deny it blocks the call in the vendor's shape (claude-shaped exit `2` +
+stderr, Cursor `{permission:"deny"}`, Antigravity `{decision:"deny"}`). Evaluates the project's enabled
+`hard` rules two ways: a **repo gate** (a hard rule's
 `code_checks` failing/inconclusive denies tools until the repo complies) and **tool guards** (a
 matching `tool_guards` glob + input regex denies the call). With no `hard` rules it is fail-open.
 - `project_path` (string, required) — absolute project path whose hard rules gate the call.
@@ -320,18 +321,33 @@ matching `tool_guards` glob + input regex denies the call). With no `hard` rules
 - Errors (`isError`): empty `project_path` or `tool_name`, malformed `session_id`.
 
 ### register_hooks
-Register the Agent Control hook into the selected harnesses' **project `settings.json`** so the
-harness itself drives enforcement. Writes a managed group with a **SessionStart** hook (injects the
-briefing: binding rules + conflicts + work environment) and a **PreToolUse** hook (runs `check_tool_call`) — this is what turns a `hard`
-rule into an `Enforced` one. Every other settings key and user-authored hook is preserved;
-re-registering is idempotent.
+Register the Agent Control hook into the selected harnesses' **own config** so the harness itself drives
+enforcement. Writes a managed group with a **start** hook (injects the briefing: binding rules +
+conflicts + work environment) and a **pre-tool** hook (runs `check_tool_call`) — this is what turns a
+`hard` rule into a recorded `Enforced` one. Every other config key and user-authored hook is preserved;
+writes are atomic and re-registering is idempotent. Each target uses its own schema (`ConfigCodec`),
+event names and deny shape:
+
+| `targets` key | Config file | Codec | Scope | Start / pre-tool event |
+|---------------|-------------|-------|-------|------------------------|
+| `claude` | `.claude/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
+| `codebuddy` | `.codebuddy/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
+| `workbuddy` | `.workbuddy/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
+| `qoder` | `.qoder/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
+| `qoder-cn` | `.qoder-cn/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
+| `codex` | `.codex/hooks.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
+| `cursor` | `.cursor/hooks.json` | flat JSON (`version:1`) | project | `sessionStart` / `preToolUse` |
+| `antigravity` | `~/.gemini/config/hooks.json` | named bundle | user | `PreInvocation` / `PreToolUse` |
+| `kimi` | `~/.kimi-code/config.toml` | TOML marker block | user | `SessionStart` / `PreToolUse` |
+
 - `project_path` (string, required) — absolute project path.
-- `targets` (string[], optional) — `claude` | `codebuddy` | `workbuddy` | `qoder`. **Omitted →
-  all four.** CodeBuddy and WorkBuddy are separate products (`.codebuddy/` vs `.workbuddy/`); each
-  harness reads only its own `settings.json`, so there is no cross-harness conflict.
+- `targets` (string[], optional) — any of the nine keys above. **Omitted → all nine.** Seven write a
+  project-level config; **Kimi** and **Antigravity** write a user-global file but still gate per-project
+  by the call's `cwd`. Each harness reads only its own config, so there is no cross-harness conflict.
 - `command` (string, optional) — full command line that runs the hook (e.g.
   `node "/abs/agent-control-hook.mjs"`). Omitted resolves the bundled script beside the executable
-  (release) or in the repo `scripts/` dir (dev); errors if not found and no `command` given.
+  (release) or in the repo `scripts/` dir (dev); errors if not found and no `command` given. The
+  registered command bakes in the vendor id + event so the shared script picks the right I/O shape.
 - Returns: `report` (`HookReport`: `project_path`, `targets[]` each `{ path, action }`), `command`,
   `instruction`. Restart the harness session for the hook to take effect. The daemon must be reachable
   at the hook endpoint (default `http://127.0.0.1:9870/mcp`).
@@ -339,21 +355,23 @@ re-registering is idempotent.
 
 ### revoke_hooks
 The explicit undo of `register_hooks`: remove the managed hook group from the selected harnesses'
-project `settings.json`. Other config and user-authored hooks are preserved; a settings file that held
-only our hook is deleted. After revoking, hard rules are no longer mediated and cap at Advisory/Verified.
-- `project_path` (string, required), `targets` (string[], optional, omitted → all four).
+own config. Other config and user-authored hooks are preserved; a config file that held
+only our hook is deleted (the Kimi TOML codec strips only its own `[[hooks]]` marker block, so user
+comments survive). After revoking, hard rules are no longer mediated and cap at Advisory/Verified.
+- `project_path` (string, required), `targets` (string[], optional, omitted → all nine).
 - Returns: `report` (`HookReport`: `targets[]` each `{ path, action }` where action is `removed` |
   `deleted` | `unchanged`) and an `instruction`. A target with no managed hook is left `unchanged`, so
   re-running is safe.
 - Errors (`isError`): empty `project_path`, unknown `targets` name.
 
 ### detect_hooks
-Read-only: report which harnesses (Claude Code, CodeBuddy, WorkBuddy, Qoder) are installed and whether
-the Agent Control hook is already registered in each one's project `settings.json`. Drives the
-console's one-click register/restore UI; use before `register_hooks` to choose targets.
+Read-only: report which of the **nine** harnesses (Claude Code, CodeBuddy, WorkBuddy, Qoder, Qoder CN,
+Codex, Cursor, Antigravity, Kimi Code) are installed and whether the Agent Control hook is already
+registered in each one's own config. Drives the console's one-click register/restore UI; use before
+`register_hooks` to choose targets.
 - `project_path` (string, required) — absolute project path to inspect.
-- Returns: `harnesses[]` (`HookStatus`: `target`, `label`, `installed` bool, `settings_path`,
-  `registered` bool).
+- Returns: `harnesses[]` (`HookStatus`: `target`, `label`, `scope` (`project` | `user`), `installed`
+  bool, `settings_path`, `registered` bool).
 - Errors (`isError`): empty `project_path`.
 
 ## Resources
@@ -482,16 +500,18 @@ revoke_native { "project_path": "/abs/repo", "targets": ["agents", "claude", "ge
 // "removed" = block stripped, surrounding prose kept; "deleted" = file held only the block;
 // "unchanged" = no block. Re-running is a safe no-op.
 
-// 15. register the enforcement hooks (SessionStart briefing + PreToolUse gate) into harness settings
+// 15. register the enforcement hooks (start briefing + pre-tool gate) into each harness's own config
 detect_hooks { "project_path": "/abs/repo" }
-// -> { "harnesses": [ { "target": "claude", "installed": true, "registered": false, ... }, ... ] }
-register_hooks { "project_path": "/abs/repo", "targets": ["claude", "codebuddy", "qoder"] }
+// -> { "harnesses": [ { "target": "claude", "scope": "project", "installed": true, "registered": false, ... },
+//                     { "target": "kimi", "scope": "user", ... }, ... ] }   // nine harnesses
+register_hooks { "project_path": "/abs/repo", "targets": ["claude", "codebuddy", "qoder", "cursor"] }
 // -> { "report": { "targets": [ { "path": "/abs/repo/.claude/settings.json", "action": "created" }, ... ] },
 //      "command": "node \".../agent-control-hook.mjs\"", "instruction": "..." }
-// Omit "targets" to register all four. Other settings keys + user hooks are preserved; re-run is
-// idempotent. Restart the harness session; hard rules can now reach the Enforced tier.
+// Omit "targets" to register all nine. Seven write project-level config; kimi/antigravity write a
+// user-global file but still gate per-project by cwd. Other config keys + user hooks are preserved;
+// re-run is idempotent. Restart the harness session; hard rules can now reach the Enforced tier.
 
-// 16. the PreToolUse gate: deny a call that violates a hard rule (the hook exits 2 on deny)
+// 16. the pre-tool gate: deny a call that violates a hard rule (the hook blocks in the vendor's shape)
 check_tool_call { "project_path": "/abs/repo", "tool_name": "Bash",
   "tool_input": { "command": "rm -rf /" }, "agent_id": "claude-code", "session_id": "UUID" }
 // -> { "report": { "allowed": false, "denials": [ { "rule_id": "no-rm-rf", "reason": "..." } ],

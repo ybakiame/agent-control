@@ -1,50 +1,154 @@
 #!/usr/bin/env node
-// Agent Control — harness hook for Claude Code / CodeBuddy / WorkBuddy / Qoder.
+// Agent Control — harness hook for nine coding agents.
 //
-// Dispatches on the stdin `hook_event_name`:
+// One script serves every supported harness; the registered command bakes in the vendor id and the
+// event name as argv (`node "<path>" <vendor> <event>`), so the script knows which harness it is
+// serving even when a vendor omits `hook_event_name` in stdin. Vendors fall into three I/O shapes:
 //
-//   SessionStart — pushes the project's binding rules into the session context, so the harness
-//     inherits the contracts before it calls any MCP tool. Read-only: calls get_applicable_rules
-//     (+ a best-effort check_export_drift) over the local MCP HTTP endpoint and injects a concise
-//     briefing via hookSpecificOutput.additionalContext. Never writes files.
+//   claude-shaped (claude, codebuddy, workbuddy, qoder, qoder-cn, codex, kimi) — the universal
+//     exit-2 + stderr deny signal; allow exits 0 silently; the briefing is injected via
+//     hookSpecificOutput.additionalContext. stdin carries tool_name / tool_input.
 //
-//   PreToolUse — the deny-capable enforcement chokepoint. Calls check_tool_call with the pending
-//     tool_name/tool_input; if the gate denies (a hard rule's repo gate fails, or a tool_guard
-//     matches), it BLOCKS the call by exiting 2 with the denial reason on stderr (the universal
-//     deny signal across these harnesses — stderr is fed back to the agent). On allow it exits 0.
-//     This is what turns a declared hard rule into an Enforced one.
+//   cursor — must always print valid JSON (a permission hook blocks on empty/invalid stdout).
+//     preToolUse: allow → {"permission":"allow"}, deny → {"permission":"deny",user_message,
+//     agent_message}. sessionStart: briefing → {"additional_context": "..."}.
 //
-// Fail-open by design: if the Agent Control daemon is unreachable, times out, or errors, the hook
-// exits 0 silently so a session is never blocked and a tool is never denied by infrastructure.
+//   antigravity — PreToolUse treats silence (and, since agy 1.4.x, even `{}`) as DENIAL, so the
+//     allow / fail-open output must be {"decision":"ask"} to preserve the user's permission policy;
+//     deny → {"decision":"deny","reason":"..."}. stdin nests the call under toolCall.{name,args}.
+//     PreInvocation has no context-injection channel, so reach there is via the exported GEMINI.md
+//     pointer block; the hook only freezes the session and gates.
+//
+// Two events drive the framework:
+//
+//   start (SessionStart / sessionStart / PreInvocation) — freezes the constraint snapshot
+//     (get-or-create an Agent Control session) and, where the vendor supports it, pushes the project's
+//     binding rules into the session context. Calls create_session + get_applicable_rules (+ a
+//     best-effort check_export_drift) over the local MCP HTTP endpoint.
+//
+//   gate (PreToolUse / preToolUse) — the deny-capable enforcement chokepoint. Resolves the same
+//     session and calls check_tool_call with the pending tool name/input AND that session_id; if the
+//     gate denies (a hard rule's repo gate fails, or a tool_guard matches) it BLOCKS the call in the
+//     vendor's deny shape. Passing session_id records the verdict in the evidence chain and earns a
+//     mediated hard rule the Enforced tier — so a hook-only deployment still produces verifiable
+//     enforcement.
+//
+// Fail-open by default: if the daemon is unreachable, times out, or errors, the hook emits the
+// vendor's allow output (silent exit 0 for claude-shaped, {"permission":"allow"} for Cursor,
+// {"decision":"ask"} for Antigravity) so a session is never blocked by infrastructure. Set
+// AGENT_CONTROL_HOOK_FAIL_CLOSED to opt into fail-closed enforcement: a GATE invocation that cannot
+// reach a verdict then DENIES (exit 2 / {permission:deny} / {decision:deny}) because compliance could
+// not be verified. The start/briefing event always stays fail-open so session init is never blocked.
 //
 // Register both events with the MCP `register_hooks` tool (or the console's Hooks panel), which
-// writes the managed group into each harness's settings.json. Manual copy-ready snippet — adjust
-// the absolute path to this script:
+// writes the managed entry into each harness's config in its own schema. Manual copy-ready snippet
+// for a claude-shaped harness — adjust the absolute path and append the vendor + event:
 //
 //   {
 //     "hooks": {
 //       "SessionStart": [
-//         { "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control-hook.mjs\"" } ] }
+//         { "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control-hook.mjs\" claude SessionStart" } ] }
 //       ],
 //       "PreToolUse": [
-//         { "matcher": "", "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control-hook.mjs\"" } ] }
+//         { "matcher": "", "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control-hook.mjs\" claude PreToolUse" } ] }
 //       ]
 //     }
 //   }
 //
 // Environment:
 //   AGENT_CONTROL_MCP_URL          MCP endpoint (default http://127.0.0.1:9870/mcp)
-//   AGENT_CONTROL_AGENT_ID         agent id used for resolution (default claude-code)
+//   AGENT_CONTROL_AGENT_ID         agent id used for resolution (default: per-vendor, e.g. claude-code)
 //   AGENT_CONTROL_HOOK_TIMEOUT_MS  total time budget in ms (default 4000)
 //   AGENT_CONTROL_HOOK_DEBUG       if set, log diagnostics to stderr (never blocks the session)
+//   AGENT_CONTROL_HOOK_FAIL_CLOSED if set, a gate that cannot reach the daemon denies (default: allow)
 
 const URL = process.env.AGENT_CONTROL_MCP_URL ?? "http://127.0.0.1:9870/mcp";
-const AGENT_ID = process.env.AGENT_CONTROL_AGENT_ID ?? "claude-code";
 const TIMEOUT = Number(process.env.AGENT_CONTROL_HOOK_TIMEOUT_MS ?? 4000);
 const DEBUG = !!process.env.AGENT_CONTROL_HOOK_DEBUG;
+// Opt-in fail-closed: when set, a gate that cannot reach a verdict (daemon down/timeout/error) DENIES
+// instead of allowing. Default (unset) keeps the uniform fail-open behavior. Only the gate event fails
+// closed; the start/briefing event always stays fail-open so a session can still initialize.
+const FAIL_CLOSED = !!process.env.AGENT_CONTROL_HOOK_FAIL_CLOSED;
 
-// Hard deadline: a missing/slow daemon must never hang session start.
-const guard = setTimeout(() => process.exit(0), TIMEOUT);
+// Vendor + event are baked into the registered command (argv). They are authoritative even when a
+// harness omits hook_event_name in stdin; the event falls back to stdin only for legacy registrations.
+const VENDOR = (process.argv[2] || "claude").toLowerCase();
+let EVENT = process.argv[3] || null;
+
+const DEFAULT_AGENT_ID = {
+  claude: "claude-code",
+  codebuddy: "codebuddy",
+  workbuddy: "workbuddy",
+  qoder: "qoder",
+  "qoder-cn": "qoder-cn",
+  codex: "codex",
+  cursor: "cursor",
+  antigravity: "antigravity",
+  kimi: "kimi-code",
+};
+const AGENT_ID = process.env.AGENT_CONTROL_AGENT_ID ?? DEFAULT_AGENT_ID[VENDOR] ?? VENDOR;
+
+// The three output shapes. Anything unrecognized falls back to the claude-shaped exit-2 contract.
+const SHAPE = VENDOR === "cursor" ? "cursor" : VENDOR === "antigravity" ? "antigravity" : "claude";
+
+function isGateEvent(ev) {
+  return ev === "PreToolUse" || ev === "preToolUse";
+}
+
+// Allow / fail-open output, vendor-aware. Antigravity must emit {"decision":"ask"} on the gate because
+// silence (and `{}` since agy 1.4.x) is treated as denial; "ask" preserves the user's permission policy.
+function allowResult() {
+  if (SHAPE === "cursor") return { code: 0, stdout: JSON.stringify({ permission: "allow" }) };
+  if (SHAPE === "antigravity") {
+    return { code: 0, stdout: JSON.stringify(isGateEvent(EVENT) ? { decision: "ask" } : {}) };
+  }
+  return { code: 0 };
+}
+
+// Deny output in the vendor's shape. claude-shaped blocks via exit 2 + stderr (fed back to the agent);
+// Cursor and Antigravity block via a valid-JSON decision on stdout (exit 0).
+function denyResult(reason) {
+  const msg = `Agent Control gate denied this tool call. ${reason}`;
+  if (SHAPE === "cursor") {
+    return {
+      code: 0,
+      stdout: JSON.stringify({ permission: "deny", user_message: msg, agent_message: msg }),
+    };
+  }
+  if (SHAPE === "antigravity") {
+    return { code: 0, stdout: JSON.stringify({ decision: "deny", reason: msg }) };
+  }
+  return { code: 2, stderr: `${msg}\n` };
+}
+
+// The verdict when the gate cannot reach the daemon (unreachable, timeout, or error). Fail-open by
+// default; in fail-closed mode a GATE invocation denies because compliance could not be verified. The
+// start/briefing event always fails open — there is no tool call to deny, and blocking session init
+// would be disruptive. EVENT is resolved from argv at load (or from stdin in main) before this fires.
+function unreachableResult() {
+  if (FAIL_CLOSED && isGateEvent(EVENT)) {
+    return denyResult(
+      "compliance could not be verified (Agent Control daemon unreachable; fail-closed mode is enabled).",
+    );
+  }
+  return allowResult();
+}
+
+// Briefing injection on the start event, vendor-aware. Antigravity's PreInvocation has no injection
+// channel, so it emits {} (reach there is via the exported GEMINI.md pointer block).
+function briefingResult(text) {
+  if (SHAPE === "cursor") {
+    return { code: 0, stdout: JSON.stringify(text ? { additional_context: text } : {}) };
+  }
+  if (SHAPE === "antigravity") return { code: 0, stdout: JSON.stringify({}) };
+  if (!text) return { code: 0 };
+  return {
+    code: 0,
+    stdout: JSON.stringify({
+      hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: text },
+    }),
+  };
+}
 
 function debug(msg) {
   if (DEBUG) process.stderr.write(`agent-control-hook: ${msg}\n`);
@@ -89,7 +193,9 @@ async function parseBody(res) {
   return null;
 }
 
-async function callMcp(tool, args) {
+// One MCP handshake per hook invocation; the returned headers carry the session id so several
+// tools/call requests reuse it (the gate resolves a session, then gates the call).
+async function mcpInit() {
   const headers = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
@@ -116,7 +222,10 @@ async function callMcp(tool, args) {
     headers,
   );
   await noteRes.text();
+  return headers;
+}
 
+async function mcpCall(headers, tool, args) {
   const res = await post(
     { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: tool, arguments: args } },
     headers,
@@ -126,6 +235,31 @@ async function callMcp(tool, args) {
   const r = msg?.result;
   if (r?.isError) throw new Error(r.content?.[0]?.text ?? "tool error");
   return r?.structuredContent ?? JSON.parse(r?.content?.[0]?.text ?? "{}");
+}
+
+// Resolve this project's Agent Control hook session. create_session is get-or-create keyed by
+// (project, agent, task); a fixed task means every hook invocation for this project+agent lands on
+// the same session UUID without sharing state between separate processes — an enforcement ledger
+// that records each gated call. The start event freezes the snapshot; the gate attaches its verdict.
+async function resolveSession(headers, cwd) {
+  const data = await mcpCall(headers, "create_session", {
+    task: "hook",
+    project_path: cwd,
+    agent_id: AGENT_ID,
+    task_tags: [],
+  });
+  return typeof data?.session_id === "string" ? data.session_id : null;
+}
+
+// Normalize the pending call across vendors: claude-shaped uses tool_name/tool_input; Antigravity
+// nests them under toolCall.{name,args}.
+function normalizeToolName(p) {
+  const n = p?.tool_name ?? p?.toolCall?.name ?? p?.name ?? p?.tool;
+  return typeof n === "string" ? n : "";
+}
+
+function normalizeToolInput(p) {
+  return p?.tool_input ?? p?.toolCall?.args ?? p?.args ?? p?.input ?? {};
 }
 
 function renderStaleWarning(report) {
@@ -147,24 +281,32 @@ function renderStaleWarning(report) {
   return lines.join("\n");
 }
 
-// PreToolUse: the deny-capable chokepoint. Ask the gate about the pending call; on deny, exit 2
-// with the reason on stderr (the universal block signal — the harness feeds stderr to the agent).
-// No session_id is passed: the harness's stdin session id is not an Agent Control session UUID, and
-// the gate evaluates the project's enabled hard rules regardless of session.
-async function handlePreToolUse(parsed, cwd) {
-  const toolName = typeof parsed?.tool_name === "string" ? parsed.tool_name : "";
-  if (!toolName) return { code: 0 };
-  const data = await callMcp("check_tool_call", {
+// The gate: resolve the session (best-effort) so the verdict is recorded and mediated hard rules earn
+// Enforced, then ask check_tool_call about the pending call. On deny, emit the vendor's deny shape. If
+// session resolution fails the gate still runs (stateless): enforcement is never lost, only the
+// per-session record.
+async function handleGate(headers, parsed, cwd) {
+  const toolName = normalizeToolName(parsed);
+  if (!toolName) return allowResult();
+  let sessionId = null;
+  try {
+    sessionId = await resolveSession(headers, cwd);
+  } catch (e) {
+    debug(`session resolution skipped: ${e?.message ?? String(e)}`);
+  }
+  const args = {
     project_path: cwd,
     tool_name: toolName,
-    tool_input: parsed?.tool_input ?? {},
+    tool_input: normalizeToolInput(parsed),
     agent_id: AGENT_ID,
-  });
+  };
+  if (sessionId) args.session_id = sessionId;
+  const data = await mcpCall(headers, "check_tool_call", args);
   if (data?.report?.allowed === false) {
     const reason = data.denial_reason || data.instruction || "Denied by Agent Control hard rules.";
-    return { code: 2, stderr: `Agent Control gate denied this tool call. ${reason}\n` };
+    return denyResult(reason);
   }
-  return { code: 0 };
+  return allowResult();
 }
 
 async function main() {
@@ -175,13 +317,28 @@ async function main() {
   } catch {
     /* no/invalid stdin: fall back to defaults */
   }
-  const cwd = parsed?.cwd || process.cwd();
-  const event = parsed?.hook_event_name;
+  // argv event is authoritative; fall back to stdin for legacy registrations without argv.
+  if (!EVENT) EVENT = parsed?.hook_event_name || parsed?.event || null;
+  const cwd =
+    parsed?.cwd ||
+    parsed?.workspace ||
+    (Array.isArray(parsed?.workspace_roots) ? parsed.workspace_roots[0] : null) ||
+    process.cwd();
 
-  if (event === "PreToolUse") return handlePreToolUse(parsed, cwd);
+  const headers = await mcpInit();
 
-  // SessionStart (and any unrecognized event): inject the binding-rule briefing.
-  const data = await callMcp("get_applicable_rules", {
+  if (isGateEvent(EVENT)) return handleGate(headers, parsed, cwd);
+
+  // Start event: freeze the snapshot, then inject the binding-rule briefing where the vendor supports it.
+  try {
+    await resolveSession(headers, cwd);
+  } catch (e) {
+    debug(`session creation skipped: ${e?.message ?? String(e)}`);
+  }
+  // Antigravity's PreInvocation cannot inject context; the session is frozen for the gate ledger only.
+  if (SHAPE === "antigravity") return briefingResult("");
+
+  const data = await mcpCall(headers, "get_applicable_rules", {
     project_path: cwd,
     agent_id: AGENT_ID,
     file_paths: [],
@@ -193,9 +350,8 @@ async function main() {
   let briefing = typeof data?.briefing === "string" ? data.briefing : "";
 
   // Best-effort format-drift check (layer 1: missing/legacy pointer block). Never blocks the session.
-  // Check every entry point read-only so a legacy block in any of them is surfaced.
   try {
-    const drift = await callMcp("check_export_drift", {
+    const drift = await mcpCall(headers, "check_export_drift", {
       project_path: cwd,
       targets: ["agents", "claude", "gemini", "cursor"],
       include_user: false,
@@ -208,17 +364,11 @@ async function main() {
     debug(`drift check skipped: ${e?.message ?? String(e)}`);
   }
 
-  if (!briefing) return { code: 0 };
-  return {
-    code: 0,
-    stdout: JSON.stringify({
-      hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: briefing },
-    }),
-  };
+  return briefingResult(briefing);
 }
 
-// Flush both streams before exiting so a deny reason on stderr is never truncated. Exit code 2
-// blocks the tool call; 0 allows. The guard timer is cleared so it cannot override the verdict.
+// Flush both streams before exiting so a deny reason is never truncated. The guard timer is cleared
+// so it cannot override the verdict.
 function finish(code, stdout, stderr) {
   clearTimeout(guard);
   let pending = 0;
@@ -236,11 +386,20 @@ function finish(code, stdout, stderr) {
   if (pending === 0) process.exit(code);
 }
 
+// Hard deadline: a missing/slow daemon must never hang the hook. Emit the vendor's verdict-shaped
+// output (not a bare exit 0) so Cursor/Antigravity still receive a valid permission decision on
+// timeout — allow by default, or deny when fail-closed is enabled and this is a gate invocation.
+const guard = setTimeout(() => {
+  const r = unreachableResult();
+  finish(r.code, r.stdout, r.stderr);
+}, TIMEOUT);
+
 main()
   .then((result) => finish(result?.code ?? 0, result?.stdout, result?.stderr))
   .catch((e) => {
-    // Fail-open: an unreachable/slow daemon or any error must never block a session or deny a tool.
-    clearTimeout(guard);
+    // An unreachable/slow daemon or any error: fail-open by default, fail-closed (deny) only for a
+    // gate invocation when explicitly opted in. The start event never blocks session init.
     debug(e?.message ?? String(e));
-    process.exit(0);
+    const r = unreachableResult();
+    finish(r.code, r.stdout, r.stderr);
   });
