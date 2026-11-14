@@ -15,7 +15,8 @@ impl Console {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let bg = cx.theme().background;
-        let muted_bg = cx.theme().muted;
+        let list_hover = cx.theme().list_hover;
+        let list_active = cx.theme().list_active;
 
         let filter = self.suggestion_filter;
         let filters = [
@@ -60,6 +61,7 @@ impl Console {
                 Scope::User => Tag::info().child(self.t("scope.user.tag")),
                 Scope::Project => Tag::primary().child(self.t("scope.project.tag")),
                 Scope::Session => Tag::secondary().child(self.t("scope.session.tag")),
+                Scope::Environment => Tag::warning().child(self.t("scope.environment.tag")),
             };
             let enforcement_tag = match s.enforcement {
                 Enforcement::Advisory => None,
@@ -75,8 +77,14 @@ impl Console {
                 .border_1()
                 .border_color(if selected { cx.theme().primary } else { border })
                 .rounded_md()
-                .bg(if selected { muted_bg } else { bg })
-                .cursor_pointer()
+                .bg(if selected { list_active } else { bg })
+                .hover(move |s| {
+                    if selected {
+                        s.bg(list_active)
+                    } else {
+                        s.bg(list_hover)
+                    }
+                })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.select_suggestion(id, window, cx);
                     cx.notify();
@@ -218,8 +226,13 @@ impl Console {
             Scope::User => Tag::info().child(self.t("scope.user.tag")),
             Scope::Project => Tag::primary().child(self.t("scope.project.tag")),
             Scope::Session => Tag::secondary().child(self.t("scope.session.tag")),
+            Scope::Environment => Tag::warning().child(self.t("scope.environment.tag")),
         };
-        let is_user = s.scope == Scope::User;
+        let (edit_hint_key, approve_key) = match s.scope {
+            Scope::User => ("sugg.edit_hint_user", "sugg.approve_user"),
+            Scope::Environment => ("sugg.edit_hint_environment", "sugg.approve_environment"),
+            _ => ("sugg.edit_hint", "sugg.approve"),
+        };
         let enforcement_tag = match s.enforcement {
             Enforcement::Advisory => Tag::secondary().child(self.t("enforcement.advisory")),
             Enforcement::Verify => Tag::info().child(self.t("enforcement.verify")),
@@ -274,11 +287,12 @@ impl Console {
                 .child(header)
                 .child(rationale)
                 .child(ui::section_label(cx, self.t("sugg.edit_title")))
-                .child(div().text_xs().text_color(muted).child(self.t(if is_user {
-                    "sugg.edit_hint_user"
-                } else {
-                    "sugg.edit_hint"
-                })))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(self.t(edit_hint_key)),
+                )
                 .child(
                     v_flex()
                         .gap_1()
@@ -305,7 +319,11 @@ impl Console {
                                 .text_color(muted)
                                 .child(self.t("rules.content")),
                         )
-                        .child(Textarea::new(&self.sugg_content_input).h(px(180.))),
+                        .child(
+                            Textarea::new(&self.sugg_content_input)
+                                .h(px(180.))
+                                .aria_label(self.t("rules.content")),
+                        ),
                 )
                 .child(
                     v_flex()
@@ -318,11 +336,7 @@ impl Console {
                         .gap_2()
                         .child(
                             Button::new("sugg-approve")
-                                .label(self.t(if is_user {
-                                    "sugg.approve_user"
-                                } else {
-                                    "sugg.approve"
-                                }))
+                                .label(self.t(approve_key))
                                 .primary()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.approve_selected_suggestion(window, cx);

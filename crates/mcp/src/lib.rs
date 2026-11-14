@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use agent_control_core::Store;
 use agent_control_core::model::{
-    Decision, EvidenceKind, QueryContext, RuleKind, Scope, SuggestionStatus,
+    Decision, EvidenceKind, QueryContext, RuleKind, Scope, SuggestionStatus, WorkItem,
+    WorkItemStatus,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -62,6 +63,57 @@ fn parse_enforcement(
             None,
         )
     })
+}
+
+/// Resolve the requested export targets. Omitted or empty defaults to `AGENTS.md` only; unknown names
+/// are rejected. Duplicates collapse, preserving first-seen order.
+fn parse_targets(
+    raw: Option<Vec<String>>,
+) -> Result<Vec<agent_control_core::ExportTarget>, ErrorData> {
+    use agent_control_core::ExportTarget;
+    let names = raw.unwrap_or_default();
+    if names.is_empty() {
+        return Ok(ExportTarget::default_targets());
+    }
+    let mut out: Vec<ExportTarget> = Vec::new();
+    for name in names {
+        let target = ExportTarget::parse(&name).ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!("unknown export target '{name}'; use agents|claude|gemini|cursor"),
+                None,
+            )
+        })?;
+        if !out.contains(&target) {
+            out.push(target);
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve the requested hook targets. Omitted or empty defaults to all three harnesses (each reads
+/// only its own settings.json, so writing all is safe); unknown names are rejected, duplicates
+/// collapse preserving first-seen order.
+fn parse_hook_targets(
+    raw: Option<Vec<String>>,
+) -> Result<Vec<agent_control_core::HookTarget>, ErrorData> {
+    use agent_control_core::HookTarget;
+    let names = raw.unwrap_or_default();
+    if names.is_empty() {
+        return Ok(HookTarget::ALL.to_vec());
+    }
+    let mut out: Vec<HookTarget> = Vec::new();
+    for name in names {
+        let target = HookTarget::parse(&name).ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!("unknown hook target '{name}'; use claude|codebuddy|workbuddy|qoder"),
+                None,
+            )
+        })?;
+        if !out.contains(&target) {
+            out.push(target);
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -190,10 +242,11 @@ pub struct SaveRuleRequest {
     /// Rule kind: preference | contract | constraint. Defaults to contract.
     #[serde(default)]
     pub kind: Option<String>,
-    /// Scope: user | project. Defaults to project. Session scope cannot be saved as a file.
+    /// Scope: user | project | environment. Defaults to project. environment = machine/project-local
+    /// descriptive context (git-ignored, never committed). Session scope cannot be saved as a file.
     #[serde(default)]
     pub scope: Option<String>,
-    /// Absolute project path; required when scope is project
+    /// Absolute project path; required when scope is project or environment
     #[serde(default)]
     pub project_path: Option<String>,
     /// Optional topic to group related rules
@@ -211,6 +264,11 @@ pub struct SaveRuleRequest {
     /// `file` and passes when the value agrees with `expect`. Supply these when enforcement=verify.
     #[serde(default)]
     pub code_checks: Vec<CodeCheckInput>,
+    /// Tool guards enforced at the PreToolUse gate when enforcement=hard. Each denies a matching tool
+    /// call (tool name glob + optional input regex). Only consulted by check_tool_call, never by
+    /// verify_constraints. Supply these to make a hard rule deny specific dangerous calls.
+    #[serde(default)]
+    pub tool_guards: Vec<ToolGuardInput>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -227,27 +285,41 @@ pub struct CodeCheckInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ToolGuardInput {
+    /// Tool name glob to match (e.g. "Bash", "Edit|Write", "*" or empty for any tool)
+    #[serde(default)]
+    pub tool: String,
+    /// Optional regex matched against the JSON-serialized tool input; empty matches any input
+    #[serde(default)]
+    pub pattern: String,
+    /// Why this call is denied; surfaced to the agent as the gate's denial reason
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetRuleEnabledRequest {
     /// Stable id of the rule to enable or disable
     pub id: String,
     /// true = the rule binds sessions; false = it is excluded from resolution (Decision::Disabled)
     pub enabled: bool,
-    /// Scope: user | project. Defaults to project. Session scope cannot be toggled as a file.
+    /// Scope: user | project | environment. Defaults to project. Session scope cannot be toggled as a file.
     #[serde(default)]
     pub scope: Option<String>,
-    /// Absolute project path; required when scope is project
+    /// Absolute project path; required when scope is project or environment
     #[serde(default)]
     pub project_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SuggestRuleRequest {
-    /// Absolute path of the project this suggestion targets; required when scope=project,
-    /// ignored when scope=user
+    /// Absolute path of the project this suggestion targets; required when scope=project or
+    /// scope=environment, ignored when scope=user
     #[serde(default)]
     pub project_path: Option<String>,
-    /// Scope: user | project. Defaults to project. user = a personal preference that follows the
-    /// user across projects (reviewed in the console Preferences/Suggestions flow).
+    /// Scope: user | project | environment. Defaults to project. user = a personal preference that
+    /// follows the user across projects; environment = a machine/project-local note (e.g. WSL), not a
+    /// portable preference (both reviewed in the console Suggestions flow).
     #[serde(default)]
     pub scope: Option<String>,
     /// Identifier of the calling agent/harness; recorded as the proposer for provenance
@@ -288,8 +360,13 @@ pub struct ListSuggestionsRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExportNativeRequest {
-    /// Absolute path of the project whose contracts are compiled into native harness entry points
+    /// Absolute path of the project whose contracts are pointed at from native harness entry points
     pub project_path: String,
+    /// Which harness entry points to write: any of agents | claude | gemini | cursor (file names like
+    /// AGENTS.md also accepted). Omitted or empty defaults to ["agents"] only — writing every target
+    /// at once is opt-in, because Claude Code reads only CLAUDE.md when both it and AGENTS.md exist.
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
     /// Also export personal preferences to the user-global ~/.claude/CLAUDE.md. Defaults to false
     /// so a project export never writes outside the project unless explicitly requested.
     #[serde(default)]
@@ -300,7 +377,23 @@ pub struct ExportNativeRequest {
 pub struct ExportDriftRequest {
     /// Absolute path of the project whose native export targets are checked for staleness
     pub project_path: String,
+    /// Which harness entry points to check: agents | claude | gemini | cursor. Defaults to ["agents"].
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
     /// Also check the user-global ~/.claude/CLAUDE.md against personal preferences. Defaults to false.
+    #[serde(default)]
+    pub include_user: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RevokeNativeRequest {
+    /// Absolute path of the project whose native entry points should have the managed block removed
+    pub project_path: String,
+    /// Which harness entry points to revoke: agents | claude | gemini | cursor. Defaults to ["agents"].
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
+    /// Also revoke the personal-preferences block from the user-global ~/.claude/CLAUDE.md. Defaults
+    /// to false so a project revoke never writes outside the project unless explicitly requested.
     #[serde(default)]
     pub include_user: bool,
 }
@@ -311,6 +404,73 @@ pub struct VerifyConstraintsRequest {
     pub session_id: String,
     /// Harness running the verification (recorded in the evidence chain)
     pub agent_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WorkItemInput {
+    /// What the unit of work is
+    pub title: String,
+    /// done | doing | todo (defaults to todo)
+    #[serde(default)]
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateWorkStateRequest {
+    /// Session UUID whose work state is recorded
+    pub session_id: String,
+    /// The objective (/goal) the session is working toward
+    #[serde(default)]
+    pub goal: String,
+    /// Resumable work items; replaces the session's current list
+    #[serde(default)]
+    pub work_items: Vec<WorkItemInput>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckToolCallRequest {
+    /// Absolute project path whose enabled hard rules gate this call
+    pub project_path: String,
+    /// Name of the tool about to run (e.g. "Bash", "Edit", "Write")
+    pub tool_name: String,
+    /// The tool's input arguments as JSON; matched against hard rules' tool_guards patterns
+    #[serde(default)]
+    pub tool_input: serde_json::Value,
+    /// Harness making the call (narrows rules via applies_to.agents; recorded in evidence)
+    pub agent_id: String,
+    /// Optional session UUID; when given, the verdict is recorded in the evidence chain and mediated
+    /// hard rules are marked Enforced. Omit for a stateless pre-check.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RegisterHooksRequest {
+    /// Absolute project path whose harness settings.json files receive the hook
+    pub project_path: String,
+    /// Which harnesses to register: claude | codebuddy | workbuddy | qoder. Omitted defaults to
+    /// all four; each reads only its own settings.json, so there is no cross-harness conflict.
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
+    /// Full command line that runs the hook script (e.g. node "/abs/agent-control-hook.mjs"). Omitted
+    /// resolves the bundled script beside the executable (release) or in the repo scripts/ dir (dev).
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RevokeHooksRequest {
+    /// Absolute project path whose harness settings.json files should have the hook removed
+    pub project_path: String,
+    /// Which harnesses to revoke: claude | codebuddy | workbuddy | qoder. Omitted defaults to all four.
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DetectHooksRequest {
+    /// Absolute project path to inspect for installed harnesses and existing hook registration
+    pub project_path: String,
 }
 
 #[tool_router]
@@ -336,6 +496,7 @@ impl ControlServer {
                     "provenance_id": record.id,
                     "applied_rules": applied,
                     "conflicts": resolution.conflicts,
+                    "briefing": agent_control_core::render_constraint_briefing(&resolution, ""),
                     "instruction": "Follow the applied rules. If conflicts are present, resolve them with the user before proceeding. Record evidence of your work with record_evidence.",
                 }))
             }
@@ -496,19 +657,14 @@ impl ControlServer {
         match self.store.import_handoff(&bundle, &req.new_agent) {
             Ok(session) => {
                 let carried = session.assurance.clone();
-                let needs_reverify = carried
-                    .iter()
-                    .any(|a| a.achieved != agent_control_core::model::AssuranceTier::Advisory);
                 json_result(&serde_json::json!({
                     "session_id": session.id,
                     "agent_id": session.agent_id,
                     "rules_to_acknowledge": session.constraint_snapshot.rules.iter().map(|r| &r.id).collect::<Vec<_>>(),
                     "carried_assurance": carried,
-                    "tier_warning": if needs_reverify {
-                        Some("Carried assurance tiers were achieved by the SOURCE harness, not this one. Re-run verify_constraints under the new harness to re-establish achieved tiers; a tier may drop if the new environment differs. This is a warning, not a block.")
-                    } else {
-                        None
-                    },
+                    "goal": session.goal,
+                    "work_items": session.work_items,
+                    "tier_warning": agent_control_core::handoff_tier_warning(&session.assurance),
                 }))
             }
             Err(e) => tool_err(e),
@@ -544,7 +700,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Create or update a rule file so a discovered project contract or personal preference becomes binding and visible in the console. Use this to actively record project-scoped issues/contracts (scope=project, kind=contract) instead of only recording session evidence. Reusing an id updates the rule and bumps its version. The written file is picked up by get_applicable_rules and frozen into future session snapshots."
+        description = "Create or update a rule file so a discovered project contract or personal preference becomes binding and visible in the console. Use this to actively record project-scoped issues/contracts (scope=project, kind=contract) instead of only recording session evidence. scope=user records a portable personal preference; scope=environment records machine/project-local context (e.g. agents run inside WSL) into git-ignored .agent-control/local/ — descriptive, always applied, never committed, requires project_path. Reusing an id updates the rule and bumps its version. The written file is picked up by get_applicable_rules and frozen into future session snapshots."
     )]
     async fn save_rule(
         &self,
@@ -574,7 +730,7 @@ impl ControlServer {
         .map_err(|_| {
             ErrorData::invalid_params(
                 format!(
-                    "unknown scope '{}'; use user|project",
+                    "unknown scope '{}'; use user|project|environment",
                     req.scope.clone().unwrap_or_default()
                 ),
                 None,
@@ -582,14 +738,19 @@ impl ControlServer {
         })?;
         if scope == Scope::Session {
             return Err(ErrorData::invalid_params(
-                "session scope cannot be saved as a rule file; use user or project",
+                "session scope cannot be saved as a rule file; use user, project or environment",
                 None,
             ));
         }
         let project_path = match scope {
-            Scope::Project => Some(PathBuf::from(req.project_path.clone().ok_or_else(
-                || ErrorData::invalid_params("project_path is required for project scope", None),
-            )?)),
+            Scope::Project | Scope::Environment => Some(PathBuf::from(
+                req.project_path.clone().ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        "project_path is required for project/environment scope",
+                        None,
+                    )
+                })?,
+            )),
             _ => None,
         };
         let mut rule = agent_control_core::store::new_rule(
@@ -613,6 +774,15 @@ impl ControlServer {
                 description: c.description.clone(),
             })
             .collect();
+        rule.tool_guards = req
+            .tool_guards
+            .iter()
+            .map(|g| agent_control_core::model::ToolGuard {
+                tool: g.tool.clone(),
+                pattern: g.pattern.clone(),
+                reason: g.reason.clone(),
+            })
+            .collect();
         rule.source.origin = Some("agent-control-mcp".into());
         match self.store.upsert_rule(&rule, project_path.as_deref()) {
             Ok((saved, path)) => json_result(&serde_json::json!({
@@ -625,7 +795,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Enable or disable an existing rule without changing its content. Disabled rules are excluded from resolution (Decision::Disabled) and no longer bind sessions; enabling restores them. Use this to pause a contract/preference temporarily instead of deleting it. scope=project (default) requires project_path; scope=user targets a personal preference. Content updates via save_rule never change enablement."
+        description = "Enable or disable an existing rule without changing its content. Disabled rules are excluded from resolution (Decision::Disabled) and no longer bind sessions; enabling restores them. Use this to pause a contract/preference temporarily instead of deleting it. scope=project (default) and scope=environment require project_path; scope=user targets a personal preference. Content updates via save_rule never change enablement."
     )]
     async fn set_rule_enabled(
         &self,
@@ -637,7 +807,7 @@ impl ControlServer {
         .map_err(|_| {
             ErrorData::invalid_params(
                 format!(
-                    "unknown scope '{}'; use user|project",
+                    "unknown scope '{}'; use user|project|environment",
                     req.scope.clone().unwrap_or_default()
                 ),
                 None,
@@ -645,14 +815,19 @@ impl ControlServer {
         })?;
         if scope == Scope::Session {
             return Err(ErrorData::invalid_params(
-                "session scope cannot be toggled as a rule file; use user or project",
+                "session scope cannot be toggled as a rule file; use user, project or environment",
                 None,
             ));
         }
         let project_path = match scope {
-            Scope::Project => Some(PathBuf::from(req.project_path.clone().ok_or_else(
-                || ErrorData::invalid_params("project_path is required for project scope", None),
-            )?)),
+            Scope::Project | Scope::Environment => Some(PathBuf::from(
+                req.project_path.clone().ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        "project_path is required for project/environment scope",
+                        None,
+                    )
+                })?,
+            )),
             _ => None,
         };
         match self.store.set_rule_enabled(
@@ -677,7 +852,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Propose a new rule for HUMAN REVIEW instead of writing it directly. The draft is queued as a pending suggestion in the console; a user reviews, edits, approves (making it binding) or rejects it. scope=project (default) targets a project contract and requires project_path; scope=user proposes a personal preference that follows the user across projects (no project_path needed). Prefer this over save_rule when the rule is inferred, uncertain, or needs user confirmation. Include a rationale explaining why the rule is proposed."
+        description = "Propose a new rule for HUMAN REVIEW instead of writing it directly. The draft is queued as a pending suggestion in the console; a user reviews, edits, approves (making it binding) or rejects it. scope=project (default) targets a project contract and requires project_path; scope=user proposes a personal preference that follows the user across projects (no project_path needed); scope=environment proposes a machine/project-local note (requires project_path) — the right home for observed environment facts like WSL, which are not portable preferences. Prefer this over save_rule when the rule is inferred, uncertain, or needs user confirmation. Include a rationale explaining why the rule is proposed."
     )]
     async fn suggest_rule(
         &self,
@@ -689,7 +864,7 @@ impl ControlServer {
         .map_err(|_| {
             ErrorData::invalid_params(
                 format!(
-                    "unknown scope '{}'; use user|project",
+                    "unknown scope '{}'; use user|project|environment",
                     req.scope.clone().unwrap_or_default()
                 ),
                 None,
@@ -697,7 +872,7 @@ impl ControlServer {
         })?;
         if scope == Scope::Session {
             return Err(ErrorData::invalid_params(
-                "session scope cannot be suggested; use user or project",
+                "session scope cannot be suggested; use user, project or environment",
                 None,
             ));
         }
@@ -705,10 +880,11 @@ impl ControlServer {
         if req.id.trim().is_empty()
             || req.title.trim().is_empty()
             || req.content.trim().is_empty()
-            || (scope == Scope::Project && project_path.trim().is_empty())
+            || ((scope == Scope::Project || scope == Scope::Environment)
+                && project_path.trim().is_empty())
         {
             return Err(ErrorData::invalid_params(
-                "id, title and content are required; project_path is also required for project scope",
+                "id, title and content are required; project_path is also required for project/environment scope",
                 None,
             ));
         }
@@ -784,7 +960,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Compile the binding rule set into each harness's native entry point so agents that never call MCP still inherit the contracts. Injects a managed block (agent-control:begin … agent-control:end) into the project's AGENTS.md, CLAUDE.md and .cursor/rules/agent-control.mdc, preserving everything outside the block; only enabled rules are exported and re-export is idempotent. Set include_user=true to also write personal preferences to the user-global ~/.claude/CLAUDE.md. Use this to make contracts reach Claude Code / Cursor / Codex without requiring an MCP call."
+        description = "Write a static pointer block into the selected native harness entry points so agents that never call MCP still learn where the contracts live. The block (agent-control:begin … agent-control:end) points at the live rule files in .agent-control/rules/ — it does NOT copy rule text, so editing a rule never makes it stale and re-export is byte-idempotent. Choose targets with `targets` (agents | claude | gemini | cursor); omitted defaults to AGENTS.md only. Everything outside the block is preserved. Set include_user=true to also write a preferences pointer to the user-global ~/.claude/CLAUDE.md. Use revoke_native to undo."
     )]
     async fn export_native(
         &self,
@@ -796,18 +972,22 @@ impl ControlServer {
                 None,
             ));
         }
+        let targets = parse_targets(req.targets)?;
         let project = PathBuf::from(req.project_path.trim());
-        match self.store.export_native(&project, req.include_user) {
+        match self
+            .store
+            .export_native(&project, &targets, req.include_user)
+        {
             Ok(report) => json_result(&serde_json::json!({
                 "report": report,
-                "instruction": "Contracts compiled into native entry points. Everything outside the agent-control managed block was preserved and re-running is idempotent. Agents that read AGENTS.md / CLAUDE.md / .cursor rules now inherit these contracts without calling MCP.",
+                "instruction": "Pointer block written to the selected entry points. It directs agents to read the live rules in .agent-control/rules/ (or call get_applicable_rules); it does not inline rule text. Everything outside the agent-control managed block was preserved and re-running is idempotent. Use revoke_native to remove it.",
             })),
             Err(e) => tool_err(e),
         }
     }
 
     #[tool(
-        description = "Check whether the project's native export targets (AGENTS.md, CLAUDE.md, .cursor/rules/agent-control.mdc) are stale relative to the current enabled rule set. Compares the ruleset hash embedded in each managed block against the hash of the rules as they stand now and returns per-target staleness. It does NOT rewrite anything. This detects file-vs-store drift only (layer 1) — it cannot tell whether a running session's context is stale. When stale, re-run export_native to refresh the managed blocks."
+        description = "Check whether the selected native entry points carry a current-format pointer block. Each managed block embeds a block-format version; a target is stale when it exists and that version differs from the current one (e.g. a legacy v1 full-text block that should be migrated to the v2 pointer). Choose targets with `targets` (agents | claude | gemini | cursor); omitted defaults to AGENTS.md only. It does NOT rewrite anything and never goes stale on a rule edit (the pointer is static). When stale, re-run export_native. This detects file-vs-store format drift only — not whether a running session's context is stale."
     )]
     async fn check_export_drift(
         &self,
@@ -819,19 +999,50 @@ impl ControlServer {
                 None,
             ));
         }
+        let targets = parse_targets(req.targets)?;
         let project = PathBuf::from(req.project_path.trim());
-        match self.store.export_drift(&project, req.include_user) {
+        match self
+            .store
+            .export_drift(&project, &targets, req.include_user)
+        {
             Ok(report) => {
                 let stale = report.stale;
                 json_result(&serde_json::json!({
                     "report": report,
                     "instruction": if stale {
-                        "Native export is stale: the managed blocks no longer match the current enabled rules. Re-run export_native to refresh them. Nothing was rewritten by this check."
+                        "Native export is stale: a target is missing the current-format pointer block (or holds a legacy v1 full-text block). Re-run export_native to migrate it. Nothing was rewritten by this check."
                     } else {
                         "Native export is in sync (or not yet exported). No re-export needed."
                     },
                 }))
             }
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Revoke (remove) the Agent Control pointer block from the selected native harness entry points — the explicit undo of export_native. Surrounding prose is preserved; a file that held only the block (or only the generated Cursor frontmatter + block) is deleted. Choose targets with `targets` (agents | claude | gemini | cursor); omitted defaults to AGENTS.md only. Set include_user=true to also revoke the preferences block from ~/.claude/CLAUDE.md. A target with no block is left unchanged, so re-running is safe."
+    )]
+    async fn revoke_native(
+        &self,
+        Parameters(req): Parameters<RevokeNativeRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if req.project_path.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "project_path is required and cannot be empty",
+                None,
+            ));
+        }
+        let targets = parse_targets(req.targets)?;
+        let project = PathBuf::from(req.project_path.trim());
+        match self
+            .store
+            .revoke_native(&project, &targets, req.include_user)
+        {
+            Ok(report) => json_result(&serde_json::json!({
+                "report": report,
+                "instruction": "Pointer block revoked from the selected entry points. Files that held only the block were deleted; files with surrounding prose kept it (action=removed). Targets with no block were left unchanged.",
+            })),
             Err(e) => tool_err(e),
         }
     }
@@ -846,6 +1057,164 @@ impl ControlServer {
         let session_id = parse_uuid(&req.session_id)?;
         match self.store.verify_constraints(session_id, &req.agent_id) {
             Ok(report) => json_result(&serde_json::to_value(report).unwrap()),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Record the session's resumable work state: the goal (the /goal objective) plus work items marked done/doing/todo. Replaces the session's goal and work items. export_handoff carries them into the bundle and handoff/latest.md so a new harness inherits progress without relying on its own todo list. Call it as work completes or starts, and before exporting a handoff."
+    )]
+    async fn update_work_state(
+        &self,
+        Parameters(req): Parameters<UpdateWorkStateRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let session_id = parse_uuid(&req.session_id)?;
+        let items = req
+            .work_items
+            .into_iter()
+            .map(|w| WorkItem {
+                title: w.title,
+                status: match w.status.trim() {
+                    "done" => WorkItemStatus::Done,
+                    "doing" => WorkItemStatus::Doing,
+                    _ => WorkItemStatus::Todo,
+                },
+            })
+            .collect();
+        match self
+            .store
+            .set_session_work_state(session_id, req.goal, items)
+        {
+            Ok(session) => json_result(&serde_json::to_value(session).unwrap()),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "The deny-capable PreToolUse gate. Call BEFORE running a tool to check it against the project's enabled hard rules: a hard rule's code_checks (repo gate) failing/inconclusive, or a tool_guard matching this call, denies it. Returns allowed, denials (with reasons), and enforced_rules (the hard rules that mediated and allowed the call). This is the ONLY path that achieves the Enforced assurance tier — declaring enforcement=hard without this chokepoint caps at Advisory/Verified. When session_id is given the verdict is recorded in the evidence chain. With no enabled hard rules the call is allowed. Wire it into a harness PreToolUse hook (register_hooks) so every call is mediated; on allowed=false the hook must block the tool and feed denial_reason back to the agent."
+    )]
+    async fn check_tool_call(
+        &self,
+        Parameters(req): Parameters<CheckToolCallRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if req.project_path.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "project_path is required and cannot be empty",
+                None,
+            ));
+        }
+        if req.tool_name.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "tool_name is required and cannot be empty",
+                None,
+            ));
+        }
+        let session_id = match req.session_id.as_deref() {
+            Some(s) if !s.trim().is_empty() => Some(parse_uuid(s)?),
+            _ => None,
+        };
+        let project = PathBuf::from(req.project_path.trim());
+        match self.store.check_tool_call(
+            &project,
+            req.tool_name.trim(),
+            &req.tool_input,
+            &req.agent_id,
+            session_id,
+        ) {
+            Ok(report) => {
+                let allowed = report.allowed;
+                let reason = report.denial_reason();
+                let instruction = if allowed {
+                    "Tool call allowed by the gate. Proceed.".to_string()
+                } else {
+                    format!(
+                        "Tool call DENIED by the gate. Do not run it. Reason: {reason}. Fix the underlying constraint (or adjust the hard rule) and re-check."
+                    )
+                };
+                json_result(&serde_json::json!({
+                    "report": report,
+                    "denial_reason": reason,
+                    "instruction": instruction,
+                }))
+            }
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Register the Agent Control hook into the selected harnesses' project settings.json so the harness itself drives enforcement. Writes a SessionStart hook (injects the binding-rule briefing) and a PreToolUse hook (runs check_tool_call to deny calls that violate hard rules) — this is what turns a hard rule into an Enforced one. Choose targets (claude | codebuddy | workbuddy | qoder); omitted registers all four (each reads only its own settings.json; CodeBuddy and WorkBuddy are separate products). The hook command defaults to the bundled agent-control-hook.mjs beside the executable; override with `command`. Every other settings key and user-authored hook is preserved; re-registering is idempotent. The daemon must be reachable at the hook endpoint (default http://127.0.0.1:9870/mcp). Use revoke_hooks to undo, detect_hooks to inspect."
+    )]
+    async fn register_hooks(
+        &self,
+        Parameters(req): Parameters<RegisterHooksRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if req.project_path.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "project_path is required and cannot be empty",
+                None,
+            ));
+        }
+        let targets = parse_hook_targets(req.targets)?;
+        let command = match req.command {
+            Some(c) if !c.trim().is_empty() => c,
+            _ => agent_control_core::hooks::default_hook_command().ok_or_else(|| {
+                ErrorData::invalid_params(
+                    "hook script not found beside the executable; supply an explicit `command` (e.g. node \"/abs/agent-control-hook.mjs\")",
+                    None,
+                )
+            })?,
+        };
+        let project = PathBuf::from(req.project_path.trim());
+        match self.store.register_hooks(&project, &targets, &command) {
+            Ok(report) => json_result(&serde_json::json!({
+                "report": report,
+                "command": command,
+                "instruction": "Hook registered. The harness now injects the briefing at SessionStart and mediates tool calls at PreToolUse via check_tool_call. Restart the harness session for the hook to take effect; hard rules can now reach the Enforced tier. Use revoke_hooks to remove.",
+            })),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Revoke (remove) the Agent Control hook from the selected harnesses' project settings.json — the explicit undo of register_hooks. Other config and user-authored hooks are preserved; a settings file that held only our hook is deleted. Choose targets (claude | codebuddy | workbuddy | qoder); omitted defaults to all four. A target with no managed hook is left unchanged, so re-running is safe. After revoking, hard rules are no longer mediated and cap at Advisory/Verified."
+    )]
+    async fn revoke_hooks(
+        &self,
+        Parameters(req): Parameters<RevokeHooksRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if req.project_path.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "project_path is required and cannot be empty",
+                None,
+            ));
+        }
+        let targets = parse_hook_targets(req.targets)?;
+        let project = PathBuf::from(req.project_path.trim());
+        match self.store.revoke_hooks(&project, &targets) {
+            Ok(report) => json_result(&serde_json::json!({
+                "report": report,
+                "instruction": "Hook revoked from the selected harnesses. Files that held only our hook were deleted; other config and user hooks were preserved. Hard rules are no longer mediated at a chokepoint.",
+            })),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Detect which harnesses (Claude Code, CodeBuddy, WorkBuddy, Qoder) are installed and whether the Agent Control hook is already registered in each one's project settings.json. Read-only; drives the console's one-click register/restore UI. Returns per-harness installed/registered flags and the settings path. Use before register_hooks to choose targets."
+    )]
+    async fn detect_hooks(
+        &self,
+        Parameters(req): Parameters<DetectHooksRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if req.project_path.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "project_path is required and cannot be empty",
+                None,
+            ));
+        }
+        let project = PathBuf::from(req.project_path.trim());
+        match self.store.detect_hooks(&project) {
+            Ok(statuses) => json_result(&serde_json::json!({ "harnesses": statuses })),
             Err(e) => tool_err(e),
         }
     }
@@ -976,28 +1345,7 @@ impl ServerHandler for ControlServer {
             .store
             .resolve_rules(&ctx)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        let mut briefing = String::from(
-            "# Engineering Constraints\n\nThe following rules are binding for this task. \
-             They come from the local agent-control console with verified provenance.\n\n",
-        );
-        for m in &resolution.applied {
-            if m.decision != Decision::Applied {
-                continue;
-            }
-            briefing.push_str(&format!(
-                "## {} [{}:{}]\n{}\n\n",
-                m.rule.title, m.rule.scope, m.rule.kind, m.rule.content
-            ));
-        }
-        if !resolution.conflicts.is_empty() {
-            briefing.push_str("## Conflicts requiring attention\n");
-            for c in &resolution.conflicts {
-                briefing.push_str(&format!("- {}\n", c.description));
-            }
-        }
-        if !task.is_empty() {
-            briefing.push_str(&format!("\n## Task\n{task}\n"));
-        }
+        let briefing = agent_control_core::render_constraint_briefing(&resolution, &task);
         Ok(
             GetPromptResult::new(vec![PromptMessage::new_text(Role::User, briefing)])
                 .with_description("Binding constraint briefing with provenance")

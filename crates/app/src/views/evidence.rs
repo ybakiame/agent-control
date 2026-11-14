@@ -18,6 +18,7 @@ fn kind_tag(kind: EvidenceKind) -> Tag {
         EvidenceKind::HandoffIn => Tag::info().child("handoff_in"),
         EvidenceKind::RuleAcknowledgment => Tag::primary().child("rule_ack"),
         EvidenceKind::ToolCall => Tag::secondary().child("tool_call"),
+        EvidenceKind::ToolGate => Tag::warning().child("tool_gate"),
         EvidenceKind::SessionStart => Tag::secondary().child("session_start"),
         EvidenceKind::SessionEnd => Tag::secondary().child("session_end"),
     }

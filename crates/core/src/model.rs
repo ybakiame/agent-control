@@ -11,6 +11,13 @@ pub enum Scope {
     User = 0,
     Project = 1,
     Session = 2,
+    /// Descriptive context about this user's current project on this machine (e.g. "agents run inside
+    /// WSL; Windows-native tools are callable for compile/verify"). Unlike the other scopes it does
+    /// **not** compete: matching environment rules are always applied as background context, never
+    /// supersede or get superseded. Stored project-local and git-ignored, delivered only via the
+    /// MCP/hook briefing — never committed into a harness entry point, because the facts are true
+    /// only on this machine.
+    Environment = 3,
 }
 
 impl Scope {
@@ -23,6 +30,7 @@ impl Scope {
             Scope::User => "user",
             Scope::Project => "project",
             Scope::Session => "session",
+            Scope::Environment => "environment",
         }
     }
 }
@@ -63,7 +71,7 @@ pub enum Enforcement {
     Advisory,
     /// Carries `code_checks` evaluable against the repo post-hoc; can reach `Verified`.
     Verify,
-    /// Must be mediated at a chokepoint that can deny; can reach `Enforced`. Needs an executable check.
+    /// Mediated at a deny-capable chokepoint (the PreToolUse hook); can reach `Enforced`. Needs an executable check.
     Hard,
 }
 
@@ -134,6 +142,22 @@ pub struct CodeCheck {
     pub description: Option<String>,
 }
 
+/// A deny-capable guard attached to a `Hard` rule, evaluated at the PreToolUse chokepoint. `tool`
+/// selects which calls it applies to (a glob, `A|B` alternation allowed); `pattern` is a regex over
+/// the JSON-serialized tool input that narrows to specific commands/paths. A match denies the call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolGuard {
+    /// Glob over the tool name (e.g. `Bash`, `Write|Edit`, `mcp__*`). Empty matches any tool.
+    #[serde(default)]
+    pub tool: String,
+    /// Regex over the serialized tool input. Empty matches any input.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pattern: String,
+    /// Feedback shown to the agent when this guard denies a call.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     pub id: String,
@@ -157,6 +181,8 @@ pub struct Rule {
     pub conflicts_with: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub code_checks: Vec<CodeCheck>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_guards: Vec<ToolGuard>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
@@ -313,6 +339,7 @@ pub struct ProvenanceRecord {
 pub enum EvidenceKind {
     RuleAcknowledgment,
     ToolCall,
+    ToolGate,
     FileChange,
     TestResult,
     HandoffOut,
@@ -426,6 +453,35 @@ pub enum SessionStatus {
     Failed,
 }
 
+/// Where a unit of work stands. Carried in the handoff so a new harness inherits resumable progress
+/// instead of relying on its own todo list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemStatus {
+    Done,
+    Doing,
+    #[default]
+    Todo,
+}
+
+impl WorkItemStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Doing => "doing",
+            Self::Todo => "todo",
+        }
+    }
+}
+
+/// One resumable unit of work in a session's work state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkItem {
+    pub title: String,
+    #[serde(default)]
+    pub status: WorkItemStatus,
+}
+
 /// The assurance actually achieved for a constraint in a session, computed from evidence rather than
 /// merely declared. Ordered so a handoff can detect a drop: `Advisory < Verified < Enforced`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
@@ -436,7 +492,7 @@ pub enum AssuranceTier {
     Advisory,
     /// The rule's `code_checks` were evaluated against the repo and passed; the result is in the chain.
     Verified,
-    /// Mediated at a chokepoint (ACP permission round-trip / PreToolUse / repo gate) that can deny.
+    /// Mediated at a deny-capable chokepoint (the PreToolUse hook: repo gate + tool guards).
     Enforced,
 }
 
@@ -465,6 +521,47 @@ pub struct ConstraintAssurance {
     pub declared: Enforcement,
     pub achieved: AssuranceTier,
     pub basis: String,
+}
+
+/// Why the PreToolUse gate denied a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateSource {
+    /// A `Hard` rule's `code_checks` found the repo in a non-compliant state.
+    RepoGate,
+    /// A `Hard` rule's `tool_guards` matched this specific call.
+    ToolGuard,
+}
+
+/// One denial produced by the tool gate, attributable to a rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateDenial {
+    pub rule_id: String,
+    pub source: GateSource,
+    pub reason: String,
+}
+
+/// The verdict of `Store::check_tool_call` — the deny-capable PreToolUse chokepoint. `allowed` is
+/// false when any `Hard` rule denies; `enforced_rules` lists the `Hard` rules that mediated the call
+/// and allowed it (the basis for the `Enforced` assurance tier).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolGateReport {
+    pub allowed: bool,
+    pub tool_name: String,
+    pub denials: Vec<GateDenial>,
+    pub enforced_rules: Vec<String>,
+    pub hard_rules_checked: usize,
+}
+
+impl ToolGateReport {
+    /// Concatenated denial reasons for hook feedback (stderr / permissionDecisionReason).
+    pub fn denial_reason(&self) -> String {
+        self.denials
+            .iter()
+            .map(|d| format!("[{}] {}", d.rule_id, d.reason))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -499,6 +596,10 @@ pub struct Session {
     pub handoffs: Vec<HandoffRecord>,
     #[serde(default)]
     pub assurance: Vec<ConstraintAssurance>,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub work_items: Vec<WorkItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -519,6 +620,10 @@ pub struct HandoffBundle {
     pub constraint_snapshot: ConstraintSnapshot,
     #[serde(default)]
     pub assurance: Vec<ConstraintAssurance>,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub work_items: Vec<WorkItem>,
     pub evidence_head_hash: String,
     pub context: serde_json::Value,
     pub from_agent: String,
@@ -550,15 +655,6 @@ pub struct AgentRegistration {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol: Option<AgentProtocol>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentProtocol {
-    Acp,
-    Mcp,
 }
 
 /// A project onboarded into the console. The registry lives in SQLite (local app state);

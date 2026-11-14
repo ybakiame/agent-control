@@ -1,7 +1,7 @@
 ---
 name: agent-control
-description: Connect to and operate the Agent Control local-first engineering console over MCP and ACP. Use when acting as an agent or harness that must resolve binding rules with provenance, create a constraint session, acknowledge rules, record tamper-evident evidence, author durable project contracts as rules, propose uncertain rules for human review, hand off across harnesses, verify the evidence chain, verify constraint assurance tiers, detect stale native exports, export the binding set into native AGENTS.md/CLAUDE.md/.cursor files, or wire a Claude Code SessionStart hook; or when registering an ACP agent CLI (agents.yaml) to integrate with the console. Triggers include "connect to agent-control", "get applicable rules", "create a session", "acknowledge rules", "record evidence", "save a project rule/contract", "suggest a rule for review", "export/import handoff", "export to harnesses", "SessionStart hook", "verify evidence", "verify constraints", "check export drift", and "integrate my agent with the console". This skill is for USING a running console, not for developing the console's own source.
-when_to_use: An agent/harness is about to work on a project governed by Agent Control, or is being wired into the console over MCP/ACP.
+description: Connect to and operate the Agent Control local-first engineering console over MCP. Use when acting as an agent or harness that must resolve binding rules with provenance, create a constraint session, acknowledge rules, record tamper-evident evidence, author durable project contracts as rules, propose uncertain rules for human review, hand off across harnesses, verify the evidence chain, verify constraint assurance tiers, gate a tool call against hard rules, detect outdated-format native exports, export a pointer block into selected native AGENTS.md/CLAUDE.md/GEMINI.md/.cursor files, revoke it, or register/remove the SessionStart + PreToolUse enforcement hooks for Claude Code / CodeBuddy / WorkBuddy / Qoder. Triggers include "connect to agent-control", "get applicable rules", "create a session", "acknowledge rules", "record evidence", "save a project rule/contract", "suggest a rule for review", "export/import handoff", "export to harnesses", "revoke native export", "register hooks", "check tool call", "SessionStart hook", "PreToolUse gate", "verify evidence", "verify constraints", "check export drift", and "integrate my agent with the console". This skill is for USING a running console, not for developing the console's own source.
+when_to_use: An agent/harness is about to work on a project governed by Agent Control, or is being wired into the console over MCP and its enforcement hooks.
 ---
 
 # Agent Control
@@ -10,7 +10,8 @@ when_to_use: An agent/harness is about to work on a project governed by Agent Co
 
 Agent Control is a local-first console that makes engineering rules **binding and verifiable**
 across agents. It answers: which rules apply, where they came from (user preference vs project
-contract), whether they conflict with code, and whether the same constraints stay binding after a
+contract vs machine/project environment note), whether they conflict with code, and whether the same
+constraints stay binding after a
 handoff to another harness. As a connected agent, you query rules, freeze them into a session,
 acknowledge them, and append evidence to a SHA-256 hash chain.
 
@@ -22,7 +23,7 @@ work). It is not the guide for editing the console's Rust source — that lives 
 
 ## Connect
 
-The console exposes an **MCP server** (18 tools + resources + prompts). Pick one transport:
+The console exposes an **MCP server** (24 tools + resources + prompts). Pick one transport:
 
 - **Streamable HTTP** — the desktop app runs a **background daemon** at `http://127.0.0.1:9870/mcp`
   (`mcp-session-id` header). It reuses an already-running daemon or spawns the sibling
@@ -38,7 +39,7 @@ next to the binary switches to `<exe dir>/data`). Both binaries run with **no co
 Windows and log to `<root>/logs/{app,mcp}.log`. Build the binary
 with `mise run build` (→ `target/debug/agent-control-mcp`), or run via `mise run mcp` (stdio).
 
-Verify the connection by listing tools (expect 18) or reading resource `control://overview`.
+Verify the connection by listing tools (expect 24) or reading resource `control://overview`.
 If your client cannot reach the server, confirm the desktop app is running (HTTP) or that your
 harness spawned the stdio binary correctly.
 
@@ -58,22 +59,32 @@ Follow this order for every unit of work. Tool parameters and JSON examples are 
    flagged. Required after session start **and after every handoff**.
 4. **Record evidence** — `record_evidence` for each constraint-relevant event: tool calls, file
    changes (include `before_sha256` / `after_sha256`), test results. `kind` is one of
-   `tool_call`, `file_change`, `test_result`, `constraint_violation`, `session_start`,
+   `tool_call`, `tool_gate`, `file_change`, `test_result`, `constraint_violation`, `session_start`,
    `session_end`, `rule_acknowledgment`, `handoff_out`, `handoff_in`.
 5. **Verify constraints** — `verify_constraints` (`session_id`, `agent_id`) runs the snapshot's
    `code_checks` against the real repo and records the **achieved assurance tier** per rule
    (Advisory / Verified / Enforced). This is post-hoc verification, distinct from `verify_evidence`
    (chain integrity). A rule that declares `hard` still only reaches Advisory/Verified without a
    chokepoint that can deny.
-6. **Hand off (when switching harness)** — `export_handoff` (`session_id`, `to_agent`, `context`)
-   produces a bundle carrying the achieved tiers; the next harness calls `import_handoff` (`bundle`,
+6. **Track work state** — `update_work_state` (`session_id`, `goal`, `work_items[]` with
+   `done`/`doing`/`todo`) records the objective (the `/goal`) and resumable progress. Call it as work
+   completes or starts and **before handing off**, so the next harness inherits progress instead of
+   relying on its own todo list. It replaces the session's goal + items.
+7. **Hand off (when switching harness)** — `export_handoff` (`session_id`, `to_agent`, `context`)
+   produces a bundle carrying the achieved tiers **and the goal + work items**, and writes a readable
+   continuity brief to
+   `<project>/.agent-control/handoff/latest.md` (with **Goal** and **Work state** sections). The next
+   harness calls `import_handoff` (`bundle`,
    `new_agent`) then `acknowledge_rules` again, and **re-verifies** — a tier drop is warned, not
-   blocked. Use `get_session_context` to resume work another harness started.
-7. **Verify** — `verify_evidence` (`session_id`) recomputes the chain and reports tampering/gaps.
+   blocked. Use `get_session_context` to resume work another harness started. A harness that never
+   calls MCP can still inherit continuity by reading `latest.md` (the exported `AGENTS.md` block
+   points at it); re-running `export_handoff` refreshes that file.
+8. **Verify** — `verify_evidence` (`session_id`) recomputes the chain and reports tampering/gaps.
 
 Always pass a stable `agent_id` identifying your harness (e.g. `claude-code`, `gemini-cli`).
 Project contracts live in `<project>/.agent-control/rules/`; user preferences in
-`~/.agent-control/rules/user/`.
+`~/.agent-control/rules/user/`; machine/project environment notes in the git-ignored
+`<project>/.agent-control/local/` (briefing-only, never committed).
 
 **Recording durable project knowledge.** `record_evidence` is session-scoped (a fixed `kind` enum:
 tool calls, file changes, test results, violations) — it is *not* a place to store project issues
@@ -85,7 +96,9 @@ Reusing an `id` updates the rule and bumps its version. Optionally pass `enforce
 (`advisory` default, `verify`, or `hard`) to declare whether the rule is mechanically checkable, and
 `code_checks` (`file` / `key` / `expect`) so `verify_constraints` can evaluate it against the repo.
 For a personal preference use `scope: "user"`
-(no `project_path`). Do not hand-edit rule files behind the console's back — use `save_rule` so
+(no `project_path`); for a machine/project environment note use `scope: "environment"` + `project_path`
+(written to the git-ignored `.agent-control/local/`, briefing-only). Do not hand-edit rule files behind
+the console's back — use `save_rule` so
 provenance and the GUI stay consistent. Onboarded projects ship copy-ready templates in
 `<project>/.agent-control/examples/` (not binding until copied into `rules/`).
 
@@ -100,76 +113,115 @@ deleting when a contract may apply again later.
 **Proposing rules for human review.** When a rule is *inferred, uncertain, or needs user
 confirmation*, do not write it directly with `save_rule`. Instead call **`suggest_rule`** with
 `agent_id`, `id`, `title`, `content`, and a `rationale` explaining the discovery. Pass
-`scope: "project"` + `project_path` for a project contract, or `scope: "user"` (no `project_path`)
-for a **personal preference** that follows the user across projects. The draft is queued as a
-`pending` suggestion in the console's **Suggestions** view; it does **not** bind sessions until a
-user reviews it. The user can edit the draft, **approve** it (it becomes a binding rule via the same
-path as `save_rule` — project or user scope as proposed), or **reject** it with a note. Keep working
+`scope: "project"` + `project_path` for a project contract, `scope: "environment"` + `project_path`
+for a machine/project **environment note** (git-ignored `local/`, briefing-only), or `scope: "user"`
+(no `project_path`) for a **personal preference** that follows the user across projects. The draft is
+queued as a `pending` suggestion in the console's **Suggestions** view; it does **not** bind sessions
+until a user reviews it. The user can edit the draft, **approve** it (it becomes a binding rule via the
+same path as `save_rule` — project, environment or user scope as proposed), or **reject** it with a
+note. Keep working
 under the currently applicable rules meanwhile. Use **`list_suggestions`** (`project_path`,
 `status`) to check whether your proposals were reviewed; an approved one reports `approved_rule_id`.
 Rule of thumb: `save_rule` for rules you are confident are correct; `suggest_rule` for anything a
 human should sign off on first.
 
-**Where environment notes go.** Facts about the user's working environment that should hold across
-projects — e.g. "I run codex/kimi CLIs inside WSL; the repo lives in WSL, but Windows-native tools
-are callable for compile/verify" — belong in a **user-scope `constraint` rule**, not a project
-contract or session evidence. Propose it with `suggest_rule { scope: "user", kind: "constraint" }`
-(or `save_rule` if confident). User rules always load, are frozen into every session snapshot, and
-are injected proactively through the ACP `constraint_briefing` and `get_applicable_rules`, so the
-agent is told up front rather than needing a mid-task reminder.
+**Where environment notes go.** Facts about *this user on this machine in this project* — e.g. "I run
+codex/kimi CLIs inside WSL; the repo lives in WSL, but Windows-native tools are callable for
+compile/verify" — belong in an **environment-scope `constraint` rule**, not a portable user preference
+and not a committed project contract. They are true only here, so they are stored project-local and
+**git-ignored** (`.agent-control/local/`) and reach the agent **only** through the briefing — never the
+committed `AGENTS.md`. Propose one with `suggest_rule { scope: "environment", kind: "constraint",
+project_path }` (or `save_rule` if confident). Environment notes always load when enabled, are frozen
+into every session snapshot, and are injected proactively through the SessionStart hook briefing and
+`get_applicable_rules`, so the agent is told up front rather than needing a mid-task reminder. They are
+non-competitive (never supersede a contract) and always `advisory`.
 
 ## Reaching agents that don't call MCP (native export + hook)
 
-Most agents read their own entry points (`AGENTS.md`, `CLAUDE.md`, `.cursor/rules`) instead of
-calling MCP. Two mechanisms deliver the binding set to them:
+Most agents read their own entry points (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursor/rules`)
+instead of calling MCP. Two mechanisms deliver the binding set to them:
 
-- **`export_native`** (`project_path`, optional `include_user: true`) compiles the **enabled**
-  contracts into a *managed block* (`<!-- agent-control:begin --> … <!-- agent-control:end -->`)
-  inside the project's `AGENTS.md`, `CLAUDE.md` and `.cursor/rules/agent-control.mdc`; with
-  `include_user` it also writes personal preferences to `~/.claude/CLAUDE.md`. Everything outside the
-  block is preserved (hand-written prose and Cursor frontmatter survive) and re-export is idempotent
-  (`created` / `updated` / `unchanged` per target). The console's Projects pane has the same action as
-  **Export to harnesses**. Call it after authoring contracts so file-reading agents inherit them.
-- **Claude Code SessionStart hook** — `scripts/agent-control-hook.mjs` (dependency-free Node) calls
-  `get_applicable_rules` over the MCP HTTP endpoint at session start and injects a briefing into
-  context. It is read-only and exits `0` silently if the daemon is down, so it never blocks a session.
-  Wire it in `.claude/settings.json` (project) or `~/.claude/settings.json` (user):
+- **`export_native`** (`project_path`, optional `targets`, optional `include_user: true`) writes a
+  static *pointer block* (`<!-- agent-control:begin --> … <!-- agent-control:end -->`) into the
+  entry points you select. `targets` is a list of `agents` | `claude` | `gemini` | `cursor`
+  (omitted → `AGENTS.md` only); with `include_user` it also writes a preferences pointer to
+  `~/.claude/CLAUDE.md`. The block **points at** the live rules in `.agent-control/rules/` — it does
+  **not** copy their text — so editing a rule never makes it stale. Everything outside the block is
+  preserved (hand-written prose and Cursor frontmatter survive) and re-export is idempotent
+  (`created` / `updated` / `unchanged` per target). Targets are opt-in because Claude Code reads only
+  `CLAUDE.md` when both it and `AGENTS.md` exist. The project guidance is **discovery-first**: it opens
+  with "understand this project before changing it" and tells the agent to **read and summarize the
+  enabled rules** in `.agent-control/rules/`, rather than leading with a binding-contract headline; it
+  never commits the git-ignored environment notes. A static `### Continuity (optional)` section comes
+  **last**, pointing at `<project>/.agent-control/handoff/latest.md` (refreshable via `export_handoff`).
+  The console's Projects
+  pane has target checkboxes + **Export to harnesses**, and **Revoke** (`revoke_native`, same
+  `targets`) removes the block again — keeping prose, deleting block-only files. Call it after
+  authoring contracts so file-reading agents learn where the rules live.
+- **SessionStart + PreToolUse hooks** — `scripts/agent-control-hook.mjs` (dependency-free Node)
+  dispatches on the harness's `hook_event_name`. At **SessionStart** it calls `get_applicable_rules`
+  over the MCP HTTP endpoint and injects the briefing (binding rules + conflicts + the machine/project
+  **work environment**) into context (read-only; exits `0`
+  silently if the daemon is down). At **PreToolUse** it calls `check_tool_call` with the pending
+  `tool_name`/`tool_input`; if the gate denies, it **blocks the call** by exiting `2` with the reason
+  on stderr (the universal deny signal across Claude Code / CodeBuddy / WorkBuddy / Qoder). This is
+  the chokepoint that turns a declared `hard` rule into an **Enforced** one. Register both events with
+  the **`register_hooks`** tool (`project_path`, optional `targets`: `claude` | `codebuddy` | `qoder`)
+  or the console's Projects → **Hooks** panel; it writes a managed group into each harness's
+  `settings.json`, preserving your other config and hooks. **`detect_hooks`** reports what is
+  installed/registered; **`revoke_hooks`** removes the managed group. Manual copy-ready snippet —
+  adjust the absolute path to the script:
 
   ```json
   {
     "hooks": {
       "SessionStart": [
         { "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control/scripts/agent-control-hook.mjs\"" } ] }
+      ],
+      "PreToolUse": [
+        { "matcher": "", "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control/scripts/agent-control-hook.mjs\"" } ] }
       ]
     }
   }
   ```
 
-  Set `AGENT_CONTROL_MCP_URL` if your endpoint differs from `http://127.0.0.1:9870/mcp`.
+  Set `AGENT_CONTROL_MCP_URL` if your endpoint differs from `http://127.0.0.1:9870/mcp`. The hook is
+  fail-open: an unreachable/slow daemon never blocks a session or denies a tool.
 
-**Reach ≠ verify ≠ enforce.** Export and the hook make rules *reach* an agent; they do not force
-compliance. Two axes stay separate: a rule's declared `enforcement` (`advisory` / `verify` / `hard`)
-vs the session's **achieved tier** (`Advisory` < `Verified` < `Enforced`). `verify_constraints` runs
-`code_checks` against the real repo to earn `Verified` (post-hoc); `verify_evidence` checks the hash
-chain. `Enforced` requires a chokepoint that can deny (the ACP permission round-trip) — declaring
-`hard` without one still caps at Advisory/Verified. After editing rules, `check_export_drift` flags
-stale native exports (file-vs-store staleness only, not a running session's context) and prompts a
-re-export; it never rewrites files.
+**Reach ≠ verify ≠ enforce.** Export and the SessionStart hook make rules *reach* an agent; they do
+not force compliance. Two axes stay separate: a rule's declared `enforcement` (`advisory` / `verify` /
+`hard`) vs the session's **achieved tier** (`Advisory` < `Verified` < `Enforced`). `verify_constraints`
+runs `code_checks` against the real repo to earn `Verified` (post-hoc); `verify_evidence` checks the
+hash chain. `Enforced` requires a deny-capable chokepoint: the **PreToolUse hook** calling
+`check_tool_call`, which denies a tool while a `hard` rule's repo gate fails or a `tool_guard` matches.
+Declaring `hard` without registering the hook still caps at Advisory/Verified. `check_export_drift`
+flags native entry points missing the current-format pointer block (e.g. a legacy v1 full-text block)
+— file-vs-store format drift only, not a running session's context, and never triggered by a rule edit
+(the pointer is static); it prompts a re-export and never rewrites files.
 
-## ACP harness integration
+## Enforcement hooks (PreToolUse gate)
 
-Instead of calling MCP tools yourself, an agent can be **launched by the console over ACP**: the
-console creates the session, injects the binding rules as a system-prompt briefing, wires the
-agent-control MCP endpoint into the ACP session, handles file/terminal/permission requests, and
-records evidence automatically. Register the agent CLI in `~/.agent-control/agents.yaml`
-(`protocol: acp`). See [references/acp-harness.md](references/acp-harness.md) for the YAML format,
-permission policies, and how to make your CLI ACP-compatible.
+The console does not launch or proxy your agent; it mediates tool calls through the harness's own
+hook system. Register the hooks (above) so that before each tool call the harness asks
+**`check_tool_call`** (`project_path`, `tool_name`, `tool_input`, optional `agent_id`) whether the call
+is allowed. The gate evaluates the project's enabled `hard` rules two ways:
+
+- **Repo gate** — a `hard` rule's `code_checks` are evaluated against the real repo; while any check
+  fails or is inconclusive, tools are denied until the repo complies.
+- **Tool guards** — a rule's `tool_guards` (tool-name glob + input regex) deny matching calls directly
+  (e.g. block `rm -rf`).
+
+On deny the hook exits `2` with the reason on stderr, which the harness feeds back to the agent; on
+allow it exits `0`. Each mediated call appends a `tool_gate` evidence entry and can raise the rule's
+achieved tier to **Enforced**. With no `hard` rules the gate is fail-open (allows). `session_id` is
+optional — the gate evaluates project rules regardless of session. Use **`register_hooks`** /
+**`detect_hooks`** / **`revoke_hooks`** to manage the wiring; the console's Projects → Hooks panel
+does the same with one click.
 
 ## Resources
 
-- [references/mcp-tools.md](references/mcp-tools.md) — all 18 tools (parameters + returns), the 3
+- [references/mcp-tools.md](references/mcp-tools.md) — all 24 tools (parameters + returns), the 3
   resources, the `constraint-briefing` prompt, and concrete call examples.
-- [references/acp-harness.md](references/acp-harness.md) — `agents.yaml`, harness config, permission
-  flow, constraint briefing, automatic evidence, and writing an ACP agent.
 - In the source repo: `scripts/mcp-e2e.mjs` and `scripts/mcp-http-e2e.mjs` are runnable lifecycle
-  examples; `scripts/mock-acp-agent.mjs` is a minimal ACP agent used by the tests.
+  examples; `scripts/hook-e2e.mjs` exercises the SessionStart/PreToolUse hook against a live daemon;
+  `scripts/agent-control-hook.mjs` is the hook itself.

@@ -12,11 +12,13 @@ use uuid::Uuid;
 use crate::config::DataLayout;
 use crate::engine::RuleEngine;
 use crate::export;
+use crate::hooks::{self, HookReport, HookStatus, HookTarget};
 use crate::model::{
-    AgentRegistration, AssuranceTier, ConstraintAssurance, ConstraintSnapshot, EvidenceEntry,
-    EvidenceKind, HandoffBundle, HandoffRecord, Project, ProvenanceRecord, QueryContext,
-    Resolution, Rule, RuleKind, RuleSuggestion, Scope, Session, SessionStatus, SourceKind,
-    SuggestionEdits, SuggestionStatus, VerificationReport, canonical_hash,
+    AgentRegistration, AssuranceTier, ConstraintAssurance, ConstraintSnapshot, Enforcement,
+    EvidenceEntry, EvidenceKind, HandoffBundle, HandoffRecord, Project, ProvenanceRecord,
+    QueryContext, Resolution, Rule, RuleKind, RuleSuggestion, Scope, Session, SessionStatus,
+    SourceKind, SuggestionEdits, SuggestionStatus, ToolGateReport, VerificationReport, WorkItem,
+    canonical_hash,
 };
 
 pub use db::Db;
@@ -72,6 +74,11 @@ impl Store {
                 Scope::Project,
             )?;
             rules.extend(project_rules);
+            let env_rules = files::load_rules_from_dir(
+                &DataLayout::project_environment_dir(project),
+                Scope::Environment,
+            )?;
+            rules.extend(env_rules);
         }
         Ok(rules)
     }
@@ -82,6 +89,10 @@ impl Store {
             Scope::Project => {
                 let project = project_path.context("project scope requires a project path")?;
                 DataLayout::project_rules_dir(project)
+            }
+            Scope::Environment => {
+                let project = project_path.context("environment scope requires a project path")?;
+                ensure_environment_dir(project)?
             }
             Scope::Session => {
                 bail!("session rules are stored in the session snapshot, not as files")
@@ -125,6 +136,10 @@ impl Store {
                 let project = project_path.context("project scope requires a project path")?;
                 DataLayout::project_rules_dir(project)
             }
+            Scope::Environment => {
+                let project = project_path.context("environment scope requires a project path")?;
+                DataLayout::project_environment_dir(project)
+            }
             Scope::Session => bail!("session rules cannot be toggled as files"),
         };
         let mut rule = files::load_rules_from_dir(&dir, scope)?
@@ -148,6 +163,10 @@ impl Store {
             Scope::Project => {
                 let project = project_path.context("project scope requires a project path")?;
                 DataLayout::project_rules_dir(project)
+            }
+            Scope::Environment => {
+                let project = project_path.context("environment scope requires a project path")?;
+                DataLayout::project_environment_dir(project)
             }
             Scope::Session => bail!("session rules cannot be deleted as files"),
         };
@@ -233,6 +252,8 @@ impl Store {
             constraint_snapshot: snapshot,
             handoffs: vec![],
             assurance: vec![],
+            goal: String::new(),
+            work_items: vec![],
         };
         self.db.upsert_session(&session)?;
         self.db.append_evidence(
@@ -262,6 +283,27 @@ impl Store {
         session.status = status;
         session.updated_at = Utc::now();
         self.db.upsert_session(&session)
+    }
+
+    /// Record the resumable work state (goal + done/doing/todo) so a handoff carries progress
+    /// independent of any harness's own todo list.
+    pub fn set_session_work_state(
+        &self,
+        id: Uuid,
+        goal: String,
+        work_items: Vec<WorkItem>,
+    ) -> Result<Session> {
+        let mut session = self.db.get_session(id)?.context("session not found")?;
+        session.goal = goal;
+        session.work_items = work_items;
+        session.updated_at = Utc::now();
+        self.db.upsert_session(&session)?;
+        Ok(session)
+    }
+
+    /// Delete a session and, cascade, its evidence chain and provenance record.
+    pub fn delete_session(&self, id: Uuid) -> Result<()> {
+        self.db.delete_session(id)
     }
 
     pub fn record_evidence(
@@ -456,6 +498,105 @@ impl Store {
         })
     }
 
+    /// The deny-capable PreToolUse chokepoint. Resolves the enabled `Hard` rules for the project,
+    /// evaluates the repo gate (`code_checks`) plus `tool_guards` for this call, and — when a session
+    /// is given — records the verdict in the evidence chain and marks mediated hard rules `Enforced`.
+    /// This is the only path that produces the `Enforced` tier; declaring `Hard` alone never enforces.
+    /// With no hard rules the call is allowed (nothing to enforce).
+    pub fn check_tool_call(
+        &self,
+        project_path: &Path,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        agent_id: &str,
+        session_id: Option<Uuid>,
+    ) -> Result<ToolGateReport> {
+        let hard_rules: Vec<Rule> = self
+            .load_rules(Some(project_path))?
+            .into_iter()
+            .filter(|r| r.enabled && r.enforcement == Enforcement::Hard)
+            .filter(|r| {
+                r.applies_to.agents.is_empty() || r.applies_to.agents.iter().any(|a| a == agent_id)
+            })
+            .collect();
+        let report = crate::gate::evaluate_gate(&hard_rules, project_path, tool_name, tool_input);
+
+        if let Some(session_id) = session_id {
+            self.db.append_evidence(
+                session_id,
+                EvidenceKind::ToolGate,
+                agent_id,
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "allowed": report.allowed,
+                    "denials": report.denials,
+                    "enforced_rules": report.enforced_rules,
+                }),
+            )?;
+            self.record_gate_assurance(session_id, &report)?;
+            if !report.allowed {
+                self.db.append_evidence(
+                    session_id,
+                    EvidenceKind::ConstraintViolation,
+                    agent_id,
+                    serde_json::json!({
+                        "reason": "tool gate denied call",
+                        "tool_name": tool_name,
+                        "denials": report.denials,
+                    }),
+                )?;
+            }
+        }
+        Ok(report)
+    }
+
+    /// Upsert the assurance entries for the hard rules the gate touched: mediated-and-allowed rules
+    /// reach `Enforced`; denied rules drop to `Advisory`. Non-hard rules' entries are preserved.
+    fn record_gate_assurance(&self, session_id: Uuid, report: &ToolGateReport) -> Result<()> {
+        let Some(mut session) = self.db.get_session(session_id)? else {
+            return Ok(());
+        };
+        let declared: std::collections::HashMap<String, Enforcement> = session
+            .constraint_snapshot
+            .rules
+            .iter()
+            .map(|r| (r.id.clone(), r.enforcement))
+            .collect();
+        let mut updates: Vec<(String, AssuranceTier, String)> = Vec::new();
+        for id in &report.enforced_rules {
+            updates.push((
+                id.clone(),
+                AssuranceTier::Enforced,
+                format!("mediated by PreToolUse gate on '{}'", report.tool_name),
+            ));
+        }
+        for denial in &report.denials {
+            updates.push((
+                denial.rule_id.clone(),
+                AssuranceTier::Advisory,
+                format!("tool gate denied: {}", denial.reason),
+            ));
+        }
+        for (id, achieved, basis) in updates {
+            let decl = declared.get(&id).copied().unwrap_or(Enforcement::Hard);
+            if let Some(entry) = session.assurance.iter_mut().find(|a| a.rule_id == id) {
+                entry.declared = decl;
+                entry.achieved = achieved;
+                entry.basis = basis;
+            } else {
+                session.assurance.push(ConstraintAssurance {
+                    rule_id: id,
+                    declared: decl,
+                    achieved,
+                    basis,
+                });
+            }
+        }
+        session.updated_at = Utc::now();
+        self.db.upsert_session(&session)?;
+        Ok(())
+    }
+
     pub fn export_handoff(
         &self,
         session_id: Uuid,
@@ -473,6 +614,8 @@ impl Store {
             project_path: session.project_path.clone(),
             constraint_snapshot: session.constraint_snapshot.clone(),
             assurance: session.assurance.clone(),
+            goal: session.goal.clone(),
+            work_items: session.work_items.clone(),
             evidence_head_hash: head_hash,
             context,
             from_agent: session.agent_id.clone(),
@@ -505,6 +648,14 @@ impl Store {
 
         let bundle_path = self.layout.bundles_dir().join(format!("{session_id}.json"));
         std::fs::write(&bundle_path, serde_json::to_vec_pretty(&bundle)?)?;
+
+        // Project-local continuity brief: any harness reads this file to inherit the handoff without
+        // an MCP call (the AGENTS.md managed block points here).
+        let latest_path = DataLayout::project_handoff_latest(&bundle.project_path);
+        if let Some(parent) = latest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&latest_path, export::render_handoff_brief(&bundle, None))?;
         Ok(bundle)
     }
 
@@ -525,6 +676,8 @@ impl Store {
                 constraint_snapshot: bundle.constraint_snapshot.clone(),
                 handoffs: vec![],
                 assurance: vec![],
+                goal: bundle.goal.clone(),
+                work_items: bundle.work_items.clone(),
             },
         };
         let snapshot_hash = canonical_hash(
@@ -538,6 +691,8 @@ impl Store {
         // Carry the source harness's achieved tiers as the incoming baseline; the new harness must
         // re-run verify_constraints to sustain them (a harness without chokepoints cannot keep Enforced).
         session.assurance = bundle.assurance.clone();
+        session.goal = bundle.goal.clone();
+        session.work_items = bundle.work_items.clone();
         session.agent_id = new_agent.to_string();
         session.status = SessionStatus::Active;
         session.updated_at = Utc::now();
@@ -551,6 +706,18 @@ impl Store {
                 "bundle_hash": bundle.bundle_hash,
                 "evidence_head_hash": bundle.evidence_head_hash,
             }),
+        )?;
+
+        // Refresh the project-local continuity brief so a harness reading latest.md inherits the
+        // RESUMED state (new agent + carried tiers + re-verify warning), not the stale pre-handoff
+        // export. This keeps the file-based reach path consistent with the JSON bundle after resume.
+        let latest_path = DataLayout::project_handoff_latest(&session.project_path);
+        if let Some(parent) = latest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            &latest_path,
+            export::render_handoff_brief(bundle, Some(new_agent)),
         )?;
         Ok(session)
     }
@@ -666,6 +833,7 @@ impl Store {
         let examples_dir = DataLayout::project_examples_dir(path);
         std::fs::create_dir_all(&examples_dir)
             .with_context(|| format!("creating project examples dir {}", examples_dir.display()))?;
+        ensure_environment_dir(path)?;
 
         let marker_path = DataLayout::project_scaffold_marker(path);
         let mut marker = read_scaffold_marker(&marker_path);
@@ -674,6 +842,7 @@ impl Store {
             ("README.md", PROJECT_GUIDE),
             ("examples/contract-example.md", EXAMPLE_CONTRACT),
             ("examples/constraint-example.md", EXAMPLE_CONSTRAINT),
+            ("examples/environment-example.md", EXAMPLE_ENVIRONMENT),
         ] {
             let file = config_dir.join(rel);
             let new_hash = sha256_hex(template.as_bytes());
@@ -713,48 +882,41 @@ impl Store {
         Ok(rules_dir)
     }
 
-    /// Compile the binding rule set into each harness's native entry point so agents that never
-    /// call MCP still inherit the contracts. Project contracts (enabled, project scope) are injected
-    /// as a managed block into the project's `AGENTS.md`, `CLAUDE.md` and
-    /// `.cursor/rules/agent-control.mdc`; when `include_user` is set, personal preferences (enabled,
-    /// user scope) go to the user-global `~/.claude/CLAUDE.md`. Everything outside the block markers
-    /// is preserved, so a hand-written `AGENTS.md` is safe to export into. Re-export is idempotent.
+    /// Write the static pointer block into the selected native entry points so agents that never call
+    /// MCP still learn where the contracts live. The block points at `.agent-control/rules/` rather
+    /// than copying rule text, so it never goes stale on a rule edit. `targets` chooses which harness
+    /// files to write (default `AGENTS.md` only); when `include_user` is set, a preferences pointer
+    /// goes to the user-global `~/.claude/CLAUDE.md`. Everything outside the block markers is
+    /// preserved, so a hand-written `AGENTS.md` is safe to export into. Re-export is idempotent.
     pub fn export_native(
         &self,
         project_path: &Path,
+        targets: &[export::ExportTarget],
         include_user: bool,
     ) -> Result<export::ExportReport> {
         let rules = self.load_rules(Some(project_path))?;
-        let project_rules: Vec<Rule> = rules
+        let project_rules = rules
             .iter()
             .filter(|r| r.enabled && r.scope == Scope::Project)
-            .cloned()
-            .collect();
-        let user_rules: Vec<Rule> = rules
+            .count();
+        let user_rules = rules
             .iter()
             .filter(|r| r.enabled && r.scope == Scope::User)
-            .cloned()
-            .collect();
+            .count();
 
-        let project_block =
-            export::wrap_block(&export::render_body(&project_rules, "Project contracts"));
-        let mut targets = Vec::new();
-        for path in [
-            DataLayout::project_agents_md(project_path),
-            DataLayout::project_claude_md(project_path),
-        ] {
-            targets.push(write_managed_block_file(&path, &project_block, "")?);
+        let project_block = export::wrap_block(export::PROJECT_GUIDANCE);
+        let mut outcomes = Vec::new();
+        for target in targets {
+            outcomes.push(write_managed_block_file(
+                &target.path(project_path),
+                &project_block,
+                target.create_prefix(),
+            )?);
         }
-        targets.push(write_managed_block_file(
-            &DataLayout::project_cursor_rule(project_path),
-            &project_block,
-            export::CURSOR_FRONTMATTER,
-        )?);
 
         if include_user {
-            let user_block =
-                export::wrap_block(&export::render_body(&user_rules, "Personal preferences"));
-            targets.push(write_managed_block_file(
+            let user_block = export::wrap_block(export::USER_GUIDANCE);
+            outcomes.push(write_managed_block_file(
                 &DataLayout::claude_user_md()?,
                 &user_block,
                 "",
@@ -763,55 +925,122 @@ impl Store {
 
         Ok(export::ExportReport {
             project_path: project_path.to_path_buf(),
-            project_rules: project_rules.len(),
-            user_rules: user_rules.len(),
-            targets,
+            project_rules,
+            user_rules,
+            targets: outcomes,
         })
     }
 
-    /// Compare the exported managed blocks against the current binding set without writing anything.
-    /// A target is stale when it exists and its embedded ruleset hash differs from the body we would
-    /// render now. Detection only: the caller prompts a re-export, never rewrites files silently.
+    /// Check the selected entry points for a missing or outdated-format block without writing anything.
+    /// A target is stale when it exists and its embedded block-format version differs from
+    /// `BLOCK_FORMAT` (e.g. a legacy v1 full-text block). Detection only: the caller prompts a
+    /// re-export, never rewrites files silently.
     pub fn export_drift(
         &self,
         project_path: &Path,
+        targets: &[export::ExportTarget],
         include_user: bool,
     ) -> Result<export::DriftReport> {
-        let rules = self.load_rules(Some(project_path))?;
-        let project_rules: Vec<Rule> = rules
+        let mut drifts: Vec<export::TargetDrift> = targets
             .iter()
-            .filter(|r| r.enabled && r.scope == Scope::Project)
-            .cloned()
+            .map(|t| target_drift(&t.path(project_path)))
             .collect();
-        let project_hash =
-            export::content_hash(&export::render_body(&project_rules, "Project contracts"));
-
-        let mut targets = vec![
-            target_drift(&DataLayout::project_agents_md(project_path), &project_hash),
-            target_drift(&DataLayout::project_claude_md(project_path), &project_hash),
-            target_drift(
-                &DataLayout::project_cursor_rule(project_path),
-                &project_hash,
-            ),
-        ];
 
         if include_user {
-            let user_rules: Vec<Rule> = rules
-                .iter()
-                .filter(|r| r.enabled && r.scope == Scope::User)
-                .cloned()
-                .collect();
-            let user_hash =
-                export::content_hash(&export::render_body(&user_rules, "Personal preferences"));
-            targets.push(target_drift(&DataLayout::claude_user_md()?, &user_hash));
+            drifts.push(target_drift(&DataLayout::claude_user_md()?));
         }
 
-        let stale = targets.iter().any(|t| t.stale);
+        let stale = drifts.iter().any(|t| t.stale);
         Ok(export::DriftReport {
             project_path: project_path.to_path_buf(),
             stale,
-            targets,
+            targets: drifts,
         })
+    }
+
+    /// Revoke the pointer block from the selected native entry points — the explicit undo of
+    /// `export_native`. Surrounding prose is preserved; a file that held only the block (or only the
+    /// generated Cursor frontmatter + block) is deleted. A target with no block is left unchanged.
+    pub fn revoke_native(
+        &self,
+        project_path: &Path,
+        targets: &[export::ExportTarget],
+        include_user: bool,
+    ) -> Result<export::RevokeReport> {
+        let mut outcomes = Vec::new();
+        for target in targets {
+            outcomes.push(revoke_managed_block_file(&target.path(project_path))?);
+        }
+        if include_user {
+            outcomes.push(revoke_managed_block_file(&DataLayout::claude_user_md()?)?);
+        }
+        Ok(export::RevokeReport {
+            project_path: project_path.to_path_buf(),
+            targets: outcomes,
+        })
+    }
+
+    /// Register the Agent Control hook into the selected harnesses' project `settings.json`. Writes
+    /// both a `SessionStart` briefing hook and a `PreToolUse` gate hook that run `command` (the full
+    /// shell command line invoking the hook script). Every other key and user-authored hook is
+    /// preserved; re-registering is idempotent. This is what turns a `Hard` rule into an `Enforced`
+    /// one: the harness now mediates tool calls through `check_tool_call`.
+    pub fn register_hooks(
+        &self,
+        project_path: &Path,
+        targets: &[HookTarget],
+        command: &str,
+    ) -> Result<HookReport> {
+        if command.trim().is_empty() {
+            bail!("hook command cannot be empty");
+        }
+        let mut outcomes = Vec::new();
+        for target in targets {
+            outcomes.push(write_hooks_file(
+                &target.settings_path(project_path),
+                command,
+            )?);
+        }
+        Ok(HookReport {
+            project_path: project_path.to_path_buf(),
+            targets: outcomes,
+        })
+    }
+
+    /// Revoke the Agent Control hook from the selected harnesses' project `settings.json` — the
+    /// explicit undo of `register_hooks`. Other config and user hooks are preserved; a settings file
+    /// that held only our hook is deleted. A target with no managed hook is left unchanged.
+    pub fn revoke_hooks(&self, project_path: &Path, targets: &[HookTarget]) -> Result<HookReport> {
+        let mut outcomes = Vec::new();
+        for target in targets {
+            outcomes.push(revoke_hooks_file(&target.settings_path(project_path))?);
+        }
+        Ok(HookReport {
+            project_path: project_path.to_path_buf(),
+            targets: outcomes,
+        })
+    }
+
+    /// Detect which harnesses are installed and whether our hook is already registered in each one's
+    /// project settings. Read-only: drives the console's one-click register/restore UI.
+    pub fn detect_hooks(&self, project_path: &Path) -> Result<Vec<HookStatus>> {
+        let mut statuses = Vec::new();
+        for target in HookTarget::ALL {
+            let settings_path = target.settings_path(project_path);
+            let registered = read_settings(&settings_path)?
+                .map(|s| !hooks::registered_events(&s).is_empty())
+                .unwrap_or(false);
+            let project_dir = settings_path.parent().map(|p| p.exists()).unwrap_or(false);
+            let installed = project_dir || target.user_dir().map(|d| d.exists()).unwrap_or(false);
+            statuses.push(HookStatus {
+                target,
+                label: target.label().to_string(),
+                installed,
+                settings_path,
+                registered,
+            });
+        }
+        Ok(statuses)
     }
 
     /// Queue an agent-proposed rule for human review. The draft is stored in SQLite as `pending`;
@@ -828,7 +1057,7 @@ impl Store {
         }
         match suggestion.scope {
             Scope::User => suggestion.project_path = PathBuf::new(),
-            Scope::Project => {
+            Scope::Project | Scope::Environment => {
                 suggestion.project_path = normalize_project_path(&suggestion.project_path)?;
             }
             Scope::Session => bail!("session scope cannot be suggested as a durable rule"),
@@ -914,9 +1143,9 @@ impl Store {
         rule.source.origin = Some("agent-suggestion".to_string());
         let project_path = match suggestion.scope {
             Scope::User => None,
-            Scope::Project => {
+            Scope::Project | Scope::Environment => {
                 if suggestion.project_path.as_os_str().is_empty() {
-                    bail!("project-scope suggestion has no project path");
+                    bail!("project/environment-scope suggestion has no project path");
                 }
                 Some(suggestion.project_path.clone())
             }
@@ -966,18 +1195,37 @@ fn default_agents() -> Vec<AgentRegistration> {
         AgentRegistration {
             id: "claude-code".into(),
             name: "Claude Code".into(),
-            command: "claude-code-acp".into(),
+            command: "claude".into(),
             args: vec![],
             env: Default::default(),
-            protocol: Some(crate::model::AgentProtocol::Acp),
         },
         AgentRegistration {
             id: "gemini-cli".into(),
             name: "Gemini CLI".into(),
             command: "gemini".into(),
-            args: vec!["--experimental-acp".into()],
+            args: vec![],
             env: Default::default(),
-            protocol: Some(crate::model::AgentProtocol::Acp),
+        },
+        AgentRegistration {
+            id: "qoder".into(),
+            name: "Qoder".into(),
+            command: "qoder".into(),
+            args: vec![],
+            env: Default::default(),
+        },
+        AgentRegistration {
+            id: "codebuddy".into(),
+            name: "CodeBuddy".into(),
+            command: "codebuddy".into(),
+            args: vec![],
+            env: Default::default(),
+        },
+        AgentRegistration {
+            id: "workbuddy".into(),
+            name: "WorkBuddy".into(),
+            command: "workbuddy".into(),
+            args: vec![],
+            env: Default::default(),
         },
     ]
 }
@@ -1005,7 +1253,7 @@ pub fn new_rule(
 ) -> Rule {
     let source_kind = match scope {
         Scope::User => SourceKind::User,
-        Scope::Project => SourceKind::Project,
+        Scope::Project | Scope::Environment => SourceKind::Project,
         Scope::Session => SourceKind::Imported,
     };
     Rule {
@@ -1022,6 +1270,7 @@ pub fn new_rule(
         tags: vec![],
         conflicts_with: vec![],
         code_checks: vec![],
+        tool_guards: vec![],
         enabled: true,
         enforcement: Default::default(),
         checksum: String::new(),
@@ -1063,6 +1312,21 @@ pub fn new_suggestion(
     }
 }
 
+/// Create the project-local environment dir and its `.gitignore` (ignore everything but itself) so
+/// machine-specific notes are never committed alongside the shared contracts. Idempotent; returns
+/// the dir path. Called when writing an environment rule and by the project scaffold.
+fn ensure_environment_dir(project: &Path) -> Result<PathBuf> {
+    let dir = DataLayout::project_environment_dir(project);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating environment dir {}", dir.display()))?;
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        std::fs::write(&gitignore, "*\n!.gitignore\n")
+            .with_context(|| format!("writing {}", gitignore.display()))?;
+    }
+    Ok(dir)
+}
+
 /// Resolve a project path to a stable, display-friendly absolute key. The path must exist and be
 /// a directory. On Windows the `\\?\` verbatim prefix added by `canonicalize` is stripped so the
 /// stored path matches what users type and what sessions record.
@@ -1097,7 +1361,7 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
 }
 
 /// Bump when the scaffold templates below change so untouched projects migrate on next init.
-const TEMPLATE_VERSION: u32 = 1;
+const TEMPLATE_VERSION: u32 = 2;
 
 /// Records the template version and the sha256 of each generated file's content at the time we
 /// wrote it. A file is only auto-refreshed while its on-disk hash still equals the recorded one.
@@ -1180,23 +1444,145 @@ fn write_managed_block_file(
     })
 }
 
-fn target_drift(path: &Path, current_hash: &str) -> export::TargetDrift {
+fn target_drift(path: &Path) -> export::TargetDrift {
     let exists = path.exists();
-    let exported_hash = if exists {
+    let exported_format = if exists {
         std::fs::read_to_string(path)
             .ok()
-            .and_then(|raw| export::read_exported_hash(&raw))
+            .and_then(|raw| export::read_exported_format(&raw))
     } else {
         None
     };
-    let stale = exists && exported_hash.as_deref() != Some(current_hash);
+    let stale = exists && exported_format != Some(export::BLOCK_FORMAT);
     export::TargetDrift {
         path: path.to_path_buf(),
         exists,
-        exported_hash,
-        current_hash: current_hash.to_string(),
+        exported_format,
+        current_format: export::BLOCK_FORMAT,
         stale,
     }
+}
+
+/// Strip the managed block from `path`. Returns removed (prose kept) | deleted (file was block-only)
+/// | unchanged (no block, or file absent). A file left empty — or holding only the Cursor frontmatter
+/// we generated — is deleted rather than left as a stub.
+fn revoke_managed_block_file(path: &Path) -> Result<export::TargetOutcome> {
+    let action = if !path.exists() {
+        "unchanged".to_string()
+    } else {
+        let existing = std::fs::read_to_string(path)
+            .with_context(|| format!("reading export target {}", path.display()))?;
+        match export::remove_managed_block(&existing)? {
+            None => "unchanged".to_string(),
+            Some(remaining) => {
+                let stub = remaining.trim().is_empty()
+                    || remaining.trim() == export::CURSOR_FRONTMATTER.trim();
+                if stub {
+                    std::fs::remove_file(path)
+                        .with_context(|| format!("deleting export target {}", path.display()))?;
+                    "deleted".to_string()
+                } else {
+                    std::fs::write(path, &remaining)
+                        .with_context(|| format!("writing export target {}", path.display()))?;
+                    "removed".to_string()
+                }
+            }
+        }
+    };
+    Ok(export::TargetOutcome {
+        path: path.to_path_buf(),
+        action,
+    })
+}
+
+/// Read and parse a harness `settings.json`. Returns `None` when the file is absent or empty; errors
+/// on malformed JSON so registration never silently clobbers a file it could not understand.
+fn read_settings(path: &Path) -> Result<Option<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading settings {}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let value = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing settings {}", path.display()))?;
+    Ok(Some(value))
+}
+
+/// Upsert our managed hook groups into `path`, preserving all other config. Returns created |
+/// updated | unchanged; an unchanged file is not rewritten, so re-registering is a no-op on disk.
+fn write_hooks_file(path: &Path, command: &str) -> Result<export::TargetOutcome> {
+    let existed = path.exists();
+    let existing_raw = if existed {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("reading settings {}", path.display()))?
+    } else {
+        String::new()
+    };
+    let settings = if existing_raw.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&existing_raw)
+            .with_context(|| format!("parsing settings {}", path.display()))?
+    };
+    let new_settings = hooks::upsert_managed_hooks(&settings, command)?;
+    let mut new_raw = serde_json::to_string_pretty(&new_settings)
+        .with_context(|| format!("serializing settings {}", path.display()))?;
+    new_raw.push('\n');
+    let action = if !existed {
+        "created"
+    } else if new_raw == existing_raw {
+        "unchanged"
+    } else {
+        "updated"
+    };
+    if action != "unchanged" {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+        std::fs::write(path, &new_raw)
+            .with_context(|| format!("writing settings {}", path.display()))?;
+    }
+    Ok(export::TargetOutcome {
+        path: path.to_path_buf(),
+        action: action.to_string(),
+    })
+}
+
+/// Strip our managed hook groups from `path`. Returns removed (other config kept) | deleted (file
+/// held only our hook) | unchanged (no managed hook, or file absent).
+fn revoke_hooks_file(path: &Path) -> Result<export::TargetOutcome> {
+    let action = match read_settings(path)? {
+        None => "unchanged".to_string(),
+        Some(settings) => match hooks::remove_managed_hooks(&settings)? {
+            None => "unchanged".to_string(),
+            Some(new_settings) => {
+                let stub = new_settings
+                    .as_object()
+                    .map(|m| m.is_empty())
+                    .unwrap_or(false);
+                if stub {
+                    std::fs::remove_file(path)
+                        .with_context(|| format!("deleting settings {}", path.display()))?;
+                    "deleted".to_string()
+                } else {
+                    let mut raw = serde_json::to_string_pretty(&new_settings)
+                        .with_context(|| format!("serializing settings {}", path.display()))?;
+                    raw.push('\n');
+                    std::fs::write(path, &raw)
+                        .with_context(|| format!("writing settings {}", path.display()))?;
+                    "removed".to_string()
+                }
+            }
+        },
+    };
+    Ok(export::TargetOutcome {
+        path: path.to_path_buf(),
+        action,
+    })
 }
 
 const PROJECT_GUIDE: &str = "\
@@ -1208,12 +1594,21 @@ This directory (`.agent-control/`) holds this project's engineering contracts.
 - `rules/` — project-scope rule files (Markdown + YAML frontmatter). Every agent working in this
   repo inherits them; commit and review them like code.
   `rules/` — 项目作用域规则文件（Markdown + YAML frontmatter）。仓库内所有代理都会继承，请像代码一样提交与评审。
-- `examples/` — copy-ready rule templates (NOT binding). Copy one into `rules/` and edit it to
-  activate a contract. See `contract-example.md` and `constraint-example.md`.
-  `examples/` — 可复制的规则模板（不会生效）。复制到 `rules/` 并修改即可启用一条契约。
+- `examples/` — copy-ready rule templates (NOT binding). Copy one into `rules/` (or `local/` for an
+  environment note) and edit it to activate. See `contract-example.md`, `constraint-example.md`,
+  `environment-example.md`.
+  `examples/` — 可复制的规则模板（不会生效）。复制到 `rules/`（环境说明复制到 `local/`）并修改即可启用。
+- `local/` — environment notes for THIS user × THIS project × THIS machine (e.g. \"agents run inside
+  WSL\"). Git-ignored (a `.gitignore` inside ignores everything but itself), so machine-specific facts
+  are never committed. They are descriptive context, not competing contracts: always applied, and
+  delivered only via the MCP/hook briefing — never exported into `AGENTS.md`/`CLAUDE.md`.
+  `local/` — 当前用户 × 当前项目 × 当前机器的工作环境说明（如「代理运行在 WSL 内」）。已被 git 忽略，
+  机器相关事实不会提交。它是描述性上下文而非竞争性契约：始终生效，仅通过 MCP/hook 简报传递，不导出到入口文件。
 - Personal preferences are user-scope and live separately in `~/.agent-control/rules/user/`; they
-  follow you across projects and are NOT stored here.
+  follow you across projects and are NOT stored here. Do not put machine/project-specific environment
+  facts there — those belong in `local/`.
   个人偏好为用户级，单独存于 `~/.agent-control/rules/user/`，跨项目跟随你，不保存在此。
+  机器/项目相关的环境事实不要放在那里——它们属于 `local/`。
 
 Agents discover these rules over MCP (`get_applicable_rules`) and freeze them into a session
 snapshot (`create_session`) so the same constraints stay binding across harness handoffs.
@@ -1281,4 +1676,34 @@ Hard constraints for every agent working in this repo:
 
 硬性约束：禁止在源码中硬编码任何密钥/令牌；完成改动前必须运行测试；
 任务与本规则冲突时，先向用户暴露冲突，而不是悄悄削弱规则。
+";
+
+const EXAMPLE_ENVIRONMENT: &str = "\
+---
+# Environment notes describe THIS user's CURRENT project on THIS machine. They are descriptive
+# context, not competing contracts: always applied, never exported into committed AGENTS.md/CLAUDE.md.
+# Copy this file into local/ (git-ignored) to activate it; files in local/ are environment-scope.
+id: wsl-build-environment
+title: Agents run inside WSL; use Windows-native tools to compile/verify
+kind: constraint
+scope: environment
+enforcement: advisory
+source:
+  kind: project
+  author: your-name
+  created_at: 2026-01-01T00:00:00Z
+tags: [environment, wsl]
+---
+This project is checked out on a Windows machine, but agents run inside WSL.
+
+- The repo path under WSL maps to a Windows path; Windows-native toolchains (cargo via mise, rustc)
+  are callable for compile/verify even though the shell is Linux.
+- Do not assume Linux-only paths or tools; confirm which side a command runs on before relying on it.
+- This fact is true only on THIS machine. It is git-ignored and delivered via the MCP/hook briefing,
+  never committed — another machine or CI may differ. Put portable personal preferences in user scope
+  instead, not here.
+
+本机为 Windows，但代理运行在 WSL 内：仓库路径映射到 Windows 路径，编译/验证可调用 Windows 原生工具链
+（如经 mise 的 cargo）。此事实仅对本机成立，已被 git 忽略，仅通过 MCP/hook 简报传递，不会提交；
+可跨项目跟随的个人偏好请放在用户级，而不是这里。
 ";

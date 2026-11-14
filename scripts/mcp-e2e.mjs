@@ -119,14 +119,20 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  check("tools/list has 18 tools", names.length === 18, names);
+  check("tools/list has 24 tools", names.length === 24, names);
   check("save_rule registered", names.includes("save_rule"), names);
   check("set_rule_enabled registered", names.includes("set_rule_enabled"), names);
   check("suggest_rule registered", names.includes("suggest_rule"), names);
   check("list_suggestions registered", names.includes("list_suggestions"), names);
   check("export_native registered", names.includes("export_native"), names);
   check("check_export_drift registered", names.includes("check_export_drift"), names);
+  check("revoke_native registered", names.includes("revoke_native"), names);
   check("verify_constraints registered", names.includes("verify_constraints"), names);
+  check("update_work_state registered", names.includes("update_work_state"), names);
+  check("check_tool_call registered", names.includes("check_tool_call"), names);
+  check("register_hooks registered", names.includes("register_hooks"), names);
+  check("revoke_hooks registered", names.includes("revoke_hooks"), names);
+  check("detect_hooks registered", names.includes("detect_hooks"), names);
 
   const rules = await tool("list_rules", { project_path: projectDir });
   check("list_rules returns user + project rule", rules.rules?.length === 2, rules);
@@ -140,6 +146,15 @@ try {
     applicable.conflicts,
   );
   check("provenance id returned", !!applicable.provenance_id);
+  // The briefing is rendered by core and shared with the SessionStart hook + constraint-briefing prompt.
+  check(
+    "get_applicable_rules returns a unified briefing",
+    typeof applicable.briefing === "string" &&
+      applicable.briefing.includes("project context") &&
+      applicable.briefing.includes("summarize") &&
+      applicable.briefing.includes("use-tabs"),
+    applicable.briefing,
+  );
 
   const explanation = await tool("explain_rule", { rule_id: "use-tabs", ...query });
   check("explain_rule returns explanation", !!explanation, explanation);
@@ -181,15 +196,71 @@ try {
   const verify = await tool("verify_evidence", { session_id: sessionId });
   check("evidence chain valid", verify.valid === true, verify);
 
+  // Resumable work state: goal + done/doing/todo items travel with the handoff, not the harness todo list.
+  const workState = await tool("update_work_state", {
+    session_id: sessionId,
+    goal: "ship the refactor without breaking the public API",
+    work_items: [
+      { title: "extract module", status: "done" },
+      { title: "wire hook", status: "doing" },
+      { title: "e2e coverage", status: "todo" },
+    ],
+  });
+  check(
+    "update_work_state records goal",
+    workState.goal === "ship the refactor without breaking the public API",
+    workState,
+  );
+  check(
+    "update_work_state records 3 items",
+    workState.work_items?.length === 3 && workState.work_items[1].status === "doing",
+    workState,
+  );
+
   const bundle = await tool("export_handoff", {
     session_id: sessionId,
     to_agent: "harness-b",
     context: { summary: "module refactor in progress" },
   });
   check("export_handoff returns bundle", !!bundle.bundle_hash, bundle);
+  check(
+    "handoff bundle carries goal + work items",
+    bundle.goal === "ship the refactor without breaking the public API" &&
+      bundle.work_items?.length === 3,
+    bundle,
+  );
+
+  // Layer 1: export_handoff also writes a project-local continuity brief the managed block points at.
+  const latestPath = join(projectDir, ".agent-control", "handoff", "latest.md");
+  check("export_handoff writes latest.md", existsSync(latestPath), latestPath);
+  const latestText = existsSync(latestPath) ? readFileSync(latestPath, "utf8") : "";
+  check("latest.md carries task", latestText.includes("e2e: refactor module"), latestText);
+  check("latest.md carries from-agent", latestText.includes("harness-a"), latestText);
+  check("latest.md renders goal", latestText.includes("## Goal") && latestText.includes("public API"), latestText);
+  check(
+    "latest.md renders work state",
+    latestText.includes("## Work state") &&
+      latestText.includes("**done**: extract module") &&
+      latestText.includes("**doing**: wire hook") &&
+      latestText.includes("**todo**: e2e coverage"),
+    latestText,
+  );
 
   const resumed = await tool("import_handoff", { bundle, new_agent: "harness-b" });
   check("import_handoff switches agent", resumed.agent_id === "harness-b", resumed);
+  check(
+    "import_handoff carries work state",
+    resumed.goal === "ship the refactor without breaking the public API" &&
+      resumed.work_items?.length === 3,
+    resumed,
+  );
+  // import_handoff refreshes latest.md to the RESUMED state so the file-based reach path stays current.
+  const resumedText = existsSync(latestPath) ? readFileSync(latestPath, "utf8") : "";
+  check(
+    "import_handoff refreshes latest.md with resumed-under",
+    resumedText.includes("Resumed under") && resumedText.includes("harness-b"),
+    resumedText,
+  );
   check(
     "handoff carries same rule ids",
     JSON.stringify(resumed.rules_to_acknowledge.sort()) === JSON.stringify([...ruleIds].sort()),
@@ -343,16 +414,17 @@ try {
     await toolRejects("list_suggestions", { status: "bogus" }),
   );
 
-  // suggest_rule scope=user: an agent proposes a personal preference (e.g. an environment note)
-  // for human review; approval writes a user-scope rule that follows the user across projects.
+  // suggest_rule scope=user: an agent proposes a portable personal preference for human review;
+  // approval writes a user-scope rule that follows the user across projects. (Machine/project facts
+  // like WSL are NOT preferences — they belong in scope=environment, covered below.)
   const userSuggested = await tool("suggest_rule", {
     scope: "user",
     agent_id: "codex-cli",
-    id: "wsl-env",
-    title: "Agents run inside WSL",
-    content: "The project lives in WSL; compile/verify there, but Windows-native tools are callable when needed.",
-    kind: "constraint",
-    rationale: "Agent repeatedly needed reminding it was in WSL during build verification.",
+    id: "prefer-tabs",
+    title: "Prefer tabs over spaces",
+    content: "I prefer tabs for indentation across all my projects; a portable personal preference.",
+    kind: "preference",
+    rationale: "User repeatedly stated a personal indentation preference.",
   });
   check(
     "suggest_rule scope=user queues a pending user suggestion",
@@ -362,19 +434,19 @@ try {
   const userQueue = await tool("list_suggestions", { status: "pending" });
   check(
     "user suggestion appears in the unfiltered queue with scope=user",
-    userQueue.suggestions?.some((s) => s.rule_id === "wsl-env" && s.scope === "user"),
+    userQueue.suggestions?.some((s) => s.rule_id === "prefer-tabs" && s.scope === "user"),
     userQueue,
   );
   const projQueueAfterUser = await tool("list_suggestions", { project_path: projectDir, status: "pending" });
   check(
     "user suggestion is excluded from the project-filtered queue",
-    !projQueueAfterUser.suggestions?.some((s) => s.rule_id === "wsl-env"),
+    !projQueueAfterUser.suggestions?.some((s) => s.rule_id === "prefer-tabs"),
     projQueueAfterUser,
   );
   const userRulesBefore = await tool("list_rules", {});
   check(
     "user suggestion does not bind before approval",
-    !userRulesBefore.rules?.some((r) => r.id === "wsl-env"),
+    !userRulesBefore.rules?.some((r) => r.id === "prefer-tabs"),
     userRulesBefore,
   );
   check(
@@ -386,37 +458,155 @@ try {
     await toolRejects("suggest_rule", { scope: "session", id: "x", title: "x", content: "x", agent_id: "a" }),
   );
 
-  // export_native: compile binding contracts into native harness entry points as a managed block,
-  // preserving hand-written prose outside it. include_user=false keeps every write inside the
-  // throwaway project dir (never the real ~/.claude/CLAUDE.md).
-  const agentsPath = join(projectDir, "AGENTS.md");
-  writeFileSync(agentsPath, "# Hand-written repo guide\n\nKeep this prose.\n");
-  const exported = await tool("export_native", { project_path: projectDir, include_user: false });
+  // scope=environment: machine/project-local descriptive context (e.g. WSL). Stored git-ignored in
+  // .agent-control/local/, always applied (non-competitive), delivered via the briefing, and NEVER
+  // exported into the committed AGENTS.md. Uses its own throwaway project dir.
+  const envDir = join(root, "env-project");
+  mkdirSync(envDir, { recursive: true });
+  const envSaved = await tool("save_rule", {
+    id: "wsl-env",
+    title: "Agents run inside WSL",
+    content: "MACHINE-ONLY-FACT: harnesses run in WSL; Windows-native tools are callable for compile/verify.",
+    agent_id: "harness-a",
+    kind: "constraint",
+    scope: "environment",
+    project_path: envDir,
+  });
   check(
-    "export_native reports enabled project rules and 3 targets",
-    exported.report?.project_rules === 2 && exported.report?.targets?.length === 3,
+    "save_rule scope=environment writes into git-ignored local/",
+    envSaved.rule?.scope === "environment" &&
+      envSaved.path?.replaceAll("\\", "/").includes("/.agent-control/local/"),
+    envSaved,
+  );
+  check(
+    "save_rule scope=environment creates a .gitignore",
+    existsSync(join(envDir, ".agent-control", "local", ".gitignore")),
+  );
+  const envApplicable = await tool("get_applicable_rules", {
+    project_path: envDir,
+    agent_id: "harness-a",
+    file_paths: [],
+    languages: [],
+    task_tags: [],
+  });
+  check(
+    "get_applicable_rules applies the environment note as context",
+    envApplicable.applied_rules?.some((r) => r.rule?.id === "wsl-env" && r.rule?.scope === "environment"),
+    envApplicable,
+  );
+  check(
+    "briefing renders a dedicated work-environment section",
+    typeof envApplicable.briefing === "string" &&
+      envApplicable.briefing.includes("Work environment") &&
+      envApplicable.briefing.includes("MACHINE-ONLY-FACT"),
+    envApplicable.briefing?.slice(0, 200),
+  );
+  const envGlobalRules = await tool("list_rules", {});
+  check(
+    "environment note is project-local (absent without project_path)",
+    !envGlobalRules.rules?.some((r) => r.id === "wsl-env"),
+    envGlobalRules,
+  );
+  const envExport = await tool("export_native", {
+    project_path: envDir,
+    targets: ["agents"],
+    include_user: false,
+  });
+  const envAgentsText = readFileSync(join(envDir, "AGENTS.md"), "utf8");
+  check(
+    "export_native excludes environment content from the committed block",
+    envExport.report?.project_rules === 0 && !envAgentsText.includes("MACHINE-ONLY-FACT"),
+    { report: envExport.report, head: envAgentsText.slice(0, 120) },
+  );
+  const envSuggested = await tool("suggest_rule", {
+    scope: "environment",
+    project_path: envDir,
+    agent_id: "harness-a",
+    id: "wsl-tools",
+    title: "Use Windows-native toolchains from WSL",
+    content: "cargo via mise is callable from WSL for compile/verify.",
+    kind: "constraint",
+    rationale: "Observed the build toolchain lives on the Windows side.",
+  });
+  check(
+    "suggest_rule scope=environment queues a pending environment suggestion",
+    envSuggested.suggestion?.status === "pending" && envSuggested.suggestion?.scope === "environment",
+    envSuggested,
+  );
+  const envQueue = await tool("list_suggestions", { project_path: envDir, status: "pending" });
+  check(
+    "environment suggestion appears in the project-filtered queue",
+    envQueue.suggestions?.some((s) => s.rule_id === "wsl-tools" && s.scope === "environment"),
+    envQueue,
+  );
+  check(
+    "suggest_rule scope=environment rejects missing project_path",
+    await toolRejects("suggest_rule", { scope: "environment", id: "x", title: "x", content: "x", agent_id: "a" }),
+  );
+  check(
+    "save_rule scope=environment rejects missing project_path",
+    await toolRejects("save_rule", { id: "x", title: "x", content: "x", agent_id: "a", scope: "environment" }),
+  );
+  const envToggled = await tool("set_rule_enabled", {
+    id: "wsl-env", enabled: false, scope: "environment", project_path: envDir,
+  });
+  check(
+    "set_rule_enabled scope=environment disables the local note",
+    envToggled.rule?.enabled === false,
+    envToggled,
+  );
+
+  // export_native: write a STATIC POINTER block into the selected native harness entry points. The
+  // block points at the live rule files in .agent-control/rules/ — it does NOT copy rule text — so a
+  // rule edit never makes it stale and re-export is byte-idempotent. Targets are opt-in; include_user
+  // =false keeps every write inside the throwaway project dir (never the real ~/.claude/CLAUDE.md).
+  const allTargets = ["agents", "claude", "gemini", "cursor"];
+  const agentsPath = join(projectDir, "AGENTS.md");
+  const claudePath = join(projectDir, "CLAUDE.md");
+  const geminiPath = join(projectDir, "GEMINI.md");
+  const cursorPath = join(projectDir, ".cursor", "rules", "agent-control.mdc");
+  writeFileSync(agentsPath, "# Hand-written repo guide\n\nKeep this prose.\n");
+  const exported = await tool("export_native", {
+    project_path: projectDir,
+    targets: allTargets,
+    include_user: false,
+  });
+  check(
+    "export_native reports enabled project rules and the 4 selected targets",
+    exported.report?.project_rules === 2 && exported.report?.targets?.length === 4,
     exported,
   );
   const agentsText = readFileSync(agentsPath, "utf8");
   check(
-    "export_native preserves prose and injects the managed block with both contracts",
+    "export_native preserves prose and injects a pointer block (not rule text)",
     agentsText.startsWith("# Hand-written repo guide\n\nKeep this prose.\n") &&
       agentsText.includes("agent-control:begin") &&
-      agentsText.includes("use-tabs") &&
-      agentsText.includes("api-isasc"),
+      agentsText.includes(".agent-control/rules/") &&
+      !agentsText.includes("use-tabs") &&
+      !agentsText.includes("api-isasc"),
     agentsText.slice(0, 200),
   );
-  const cursorPath = join(projectDir, ".cursor", "rules", "agent-control.mdc");
+  check(
+    "export_native block embeds a format version and continuity guidance to latest.md",
+    agentsText.includes("agent-control:block-format:") &&
+      agentsText.includes("### Continuity") &&
+      agentsText.includes(".agent-control/handoff/latest.md"),
+    agentsText.slice(0, 400),
+  );
   check(
     "export_native writes a Cursor rule with frontmatter outside the block",
     existsSync(cursorPath) && readFileSync(cursorPath, "utf8").startsWith("---\n"),
     cursorPath,
   );
   check(
-    "export_native writes project CLAUDE.md",
-    existsSync(join(projectDir, "CLAUDE.md")),
+    "export_native writes project CLAUDE.md and GEMINI.md when selected",
+    existsSync(claudePath) && existsSync(geminiPath),
   );
-  const reexported = await tool("export_native", { project_path: projectDir, include_user: false });
+  const reexported = await tool("export_native", {
+    project_path: projectDir,
+    targets: allTargets,
+    include_user: false,
+  });
   check(
     "export_native re-export is idempotent (all targets unchanged)",
     reexported.report?.targets?.every((t) => t.action === "unchanged"),
@@ -426,40 +616,134 @@ try {
     "export_native rejects an empty project_path",
     await toolRejects("export_native", { project_path: "  ", include_user: false }),
   );
+  check(
+    "export_native rejects an unknown target",
+    await toolRejects("export_native", { project_path: projectDir, targets: ["bogus"] }),
+  );
 
-  // check_export_drift: detect file-vs-store staleness (layer 1) without rewriting anything.
-  const driftSync = await tool("check_export_drift", { project_path: projectDir, include_user: false });
+  // Omitted targets default to AGENTS.md only — never write every supported harness at once.
+  const defaultDir = join(root, "default-targets");
+  mkdirSync(join(defaultDir, ".agent-control", "rules"), { recursive: true });
+  const defaultExport = await tool("export_native", { project_path: defaultDir, include_user: false });
+  check(
+    "export_native defaults to AGENTS.md only (1 target, no CLAUDE/GEMINI)",
+    defaultExport.report?.targets?.length === 1 &&
+      defaultExport.report.targets[0].path.endsWith("AGENTS.md") &&
+      !existsSync(join(defaultDir, "CLAUDE.md")) &&
+      !existsSync(join(defaultDir, "GEMINI.md")),
+    defaultExport,
+  );
+
+  // check_export_drift: detect a missing/outdated-FORMAT block (layer 1) without rewriting anything.
+  // The pointer is static, so a rule edit must NOT induce drift; only a legacy v1 block does.
+  const driftSync = await tool("check_export_drift", {
+    project_path: projectDir,
+    targets: allTargets,
+    include_user: false,
+  });
   check(
     "check_export_drift reports in-sync right after export",
-    driftSync.report?.stale === false && driftSync.report?.targets?.length === 3,
+    driftSync.report?.stale === false && driftSync.report?.targets?.length === 4,
     driftSync,
   );
   check(
-    "check_export_drift embeds a matching ruleset hash per target",
-    driftSync.report?.targets?.every((t) => t.exists && t.exported_hash === t.current_hash),
+    "check_export_drift embeds a matching format version per target",
+    driftSync.report?.targets?.every(
+      (t) => t.exists && t.exported_format === t.current_format && t.current_format === 2,
+    ),
     driftSync,
   );
-  // Edit a rule without re-exporting -> the managed blocks become stale.
+  // Edit a rule WITHOUT re-exporting -> the pointer block is unchanged, so drift stays clear.
   await tool("save_rule", {
     id: "api-isasc",
     title: "Upstream isAsc type is ambiguous",
-    content: "Edited again to induce export drift.",
+    content: "Edited, but a static pointer block must not go stale.",
     agent_id: "harness-b",
     scope: "project",
     project_path: projectDir,
   });
-  const driftStale = await tool("check_export_drift", { project_path: projectDir, include_user: false });
+  const driftAfterEdit = await tool("check_export_drift", {
+    project_path: projectDir,
+    targets: allTargets,
+    include_user: false,
+  });
   check(
-    "check_export_drift flags staleness after a rule edit",
-    driftStale.report?.stale === true && driftStale.report?.targets?.every((t) => t.stale),
-    driftStale,
+    "check_export_drift stays in sync after a rule edit (pointer is static)",
+    driftAfterEdit.report?.stale === false,
+    driftAfterEdit,
   );
-  await tool("export_native", { project_path: projectDir, include_user: false });
-  const driftResync = await tool("check_export_drift", { project_path: projectDir, include_user: false });
+  // Overwrite AGENTS.md with a legacy v1 full-text block (ruleset hash, no format marker) -> stale.
+  writeFileSync(
+    agentsPath,
+    "# Hand-written repo guide\n\nKeep this prose.\n\n<!-- agent-control:begin -->\n" +
+      "<!-- agent-control:ruleset sha256:deadbeef -->\n## Contracts\n\nold full text\n" +
+      "<!-- agent-control:end -->\n",
+  );
+  const driftLegacy = await tool("check_export_drift", {
+    project_path: projectDir,
+    targets: allTargets,
+    include_user: false,
+  });
+  const legacyAgents = driftLegacy.report?.targets?.find((t) => t.path.endsWith("AGENTS.md"));
+  check(
+    "check_export_drift flags a legacy v1 block as stale (no format marker)",
+    driftLegacy.report?.stale === true &&
+      legacyAgents?.stale === true &&
+      legacyAgents?.exported_format === null,
+    driftLegacy,
+  );
+  await tool("export_native", { project_path: projectDir, targets: allTargets, include_user: false });
+  const driftResync = await tool("check_export_drift", {
+    project_path: projectDir,
+    targets: allTargets,
+    include_user: false,
+  });
   check("check_export_drift clears after re-export", driftResync.report?.stale === false, driftResync);
   check(
     "check_export_drift rejects an empty project_path",
     await toolRejects("check_export_drift", { project_path: "  ", include_user: false }),
+  );
+
+  // revoke_native: the explicit undo. AGENTS.md keeps its prose (removed); the block-only CLAUDE.md,
+  // GEMINI.md and Cursor rule (frontmatter + block) are deleted. Re-running is a safe no-op.
+  const revoked = await tool("revoke_native", {
+    project_path: projectDir,
+    targets: allTargets,
+    include_user: false,
+  });
+  const byPath = (p) => revoked.report?.targets?.find((t) => t.path.endsWith(p))?.action;
+  check(
+    "revoke_native removes the block but keeps prose, deletes block-only files",
+    byPath("AGENTS.md") === "removed" &&
+      byPath("CLAUDE.md") === "deleted" &&
+      byPath("GEMINI.md") === "deleted" &&
+      byPath("agent-control.mdc") === "deleted",
+    revoked,
+  );
+  const revokedAgents = readFileSync(agentsPath, "utf8");
+  check(
+    "revoke_native leaves AGENTS.md prose intact and block-free",
+    revokedAgents.includes("# Hand-written repo guide") &&
+      revokedAgents.includes("Keep this prose.") &&
+      !revokedAgents.includes("agent-control:begin") &&
+      !existsSync(claudePath) &&
+      !existsSync(geminiPath) &&
+      !existsSync(cursorPath),
+    revokedAgents,
+  );
+  const rerevoked = await tool("revoke_native", {
+    project_path: projectDir,
+    targets: allTargets,
+    include_user: false,
+  });
+  check(
+    "revoke_native re-run is a no-op (all targets unchanged)",
+    rerevoked.report?.targets?.every((t) => t.action === "unchanged"),
+    rerevoked,
+  );
+  check(
+    "revoke_native rejects an empty project_path",
+    await toolRejects("revoke_native", { project_path: "  ", include_user: false }),
   );
 
   // enforcement + code_checks passthrough on save_rule, then verify_constraints achieves a tier.
@@ -551,6 +835,177 @@ try {
   check(
     "verify_constraints rejects an unknown session",
     await toolRejects("verify_constraints", { session_id: "00000000-0000-0000-0000-000000000000", agent_id: "a" }),
+  );
+
+  // ---- Layer 2: the deny-capable PreToolUse gate (check_tool_call) ----
+  // A hard rule's tool_guards deny matching calls; its code_checks form a repo gate that denies while
+  // failing; a mediated-and-allowed hard rule reaches Enforced and records ToolGate evidence. Every
+  // write stays inside throwaway dirs — never the real repo or ~/.claude.
+  const guardDir = join(root, "gate-guard");
+  mkdirSync(join(guardDir, ".agent-control", "rules"), { recursive: true });
+  writeFileSync(join(guardDir, ".editorconfig"), "[*]\nindent_style = space\n");
+  const guardRule = await tool("save_rule", {
+    id: "no-rm-rf", title: "No recursive force delete", content: "Never run rm -rf.",
+    agent_id: "harness-a", kind: "constraint", scope: "project", project_path: guardDir,
+    enforcement: "hard",
+    code_checks: [{ file: ".editorconfig", key: "indent_style", expect: "space" }],
+    tool_guards: [{ tool: "Bash", pattern: "rm\\s+-rf", reason: "recursive force delete is banned" }],
+  });
+  check(
+    "save_rule persists enforcement=hard and tool_guards",
+    guardRule.rule?.enforcement === "hard" && guardRule.rule?.tool_guards?.length === 1,
+    guardRule,
+  );
+
+  const guardSession = await tool("create_session", { task: "e2e: gate", project_path: guardDir, agent_id: "harness-a" });
+  const gsid = guardSession.session_id;
+  const gateArgs = { project_path: guardDir, agent_id: "harness-a", session_id: gsid };
+
+  const denied = await tool("check_tool_call", { ...gateArgs, tool_name: "Bash", tool_input: { command: "rm -rf /tmp/x" } });
+  check(
+    "check_tool_call denies a matching tool_guard",
+    denied.report?.allowed === false && denied.report?.denials?.some((d) => d.source === "tool_guard"),
+    denied,
+  );
+  check(
+    "check_tool_call surfaces a denial_reason for hook feedback",
+    typeof denied.denial_reason === "string" && denied.denial_reason.includes("recursive force delete"),
+    denied,
+  );
+
+  const allowedCall = await tool("check_tool_call", { ...gateArgs, tool_name: "Bash", tool_input: { command: "echo hi" } });
+  check(
+    "check_tool_call allows a non-matching command and lists the enforced hard rule",
+    allowedCall.report?.allowed === true && allowedCall.report?.enforced_rules?.includes("no-rm-rf"),
+    allowedCall,
+  );
+
+  const otherTool = await tool("check_tool_call", { ...gateArgs, tool_name: "Read", tool_input: { file_path: "x" } });
+  check("check_tool_call tool glob narrows to Bash (Read allowed)", otherTool.report?.allowed === true, otherTool);
+
+  const gateCtx = await tool("get_session_context", { session_id: gsid });
+  check(
+    "gate marks the mediated hard rule Enforced in session assurance",
+    gateCtx.session?.assurance?.some((a) => a.rule_id === "no-rm-rf" && a.achieved === "enforced"),
+    gateCtx,
+  );
+  const gateChain = await tool("verify_evidence", { session_id: gsid });
+  check("evidence chain valid after gate calls", gateChain.valid === true, gateChain);
+
+  // Repo gate: a hard rule whose code_check FAILS denies every tool until the repo is fixed.
+  const repoDir = join(root, "gate-repo");
+  mkdirSync(join(repoDir, ".agent-control", "rules"), { recursive: true });
+  writeFileSync(join(repoDir, ".editorconfig"), "[*]\nindent_style = space\n");
+  await tool("save_rule", {
+    id: "must-use-tabs", title: "Indent with tabs", content: "Tabs required.",
+    agent_id: "harness-a", kind: "constraint", scope: "project", project_path: repoDir,
+    enforcement: "hard",
+    code_checks: [{ file: ".editorconfig", key: "indent_style", expect: "tab" }],
+  });
+  const repoDenied = await tool("check_tool_call", { project_path: repoDir, tool_name: "Bash", tool_input: { command: "echo hi" }, agent_id: "harness-a" });
+  check(
+    "check_tool_call repo gate denies while a hard code_check fails",
+    repoDenied.report?.allowed === false && repoDenied.report?.denials?.some((d) => d.source === "repo_gate"),
+    repoDenied,
+  );
+  writeFileSync(join(repoDir, ".editorconfig"), "[*]\nindent_style = tab\n");
+  const repoAllowed = await tool("check_tool_call", { project_path: repoDir, tool_name: "Bash", tool_input: { command: "echo hi" }, agent_id: "harness-a" });
+  check(
+    "check_tool_call repo gate allows once the hard check passes",
+    repoAllowed.report?.allowed === true && repoAllowed.report?.enforced_rules?.includes("must-use-tabs"),
+    repoAllowed,
+  );
+
+  // No enabled hard rules -> fail-open (allowed, nothing to enforce).
+  const openDir = join(root, "gate-open");
+  mkdirSync(join(openDir, ".agent-control", "rules"), { recursive: true });
+  const openCall = await tool("check_tool_call", { project_path: openDir, tool_name: "Bash", tool_input: { command: "rm -rf /" }, agent_id: "harness-a" });
+  check(
+    "check_tool_call allows when no hard rules exist",
+    openCall.report?.allowed === true && openCall.report?.hard_rules_checked === 0,
+    openCall,
+  );
+  check(
+    "check_tool_call rejects an empty project_path",
+    await toolRejects("check_tool_call", { project_path: "  ", tool_name: "Bash", agent_id: "a" }),
+  );
+
+  // ---- Layer 2: hooks registration (register_hooks / detect_hooks / revoke_hooks) ----
+  const hooksDir = join(root, "hooks-project");
+  mkdirSync(join(hooksDir, ".agent-control", "rules"), { recursive: true });
+  mkdirSync(join(hooksDir, ".claude"), { recursive: true });
+  const claudeSettings = join(hooksDir, ".claude", "settings.json");
+  writeFileSync(claudeSettings, JSON.stringify({
+    model: "opus",
+    hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo user" }] }] },
+  }));
+  const hookCmd = 'node "C:/throwaway/agent-control-hook.mjs"';
+  const hookTargets = ["claude", "codebuddy", "workbuddy", "qoder"];
+  const registered = await tool("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });
+  check(
+    "register_hooks writes all four harness settings",
+    registered.report?.targets?.length === 4 && registered.command === hookCmd,
+    registered,
+  );
+  const claudeJson = JSON.parse(readFileSync(claudeSettings, "utf8"));
+  check(
+    "register_hooks preserves other config and the user's hook",
+    claudeJson.model === "opus" &&
+      claudeJson.hooks.PreToolUse.some((g) => g.hooks?.[0]?.command === "echo user") &&
+      claudeJson.hooks.PreToolUse.some((g) => g.hooks?.[0]?.command?.includes("agent-control-hook.mjs")) &&
+      Array.isArray(claudeJson.hooks.SessionStart),
+    claudeJson,
+  );
+  check(
+    "register_hooks creates codebuddy + workbuddy + qoder settings",
+    existsSync(join(hooksDir, ".codebuddy", "settings.json")) &&
+      existsSync(join(hooksDir, ".workbuddy", "settings.json")) &&
+      existsSync(join(hooksDir, ".qoder", "settings.json")),
+  );
+
+  const detected = await tool("detect_hooks", { project_path: hooksDir });
+  check(
+    "detect_hooks reports all four registered",
+    detected.harnesses?.length === 4 && detected.harnesses.every((h) => h.registered),
+    detected,
+  );
+
+  const reregistered = await tool("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });
+  check(
+    "register_hooks re-run is idempotent (all unchanged)",
+    reregistered.report?.targets?.every((t) => t.action === "unchanged"),
+    reregistered,
+  );
+
+  await tool("revoke_hooks", { project_path: hooksDir, targets: hookTargets });
+  const claudeAfter = JSON.parse(readFileSync(claudeSettings, "utf8"));
+  check(
+    "revoke_hooks keeps the user's config and hook, removes ours",
+    claudeAfter.model === "opus" &&
+      claudeAfter.hooks.PreToolUse.length === 1 &&
+      claudeAfter.hooks.PreToolUse[0].hooks[0].command === "echo user" &&
+      claudeAfter.hooks.SessionStart === undefined,
+    claudeAfter,
+  );
+  check(
+    "revoke_hooks deletes settings that held only our hook",
+    !existsSync(join(hooksDir, ".codebuddy", "settings.json")) &&
+      !existsSync(join(hooksDir, ".workbuddy", "settings.json")) &&
+      !existsSync(join(hooksDir, ".qoder", "settings.json")),
+  );
+  const detectedAfter = await tool("detect_hooks", { project_path: hooksDir });
+  check(
+    "detect_hooks reports none registered after revoke",
+    detectedAfter.harnesses?.every((h) => !h.registered),
+    detectedAfter,
+  );
+  check(
+    "register_hooks rejects an unknown target",
+    await toolRejects("register_hooks", { project_path: hooksDir, targets: ["bogus"], command: hookCmd }),
+  );
+  check(
+    "register_hooks rejects an empty project_path",
+    await toolRejects("register_hooks", { project_path: "  ", command: hookCmd }),
   );
 
   const resources = await rpc("resources/list", {});

@@ -1,5 +1,7 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, StyledExt, h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::collapsible::Collapsible;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -27,6 +29,37 @@ pub fn section_label(cx: &App, text: impl Into<SharedString>) -> Div {
                 .bg(cx.theme().primary),
         )
         .child(div().text_sm().font_semibold().child(text.into()))
+}
+
+/// A controlled disclosure section: a ghost trigger button (chevron + label) that the caller wires
+/// to toggle state, wrapping a collapsible content panel with a spring reveal. Keeps verbose help
+/// text out of the primary view while leaving the trigger keyboard- and UIA-operable.
+pub fn disclosure(
+    key: &str,
+    label: impl Into<SharedString>,
+    open: bool,
+    content: impl IntoElement,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Collapsible {
+    let label = label.into();
+    let trigger = Button::new(format!("disclosure-{key}"))
+        .ghost()
+        .small()
+        .icon(Icon::new(if open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        }))
+        .label(label.clone())
+        .accessibility_label(label)
+        .on_click(on_toggle);
+    // No motion_id: gpui's MotionReveal keeps closed content mounted AND prepainted, which leaks
+    // it into the accessibility tree. Unmounting when closed keeps screen readers on the summary.
+    Collapsible::new()
+        .open(open)
+        .w_full()
+        .content(div().w_full().child(content))
+        .child(trigger)
 }
 
 /// Centered empty-state placeholder with icon, title and description.

@@ -108,6 +108,13 @@ impl DataLayout {
         Self::project_config_dir(project_path).join("rules")
     }
 
+    /// Project-local, git-ignored environment notes (this user × this project × this machine). Kept
+    /// outside `rules/` so machine-specific facts are never committed alongside the shared contracts;
+    /// a `.gitignore` inside it ignores everything but itself. Delivered only via the MCP/hook briefing.
+    pub fn project_environment_dir(project_path: &Path) -> PathBuf {
+        Self::project_config_dir(project_path).join("local")
+    }
+
     /// Template rule files shipped with the scaffold. Kept outside `rules/` so they are never
     /// loaded as binding contracts; copy one into `rules/` to activate it.
     pub fn project_examples_dir(project_path: &Path) -> PathBuf {
@@ -119,6 +126,16 @@ impl DataLayout {
         Self::project_config_dir(project_path).join(SCAFFOLD_MARKER)
     }
 
+    /// Project-local continuity brief written by `export_handoff`. The managed block in AGENTS.md
+    /// points here so any harness inherits the latest handoff by reading a file, without an MCP call.
+    pub fn project_handoff_dir(project_path: &Path) -> PathBuf {
+        Self::project_config_dir(project_path).join("handoff")
+    }
+
+    pub fn project_handoff_latest(project_path: &Path) -> PathBuf {
+        Self::project_handoff_dir(project_path).join("latest.md")
+    }
+
     /// Native harness entry points the binding set is compiled into (managed-block targets).
     pub fn project_agents_md(project_path: &Path) -> PathBuf {
         project_path.join("AGENTS.md")
@@ -126,6 +143,11 @@ impl DataLayout {
 
     pub fn project_claude_md(project_path: &Path) -> PathBuf {
         project_path.join("CLAUDE.md")
+    }
+
+    /// Gemini CLI reads `GEMINI.md` (not `AGENTS.md`); opt-in export target.
+    pub fn project_gemini_md(project_path: &Path) -> PathBuf {
+        project_path.join("GEMINI.md")
     }
 
     /// Dedicated Cursor rule file (frontmatter + managed block).
@@ -141,5 +163,44 @@ impl DataLayout {
     pub fn claude_user_md() -> Result<PathBuf> {
         let home = dirs::home_dir().context("cannot determine home directory")?;
         Ok(home.join(".claude").join("CLAUDE.md"))
+    }
+
+    /// Project-level harness `settings.json` files the Agent Control hook registers into. These are
+    /// the shared (committed) config, not the device-local `settings.local.json` variants.
+    pub fn project_claude_settings(project_path: &Path) -> PathBuf {
+        project_path.join(".claude").join("settings.json")
+    }
+
+    pub fn project_codebuddy_settings(project_path: &Path) -> PathBuf {
+        project_path.join(".codebuddy").join("settings.json")
+    }
+
+    pub fn project_workbuddy_settings(project_path: &Path) -> PathBuf {
+        project_path.join(".workbuddy").join("settings.json")
+    }
+
+    pub fn project_qoder_settings(project_path: &Path) -> PathBuf {
+        project_path.join(".qoder").join("settings.json")
+    }
+
+    /// User-global harness config dirs, used to detect whether a harness is installed on this machine.
+    pub fn claude_user_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".claude"))
+    }
+
+    pub fn codebuddy_user_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".codebuddy"))
+    }
+
+    pub fn workbuddy_user_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".workbuddy"))
+    }
+
+    pub fn qoder_user_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        Ok(home.join(".qoder-cn"))
     }
 }

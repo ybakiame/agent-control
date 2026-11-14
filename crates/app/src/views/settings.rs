@@ -1,4 +1,3 @@
-use agent_control_core::model::AgentProtocol;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Selectable, Sizable, StyledExt, h_flex, v_flex};
@@ -45,11 +44,6 @@ impl Console {
         };
 
         let agent_rows = self.agents.iter().map(|agent| {
-            let protocol = match agent.protocol {
-                Some(AgentProtocol::Acp) => Tag::primary().child("ACP"),
-                Some(AgentProtocol::Mcp) => Tag::info().child("MCP"),
-                None => Tag::secondary().child("—"),
-            };
             let command = if agent.args.is_empty() {
                 agent.command.clone()
             } else {
@@ -67,7 +61,6 @@ impl Console {
                         .gap_2()
                         .items_center()
                         .child(div().font_bold().text_sm().child(agent.name.clone()))
-                        .child(protocol)
                         .child(div().text_xs().text_color(muted).child(agent.id.clone())),
                 )
                 .child(div().text_xs().text_color(muted).child(command))

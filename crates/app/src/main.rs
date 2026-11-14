@@ -8,7 +8,6 @@ mod views;
 
 use std::sync::Arc;
 
-use agent_control_acp::HarnessManager;
 use agent_control_core::Store;
 use gpui_kit::assets::Assets;
 use gpui_kit::component::{Theme, ThemeMode, TitleBar};
@@ -27,8 +26,12 @@ fn main() {
         }
     };
     let _log_guard = init_logging(&store.layout, "app.log");
-    let manager = match HarnessManager::new(store.clone()) {
-        Ok(m) => Arc::new(m),
+    // Hosts the in-process MCP HTTP fallback when no sibling daemon binary exists (dev runs).
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => Arc::new(rt),
         Err(e) => {
             eprintln!("failed to create tokio runtime: {e}");
             std::process::exit(1);
@@ -48,9 +51,9 @@ fn main() {
             ..TitleBar::window_options()
         };
         let store = store.clone();
-        let manager = manager.clone();
+        let runtime = runtime.clone();
         gpui_kit::open_window(options, cx, move |window, cx| {
-            cx.new(|cx| Console::new(store, manager, window, cx))
+            cx.new(|cx| Console::new(store, runtime, window, cx))
         })
         .expect("failed to open window");
     });

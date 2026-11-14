@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use agent_control_core::model::{
     AppliesTo, CodeCheck, Decision, EvidenceKind, QueryContext, Rule, RuleKind, Scope,
-    SessionStatus, SourceKind, SuggestionEdits, SuggestionStatus,
+    SessionStatus, SourceKind, SuggestionEdits, SuggestionStatus, WorkItem, WorkItemStatus,
 };
-use agent_control_core::{RuleEngine, Store};
+use agent_control_core::{ExportTarget, RuleEngine, Store};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -29,6 +29,7 @@ fn make_rule(id: &str, scope: Scope, priority: i32, topic: Option<&str>) -> Rule
         tags: vec![],
         conflicts_with: vec![],
         code_checks: vec![],
+        tool_guards: vec![],
         enabled: true,
         enforcement: Default::default(),
         checksum: String::new(),
@@ -215,6 +216,80 @@ fn handoff_roundtrip_preserves_constraints() {
         .unwrap();
     assert!(!bad.fully_compliant);
     assert_eq!(bad.missing.len(), 1);
+}
+
+#[test]
+fn work_state_roundtrip_and_handoff_carry() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let session = store
+        .create_session("work state", project.path(), "harness-a", vec![])
+        .unwrap();
+
+    let items = vec![
+        WorkItem {
+            title: "done thing".into(),
+            status: WorkItemStatus::Done,
+        },
+        WorkItem {
+            title: "doing thing".into(),
+            status: WorkItemStatus::Doing,
+        },
+        WorkItem {
+            title: "todo thing".into(),
+            status: WorkItemStatus::Todo,
+        },
+    ];
+    store
+        .set_session_work_state(session.id, "the goal".into(), items.clone())
+        .unwrap();
+    let loaded = store.get_session(session.id).unwrap().unwrap();
+    assert_eq!(loaded.goal, "the goal");
+    assert_eq!(loaded.work_items.len(), 3);
+    assert_eq!(loaded.work_items[0].status, WorkItemStatus::Done);
+
+    let bundle = store
+        .export_handoff(session.id, "harness-b", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(bundle.goal, "the goal");
+    assert_eq!(bundle.work_items.len(), 3);
+    let latest =
+        std::fs::read_to_string(project.path().join(".agent-control/handoff/latest.md")).unwrap();
+    assert!(latest.contains("## Goal"), "{latest}");
+    assert!(latest.contains("the goal"), "{latest}");
+    assert!(latest.contains("**doing**: doing thing"), "{latest}");
+
+    let resumed = store.import_handoff(&bundle, "harness-b").unwrap();
+    assert_eq!(resumed.goal, "the goal");
+    assert_eq!(resumed.work_items.len(), 3);
+    assert_eq!(resumed.work_items[1].status, WorkItemStatus::Doing);
+}
+
+#[test]
+fn delete_session_cascades_evidence_and_provenance() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let session = store
+        .create_session("to delete", project.path(), "tester", vec![])
+        .unwrap();
+    store
+        .record_evidence(
+            session.id,
+            EvidenceKind::ToolCall,
+            "tester",
+            serde_json::json!({"tool": "x"}),
+        )
+        .unwrap();
+    let provenance_id = session.constraint_snapshot.provenance_id;
+    assert!(!store.get_evidence(session.id).unwrap().is_empty());
+    assert!(store.get_provenance(provenance_id).unwrap().is_some());
+
+    store.delete_session(session.id).unwrap();
+    assert!(store.get_session(session.id).unwrap().is_none());
+    assert!(store.get_evidence(session.id).unwrap().is_empty());
+    assert!(store.get_provenance(provenance_id).unwrap().is_none());
 }
 
 #[test]
@@ -813,10 +888,10 @@ fn user_suggestion_submit_approve_writes_user_rule() {
     let draft = agent_control_core::store::new_suggestion(
         std::path::Path::new(""),
         "claude-code",
-        "wsl-env",
-        "Agents run inside WSL",
-        "Harnesses run in WSL on Windows; Windows-native tools are reachable via interop.",
-        RuleKind::Constraint,
+        "prefer-tabs",
+        "Prefer tabs over spaces",
+        "I prefer tabs for indentation across all my projects; this is a portable personal preference.",
+        RuleKind::Preference,
         Scope::User,
     );
     let submitted = store.submit_suggestion(draft).unwrap();
@@ -835,7 +910,7 @@ fn user_suggestion_submit_approve_writes_user_rule() {
             .load_rules(None)
             .unwrap()
             .iter()
-            .any(|r| r.id == "wsl-env" && r.scope == Scope::User)
+            .any(|r| r.id == "prefer-tabs" && r.scope == Scope::User)
     );
     // A user-scope suggestion is global: a project filter must not return it.
     assert!(
@@ -847,6 +922,157 @@ fn user_suggestion_submit_approve_writes_user_rule() {
     let all = store.list_suggestions(None, None).unwrap();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].scope, Scope::User);
+}
+
+#[test]
+fn environment_suggestion_submit_approve_writes_local_rule() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    // WSL is a machine/project fact, NOT a portable preference: it belongs in environment scope.
+    let draft = agent_control_core::store::new_suggestion(
+        project.path(),
+        "claude-code",
+        "wsl-env",
+        "Agents run inside WSL",
+        "Harnesses run in WSL on Windows; Windows-native tools are reachable via interop.",
+        RuleKind::Constraint,
+        Scope::Environment,
+    );
+    let submitted = store.submit_suggestion(draft).unwrap();
+    assert_eq!(submitted.scope, Scope::Environment);
+    assert!(!submitted.project_path.as_os_str().is_empty());
+    // Environment notes are project-local: never loaded without a project path.
+    assert!(store.load_rules(None).unwrap().is_empty());
+
+    let (reviewed, saved, path) = store
+        .approve_suggestion(submitted.id, SuggestionEdits::default(), None)
+        .unwrap();
+    assert_eq!(reviewed.status, SuggestionStatus::Approved);
+    assert_eq!(saved.scope, Scope::Environment);
+    assert!(
+        path.starts_with(agent_control_core::DataLayout::project_environment_dir(
+            project.path()
+        ))
+    );
+    assert!(
+        store
+            .load_rules(Some(project.path()))
+            .unwrap()
+            .iter()
+            .any(|r| r.id == "wsl-env" && r.scope == Scope::Environment)
+    );
+    // An environment suggestion is project-bound: a project filter returns it.
+    let filtered = store.list_suggestions(Some(project.path()), None).unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].scope, Scope::Environment);
+}
+
+#[test]
+fn environment_rule_is_non_competitive_context() {
+    // An environment note sharing a topic with a project contract must NOT compete: both apply.
+    let contract = make_rule("build-contract", Scope::Project, 200, Some("build"));
+    let env = make_rule("wsl-build", Scope::Environment, 1, Some("build"));
+    let res = RuleEngine::resolve(&[contract, env], &ctx());
+    let ids: Vec<_> = res.applied.iter().map(|m| m.rule.id.as_str()).collect();
+    assert!(ids.contains(&"build-contract"), "{ids:?}");
+    assert!(ids.contains(&"wsl-build"), "{ids:?}");
+    assert!(res.applied.iter().all(|m| m.decision == Decision::Applied));
+    // Two environment notes on the same topic also coexist (descriptive context, no supersession).
+    let env2 = make_rule("wsl-tools", Scope::Environment, 1, Some("build"));
+    let res2 = RuleEngine::resolve(
+        &[
+            make_rule("wsl-build", Scope::Environment, 1, Some("build")),
+            env2,
+        ],
+        &ctx(),
+    );
+    assert_eq!(res2.applied.len(), 2);
+    assert!(
+        res2.trace
+            .iter()
+            .all(|m| m.decision != Decision::Superseded)
+    );
+}
+
+#[test]
+fn environment_rule_load_save_toggle_delete_and_gitignore() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let env = make_rule("wsl-env", Scope::Environment, 100, None);
+    let path = store.save_rule(&env, Some(project.path())).unwrap();
+    let env_dir = agent_control_core::DataLayout::project_environment_dir(project.path());
+    assert!(path.starts_with(&env_dir));
+    // Saving creates the git-ignored local dir: everything ignored but the .gitignore itself.
+    let gitignore = std::fs::read_to_string(env_dir.join(".gitignore")).unwrap();
+    assert!(gitignore.contains("*"));
+    assert!(gitignore.contains("!.gitignore"));
+
+    // Loaded only with a project path, tagged Environment.
+    assert!(store.load_rules(None).unwrap().is_empty());
+    let loaded = store.load_rules(Some(project.path())).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].scope, Scope::Environment);
+
+    // Toggle and delete operate on the local dir.
+    let toggled = store
+        .set_rule_enabled("wsl-env", Scope::Environment, Some(project.path()), false)
+        .unwrap();
+    assert!(!toggled.enabled);
+    assert!(
+        store
+            .delete_rule("wsl-env", Scope::Environment, Some(project.path()))
+            .unwrap()
+    );
+    assert!(store.load_rules(Some(project.path())).unwrap().is_empty());
+}
+
+#[test]
+fn environment_excluded_from_native_export() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    store
+        .save_rule(
+            &make_rule("proj-contract", Scope::Project, 100, None),
+            Some(project.path()),
+        )
+        .unwrap();
+    let mut env = make_rule("wsl-secret-env", Scope::Environment, 100, None);
+    env.content = "MACHINE-ONLY-FACT-WSL".into();
+    store.save_rule(&env, Some(project.path())).unwrap();
+
+    let report = store
+        .export_native(project.path(), &[ExportTarget::Agents], false)
+        .unwrap();
+    // Environment rules are never counted as exported project/user rules.
+    assert_eq!(report.project_rules, 1);
+    assert_eq!(report.user_rules, 0);
+    // The committed pointer block must not inline machine-specific environment content.
+    let agents = std::fs::read_to_string(project.path().join("AGENTS.md")).unwrap();
+    assert!(!agents.contains("MACHINE-ONLY-FACT-WSL"), "{agents}");
+}
+
+#[test]
+fn scaffold_creates_environment_dir_and_example() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    store.init_project_contracts(project.path()).unwrap();
+    let env_dir = agent_control_core::DataLayout::project_environment_dir(project.path());
+    assert!(env_dir.join(".gitignore").exists());
+    assert!(
+        agent_control_core::DataLayout::project_examples_dir(project.path())
+            .join("environment-example.md")
+            .exists()
+    );
+    // The example is NOT binding: it lives in examples/, not local/ or rules/.
+    assert!(store.load_rules(Some(project.path())).unwrap().is_empty());
 }
 
 #[test]
@@ -949,7 +1175,7 @@ fn portable_env_flag_routes_default_layout_away_from_global() {
 }
 
 #[test]
-fn export_native_injects_managed_block_preserving_prose() {
+fn export_native_injects_pointer_block_preserving_prose() {
     use agent_control_core::export::{BLOCK_BEGIN, BLOCK_END, CURSOR_FRONTMATTER};
 
     let root = tempfile::tempdir().unwrap();
@@ -970,28 +1196,58 @@ fn export_native_injects_managed_block_preserving_prose() {
     disabled.enabled = false;
     store.save_rule(&disabled, Some(project.path())).unwrap();
 
-    let report = store.export_native(project.path(), false).unwrap();
-    assert_eq!(report.project_rules, 1, "disabled rules are not exported");
+    let report = store
+        .export_native(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
+    assert_eq!(report.project_rules, 1, "disabled rules are not counted");
     assert_eq!(report.user_rules, 0);
-    assert_eq!(report.targets.len(), 3, "AGENTS.md + CLAUDE.md + cursor");
+    assert_eq!(report.targets.len(), 4, "AGENTS + CLAUDE + GEMINI + cursor");
 
+    // The block is a pointer: it names the rules dir but copies no rule text.
     let agents_text = std::fs::read_to_string(&agents).unwrap();
     assert!(agents_text.starts_with("# My repo\n\nHand-written guidance. Keep me.\n"));
     assert!(agents_text.contains(BLOCK_BEGIN) && agents_text.contains(BLOCK_END));
-    assert!(agents_text.contains("contract-1"));
+    assert!(agents_text.contains(".agent-control/rules/"));
+    assert!(
+        !agents_text.contains("contract-1"),
+        "no rule text is inlined"
+    );
     assert!(!agents_text.contains("off-rule"));
 
     let cursor = project.path().join(".cursor/rules/agent-control.mdc");
     let cursor_text = std::fs::read_to_string(&cursor).unwrap();
     assert!(cursor_text.starts_with(CURSOR_FRONTMATTER));
-    assert!(cursor_text.contains("contract-1"));
+    assert!(cursor_text.contains(".agent-control/rules/"));
 
     let claude = std::fs::read_to_string(project.path().join("CLAUDE.md")).unwrap();
-    assert!(claude.contains(BLOCK_BEGIN) && claude.contains("contract-1"));
+    assert!(claude.contains(BLOCK_BEGIN) && claude.contains(".agent-control/rules/"));
+    let gemini = std::fs::read_to_string(project.path().join("GEMINI.md")).unwrap();
+    assert!(gemini.contains(BLOCK_BEGIN) && gemini.contains(".agent-control/rules/"));
 }
 
 #[test]
-fn export_native_reexport_unchanged_then_updated() {
+fn export_native_default_targets_agents_only() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let report = store
+        .export_native(project.path(), &ExportTarget::default_targets(), false)
+        .unwrap();
+    assert_eq!(report.targets.len(), 1, "default writes AGENTS.md only");
+    assert!(project.path().join("AGENTS.md").exists());
+    assert!(!project.path().join("CLAUDE.md").exists());
+    assert!(!project.path().join("GEMINI.md").exists());
+    assert!(
+        !project
+            .path()
+            .join(".cursor/rules/agent-control.mdc")
+            .exists()
+    );
+}
+
+#[test]
+fn export_native_reexport_idempotent_even_after_rule_edit() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -1003,16 +1259,22 @@ fn export_native_reexport_unchanged_then_updated() {
         )
         .unwrap();
 
-    let first = store.export_native(project.path(), false).unwrap();
+    let targets = ExportTarget::default_targets();
+    let first = store
+        .export_native(project.path(), &targets, false)
+        .unwrap();
     assert!(first.targets.iter().all(|t| t.action == "created"));
 
-    let second = store.export_native(project.path(), false).unwrap();
+    let second = store
+        .export_native(project.path(), &targets, false)
+        .unwrap();
     assert!(
         second.targets.iter().all(|t| t.action == "unchanged"),
         "idempotent re-export must not rewrite files"
     );
 
-    // Change the rule content and add user prose outside the block, then re-export.
+    // Edit the rule and add user prose outside the block. The pointer body is static, so re-export
+    // stays unchanged (a rule edit never dirties the export) and the hand-written prose survives.
     let mut updated = make_rule("r1", Scope::Project, 100, None);
     updated.content = "revised contract body".into();
     store.save_rule(&updated, Some(project.path())).unwrap();
@@ -1021,17 +1283,26 @@ fn export_native_reexport_unchanged_then_updated() {
     text.push_str("\n## User notes\n\nadded by hand\n");
     std::fs::write(&agents, &text).unwrap();
 
-    let third = store.export_native(project.path(), false).unwrap();
+    let third = store
+        .export_native(project.path(), &targets, false)
+        .unwrap();
     let agents_outcome = third.targets.iter().find(|t| t.path == agents).unwrap();
-    assert_eq!(agents_outcome.action, "updated");
+    assert_eq!(
+        agents_outcome.action, "unchanged",
+        "static pointer never varies"
+    );
     let out = std::fs::read_to_string(&agents).unwrap();
-    assert!(out.contains("revised contract body"));
     assert!(out.contains("## User notes\n\nadded by hand"));
-    assert!(!out.contains("content of r1"));
+    assert!(
+        !out.contains("revised contract body"),
+        "rule text is not inlined"
+    );
 }
 
 #[test]
-fn export_drift_flags_stale_targets_and_clears_on_reexport() {
+fn export_drift_flags_legacy_format_and_clears_on_reexport() {
+    use agent_control_core::export::{BLOCK_BEGIN, BLOCK_END, BLOCK_FORMAT};
+
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -1044,34 +1315,115 @@ fn export_drift_flags_stale_targets_and_clears_on_reexport() {
         .unwrap();
 
     // Never exported: targets do not exist, so nothing is "stale" yet.
-    let fresh = store.export_drift(project.path(), false).unwrap();
+    let fresh = store
+        .export_drift(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
     assert!(!fresh.stale);
-    assert_eq!(fresh.targets.len(), 3);
+    assert_eq!(fresh.targets.len(), 4);
     assert!(fresh.targets.iter().all(|t| !t.exists));
 
-    store.export_native(project.path(), false).unwrap();
-    let synced = store.export_drift(project.path(), false).unwrap();
+    store
+        .export_native(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
+    let synced = store
+        .export_drift(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
     assert!(!synced.stale, "freshly exported files are in sync");
     assert!(synced.targets.iter().all(|t| t.exists));
     assert!(
         synced
             .targets
             .iter()
-            .all(|t| t.exported_hash.as_deref() == Some(t.current_hash.as_str()))
+            .all(|t| t.exported_format == Some(t.current_format))
     );
 
-    // Edit the rule without re-exporting: the managed blocks are now stale.
+    // Editing a rule does NOT cause drift: the pointer block is static.
     let mut updated = make_rule("r1", Scope::Project, 100, None);
     updated.content = "revised body".into();
     store.save_rule(&updated, Some(project.path())).unwrap();
-    let drifted = store.export_drift(project.path(), false).unwrap();
-    assert!(drifted.stale);
-    assert!(drifted.targets.iter().all(|t| t.stale));
+    let after_edit = store
+        .export_drift(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
+    assert!(
+        !after_edit.stale,
+        "a rule edit never dirties the pointer block"
+    );
 
-    // Re-export clears the drift.
-    store.export_native(project.path(), false).unwrap();
-    let resynced = store.export_drift(project.path(), false).unwrap();
+    // Simulate a legacy v1 full-text block (ruleset hash, no format marker) in AGENTS.md.
+    let agents = project.path().join("AGENTS.md");
+    let legacy = format!(
+        "# Repo\n\n{BLOCK_BEGIN}\n<!-- agent-control:ruleset sha256:deadbeef -->\n## Contracts\n\nold full text\n{BLOCK_END}\n"
+    );
+    std::fs::write(&agents, legacy).unwrap();
+    let drifted = store
+        .export_drift(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
+    assert!(drifted.stale, "legacy format is flagged for migration");
+    let agents_drift = drifted.targets.iter().find(|t| t.path == agents).unwrap();
+    assert!(agents_drift.stale);
+    assert_eq!(agents_drift.exported_format, None);
+    assert_eq!(agents_drift.current_format, BLOCK_FORMAT);
+
+    // Re-export migrates the block and clears the drift.
+    store
+        .export_native(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
+    let resynced = store
+        .export_drift(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
     assert!(!resynced.stale);
+}
+
+#[test]
+fn revoke_native_removes_block_preserves_prose_deletes_stub() {
+    use agent_control_core::export::{BLOCK_BEGIN, BLOCK_END};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    // AGENTS.md and CLAUDE.md carry hand-written prose; GEMINI.md and cursor will be block-only.
+    let agents = project.path().join("AGENTS.md");
+    let claude = project.path().join("CLAUDE.md");
+    std::fs::write(&agents, "# My repo\n\nKeep this prose.\n").unwrap();
+    std::fs::write(&claude, "# Claude notes\n\nKeep me too.\n").unwrap();
+
+    store
+        .export_native(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
+    let gemini = project.path().join("GEMINI.md");
+    let cursor = project.path().join(".cursor/rules/agent-control.mdc");
+    assert!(gemini.exists() && cursor.exists());
+
+    let report = store
+        .revoke_native(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
+    let action = |p: &std::path::Path| {
+        report
+            .targets
+            .iter()
+            .find(|t| t.path == p)
+            .map(|t| t.action.clone())
+            .unwrap()
+    };
+    assert_eq!(action(&agents), "removed");
+    assert_eq!(action(&claude), "removed");
+    assert_eq!(action(&gemini), "deleted");
+    assert_eq!(action(&cursor), "deleted");
+
+    let agents_text = std::fs::read_to_string(&agents).unwrap();
+    assert!(agents_text.contains("Keep this prose."));
+    assert!(!agents_text.contains(BLOCK_BEGIN) && !agents_text.contains(BLOCK_END));
+    let claude_text = std::fs::read_to_string(&claude).unwrap();
+    assert!(claude_text.contains("Keep me too."));
+    assert!(!gemini.exists(), "block-only file is deleted");
+    assert!(!cursor.exists(), "frontmatter+block-only file is deleted");
+
+    // Revoking again is a no-op.
+    let again = store
+        .revoke_native(project.path(), &ExportTarget::ALL, false)
+        .unwrap();
+    assert!(again.targets.iter().all(|t| t.action == "unchanged"));
 }
 
 #[test]
@@ -1199,5 +1551,470 @@ fn handoff_carries_assurance_baseline() {
         resumed.assurance.len(),
         1,
         "source baseline carries across the handoff"
+    );
+}
+
+#[test]
+fn export_handoff_writes_project_latest_md() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store
+        .save_rule(
+            &make_rule("c1", Scope::Project, 100, None),
+            Some(project.path()),
+        )
+        .unwrap();
+    let session = store
+        .create_session("layer 1 continuity", project.path(), "harness-a", vec![])
+        .unwrap();
+    let bundle = store
+        .export_handoff(session.id, "harness-b", serde_json::json!({}))
+        .unwrap();
+
+    let latest = project.path().join(".agent-control/handoff/latest.md");
+    assert!(
+        latest.exists(),
+        "export_handoff must write the project-local continuity brief"
+    );
+    let text = std::fs::read_to_string(&latest).unwrap();
+    assert!(text.contains("layer 1 continuity"), "{text}");
+    assert!(text.contains("harness-a"));
+    assert!(text.contains("c1"));
+    assert!(text.contains(&bundle.evidence_head_hash));
+    // The JSON bundle still lands in the global bundles dir.
+    assert!(
+        root.path()
+            .join("bundles")
+            .join(format!("{}.json", session.id))
+            .exists()
+    );
+}
+
+#[test]
+fn import_handoff_refreshes_latest_md_with_resumed_state() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".editorconfig"),
+        "[*]\nindent_style = space\n",
+    )
+    .unwrap();
+    let mut rule = make_rule("checked", Scope::Project, 100, None);
+    rule.code_checks = vec![CodeCheck {
+        file: ".editorconfig".into(),
+        key: "indent_style".into(),
+        expect: "space".into(),
+        description: None,
+    }];
+    store.save_rule(&rule, Some(project.path())).unwrap();
+
+    let session = store
+        .create_session("resume brief", project.path(), "harness-a", vec![])
+        .unwrap();
+    store.verify_constraints(session.id, "harness-a").unwrap();
+    let bundle = store
+        .export_handoff(session.id, "harness-b", serde_json::json!({}))
+        .unwrap();
+
+    let latest = project.path().join(".agent-control/handoff/latest.md");
+    let exported = std::fs::read_to_string(&latest).unwrap();
+    assert!(
+        exported.contains("Generated by `export_handoff`"),
+        "{exported}"
+    );
+    assert!(!exported.contains("Resumed under"), "{exported}");
+
+    store.import_handoff(&bundle, "harness-b").unwrap();
+    let resumed = std::fs::read_to_string(&latest).unwrap();
+    assert!(
+        resumed.contains("Refreshed by `import_handoff`"),
+        "{resumed}"
+    );
+    assert!(
+        resumed.contains("**Resumed under**: harness-b"),
+        "{resumed}"
+    );
+    assert!(resumed.contains("harness-a"), "{resumed}");
+    // A carried Verified tier triggers the re-verify warning in the resumed brief.
+    assert!(resumed.contains("SOURCE harness"), "{resumed}");
+    assert!(resumed.contains("verify_constraints"), "{resumed}");
+}
+
+#[test]
+fn export_native_project_block_carries_continuity_guidance() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store
+        .save_rule(
+            &make_rule("c1", Scope::Project, 100, None),
+            Some(project.path()),
+        )
+        .unwrap();
+
+    store
+        .export_native(project.path(), &ExportTarget::default_targets(), false)
+        .unwrap();
+    let agents = std::fs::read_to_string(project.path().join("AGENTS.md")).unwrap();
+    assert!(agents.contains("Continuity"), "{agents}");
+    assert!(agents.contains(".agent-control/handoff/latest.md"));
+    // The pointer block carries the current format, so drift agrees the fresh export is in sync.
+    let drift = store
+        .export_drift(project.path(), &ExportTarget::default_targets(), false)
+        .unwrap();
+    assert!(!drift.stale);
+}
+
+#[test]
+fn tool_guards_roundtrip_through_frontmatter() {
+    use agent_control_core::model::{Enforcement, ToolGuard};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut rule = make_rule("guard-rule", Scope::Project, 100, None);
+    rule.enforcement = Enforcement::Hard;
+    rule.tool_guards = vec![ToolGuard {
+        tool: "Bash".into(),
+        pattern: r"rm\s+-rf".into(),
+        reason: "no destructive rm".into(),
+    }];
+    store.save_rule(&rule, Some(project.path())).unwrap();
+
+    let loaded = store
+        .load_rules(Some(project.path()))
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == "guard-rule")
+        .unwrap();
+    assert_eq!(loaded.enforcement, Enforcement::Hard);
+    assert_eq!(loaded.tool_guards.len(), 1);
+    assert_eq!(loaded.tool_guards[0].tool, "Bash");
+    assert_eq!(loaded.tool_guards[0].pattern, r"rm\s+-rf");
+    assert_eq!(loaded.tool_guards[0].reason, "no destructive rm");
+}
+
+#[test]
+fn check_tool_call_repo_gate_denies_while_hard_check_fails() {
+    use agent_control_core::model::{Enforcement, GateSource};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".editorconfig"),
+        "[*]\nindent_style = space\n",
+    )
+    .unwrap();
+    let mut rule = make_rule("repo-gate", Scope::Project, 100, None);
+    rule.enforcement = Enforcement::Hard;
+    rule.code_checks = vec![CodeCheck {
+        file: ".editorconfig".into(),
+        key: "indent_style".into(),
+        expect: "tab".into(),
+        description: None,
+    }];
+    store.save_rule(&rule, Some(project.path())).unwrap();
+
+    let report = store
+        .check_tool_call(
+            project.path(),
+            "Bash",
+            &serde_json::json!({"command": "ls"}),
+            "tester",
+            None,
+        )
+        .unwrap();
+    assert!(!report.allowed);
+    assert_eq!(report.hard_rules_checked, 1);
+    assert!(report.enforced_rules.is_empty());
+    assert_eq!(report.denials[0].source, GateSource::RepoGate);
+    assert!(report.denial_reason().contains("repo-gate"));
+
+    // Fixing the repo lifts the gate.
+    std::fs::write(
+        project.path().join(".editorconfig"),
+        "[*]\nindent_style = tab\n",
+    )
+    .unwrap();
+    let ok = store
+        .check_tool_call(
+            project.path(),
+            "Bash",
+            &serde_json::json!({"command": "ls"}),
+            "tester",
+            None,
+        )
+        .unwrap();
+    assert!(ok.allowed);
+    assert_eq!(ok.enforced_rules, vec!["repo-gate".to_string()]);
+}
+
+#[test]
+fn check_tool_call_tool_guard_denies_matching_command_only() {
+    use agent_control_core::model::{Enforcement, GateSource, ToolGuard};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut rule = make_rule("no-rm", Scope::Project, 100, None);
+    rule.enforcement = Enforcement::Hard;
+    rule.tool_guards = vec![ToolGuard {
+        tool: "Bash".into(),
+        pattern: r"rm\s+-rf".into(),
+        reason: "destructive rm blocked".into(),
+    }];
+    store.save_rule(&rule, Some(project.path())).unwrap();
+
+    let denied = store
+        .check_tool_call(
+            project.path(),
+            "Bash",
+            &serde_json::json!({"command": "rm -rf /tmp/x"}),
+            "tester",
+            None,
+        )
+        .unwrap();
+    assert!(!denied.allowed);
+    assert_eq!(denied.denials[0].source, GateSource::ToolGuard);
+    assert_eq!(denied.denials[0].reason, "destructive rm blocked");
+
+    // A non-matching command on the same tool is allowed and mediated.
+    let allowed = store
+        .check_tool_call(
+            project.path(),
+            "Bash",
+            &serde_json::json!({"command": "ls -la"}),
+            "tester",
+            None,
+        )
+        .unwrap();
+    assert!(allowed.allowed);
+    assert_eq!(allowed.enforced_rules, vec!["no-rm".to_string()]);
+
+    // A different tool is outside the guard's glob.
+    let write = store
+        .check_tool_call(
+            project.path(),
+            "Write",
+            &serde_json::json!({"file_path": "a.txt", "content": "rm -rf"}),
+            "tester",
+            None,
+        )
+        .unwrap();
+    assert!(write.allowed);
+}
+
+#[test]
+fn check_tool_call_marks_enforced_and_records_evidence() {
+    use agent_control_core::model::{AssuranceTier, Enforcement};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".editorconfig"),
+        "[*]\nindent_style = space\n",
+    )
+    .unwrap();
+    let mut rule = make_rule("hard-checked", Scope::Project, 100, None);
+    rule.enforcement = Enforcement::Hard;
+    rule.code_checks = vec![CodeCheck {
+        file: ".editorconfig".into(),
+        key: "indent_style".into(),
+        expect: "space".into(),
+        description: None,
+    }];
+    store.save_rule(&rule, Some(project.path())).unwrap();
+
+    let session = store
+        .create_session("gate", project.path(), "tester", vec![])
+        .unwrap();
+    let report = store
+        .check_tool_call(
+            project.path(),
+            "Bash",
+            &serde_json::json!({"command": "cargo test"}),
+            "tester",
+            Some(session.id),
+        )
+        .unwrap();
+    assert!(report.allowed);
+    assert_eq!(report.enforced_rules, vec!["hard-checked".to_string()]);
+
+    // The chokepoint produces the Enforced tier (verify_constraints never does).
+    let reloaded = store.get_session(session.id).unwrap().unwrap();
+    let assurance = reloaded
+        .assurance
+        .iter()
+        .find(|a| a.rule_id == "hard-checked")
+        .unwrap();
+    assert_eq!(assurance.declared, Enforcement::Hard);
+    assert_eq!(assurance.achieved, AssuranceTier::Enforced);
+
+    assert!(store.verify_chain(session.id).unwrap().valid);
+    let evidence = store.get_evidence(session.id).unwrap();
+    assert!(evidence.iter().any(|e| e.kind == EvidenceKind::ToolGate));
+}
+
+#[test]
+fn check_tool_call_allows_when_no_enabled_hard_rules() {
+    use agent_control_core::model::Enforcement;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    // An advisory rule and a disabled hard rule: neither gates the call.
+    let advisory = make_rule("soft", Scope::Project, 100, None);
+    let mut disabled = make_rule("disabled-hard", Scope::Project, 100, None);
+    disabled.enforcement = Enforcement::Hard;
+    disabled.enabled = false;
+    store.save_rule(&advisory, Some(project.path())).unwrap();
+    store.save_rule(&disabled, Some(project.path())).unwrap();
+
+    let report = store
+        .check_tool_call(
+            project.path(),
+            "Bash",
+            &serde_json::json!({"command": "rm -rf /"}),
+            "tester",
+            None,
+        )
+        .unwrap();
+    assert!(report.allowed);
+    assert_eq!(report.hard_rules_checked, 0);
+    assert!(report.enforced_rules.is_empty());
+}
+
+#[test]
+fn register_hooks_preserves_config_and_is_idempotent() {
+    use agent_control_core::HookTarget;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let settings = project.path().join(".claude").join("settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings,
+        r#"{"model":"opus","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo user"}]}]}}"#,
+    )
+    .unwrap();
+
+    let cmd = "node \"C:/repo/scripts/agent-control-hook.mjs\"";
+    let report = store
+        .register_hooks(project.path(), &[HookTarget::Claude], cmd)
+        .unwrap();
+    assert_eq!(report.targets[0].action, "updated");
+
+    let raw = std::fs::read_to_string(&settings).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["model"], "opus", "other config preserved");
+    let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 2, "user hook kept beside ours");
+    assert_eq!(pre[0]["hooks"][0]["command"], "echo user");
+    assert!(v["hooks"]["SessionStart"].as_array().unwrap().len() == 1);
+
+    // Re-registering an up-to-date file is a no-op on disk.
+    let again = store
+        .register_hooks(project.path(), &[HookTarget::Claude], cmd)
+        .unwrap();
+    assert_eq!(again.targets[0].action, "unchanged");
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), raw);
+}
+
+#[test]
+fn revoke_hooks_preserves_user_config_and_deletes_stub() {
+    use agent_control_core::HookTarget;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let settings = project.path().join(".claude").join("settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings,
+        r#"{"model":"opus","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo user"}]}]}}"#,
+    )
+    .unwrap();
+    let cmd = "node \"C:/repo/scripts/agent-control-hook.mjs\"";
+    store
+        .register_hooks(project.path(), &[HookTarget::Claude], cmd)
+        .unwrap();
+
+    let report = store
+        .revoke_hooks(project.path(), &[HookTarget::Claude])
+        .unwrap();
+    assert_eq!(report.targets[0].action, "removed");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(v["model"], "opus");
+    let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 1);
+    assert_eq!(pre[0]["hooks"][0]["command"], "echo user");
+    assert!(
+        v["hooks"].get("SessionStart").is_none(),
+        "our-only event pruned"
+    );
+
+    // A settings file that held only our hook is deleted on revoke.
+    let buddy = project.path().join(".codebuddy").join("settings.json");
+    store
+        .register_hooks(project.path(), &[HookTarget::CodeBuddy], cmd)
+        .unwrap();
+    assert!(buddy.exists());
+    let deleted = store
+        .revoke_hooks(project.path(), &[HookTarget::CodeBuddy])
+        .unwrap();
+    assert_eq!(deleted.targets[0].action, "deleted");
+    assert!(!buddy.exists());
+
+    // WorkBuddy is a separate product with its own .workbuddy/settings.json.
+    let work = project.path().join(".workbuddy").join("settings.json");
+    store
+        .register_hooks(project.path(), &[HookTarget::WorkBuddy], cmd)
+        .unwrap();
+    assert!(work.exists());
+    assert!(
+        !buddy.exists(),
+        "registering WorkBuddy must not touch CodeBuddy"
+    );
+    let deleted = store
+        .revoke_hooks(project.path(), &[HookTarget::WorkBuddy])
+        .unwrap();
+    assert_eq!(deleted.targets[0].action, "deleted");
+    assert!(!work.exists());
+}
+
+#[test]
+fn detect_hooks_reports_registration() {
+    use agent_control_core::HookTarget;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let before = store.detect_hooks(project.path()).unwrap();
+    assert_eq!(before.len(), 4);
+    assert!(before.iter().all(|s| !s.registered));
+
+    let cmd = "node \"C:/repo/scripts/agent-control-hook.mjs\"";
+    store
+        .register_hooks(project.path(), &[HookTarget::Qoder], cmd)
+        .unwrap();
+    let after = store.detect_hooks(project.path()).unwrap();
+    let qoder = after
+        .iter()
+        .find(|s| s.target == HookTarget::Qoder)
+        .unwrap();
+    assert!(qoder.registered);
+    assert!(qoder.installed, "project .qoder dir now exists");
+    assert!(
+        after
+            .iter()
+            .filter(|s| s.target != HookTarget::Qoder)
+            .all(|s| !s.registered)
     );
 }

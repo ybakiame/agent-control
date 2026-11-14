@@ -1,20 +1,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use agent_control_acp::{
-    HarnessChannels, HarnessCommand, HarnessConfig, HarnessEvent, HarnessManager, McpEndpoint,
-    PermissionDecision, PermissionOptionInfo, PermissionPolicy,
-};
-use agent_control_core::Store;
 use agent_control_core::model::{
     AgentRegistration, Conflict, Enforcement, EvidenceEntry, Project, ProvenanceRecord, Rule,
     RuleSuggestion, Scope, Session, SuggestionEdits, SuggestionStatus, VerificationReport,
+    WorkItem, WorkItemStatus,
 };
+use agent_control_core::{ExportTarget, HookStatus, HookTarget, Store};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::badge::Badge;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants, DropdownButton};
-use gpui_kit::component::input::{InputState, TextareaState};
+use gpui_kit::component::dialog::{Confirm, DialogClose, DialogFooter};
+use gpui_kit::component::input::{Input, InputState, TextareaState};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tree::{TreeItem, TreeState};
@@ -23,7 +20,6 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -36,24 +32,12 @@ pub enum Nav {
     Projects,
     Preferences,
     Rules,
+    Environment,
     Suggestions,
     Provenance,
     Evidence,
     Sessions,
     Settings,
-}
-
-pub struct ActiveHarness {
-    pub agent_id: String,
-    pub control_session_id: Option<Uuid>,
-    pub command_tx: mpsc::Sender<HarnessCommand>,
-    pub event_rx: mpsc::Receiver<HarnessEvent>,
-}
-
-pub struct PendingPermission {
-    pub tool_title: String,
-    pub options: Vec<PermissionOptionInfo>,
-    pub responder: Option<oneshot::Sender<PermissionDecision>>,
 }
 
 pub struct LogEntry {
@@ -63,7 +47,7 @@ pub struct LogEntry {
 
 pub struct Console {
     pub store: Arc<Store>,
-    pub manager: Arc<HarnessManager>,
+    pub runtime: Arc<tokio::runtime::Runtime>,
     pub nav: Nav,
     pub locale: Locale,
 
@@ -78,8 +62,13 @@ pub struct Console {
     pub selected_project: Option<Uuid>,
     pub project_tree: Entity<TreeState>,
     pub project_stats: std::collections::HashMap<Uuid, (usize, usize)>,
+    pub tree_rule_enabled: std::collections::HashMap<String, bool>,
     pub show_onboarding: bool,
     pub export_stale: bool,
+    pub export_targets: Vec<ExportTarget>,
+    pub hook_targets: Vec<HookTarget>,
+    pub hook_statuses: Vec<HookStatus>,
+    pub open_sections: std::collections::HashSet<String>,
 
     pub selected_rule: Option<usize>,
     pub selected_provenance: Option<usize>,
@@ -97,8 +86,6 @@ pub struct Console {
     pub sugg_note_input: Entity<InputState>,
 
     pub event_log: Vec<LogEntry>,
-    pub active_harness: Option<ActiveHarness>,
-    pub pending_permission: Option<PendingPermission>,
 
     pub mcp_running: bool,
     pub mcp_external: bool,
@@ -118,16 +105,15 @@ pub struct Console {
 
     pub session_task_input: Entity<InputState>,
     pub selected_agent: usize,
-    pub prompt_input: Entity<TextareaState>,
     pub handoff_target_input: Entity<InputState>,
-
-    poll_task: Option<Task<()>>,
+    pub session_goal_input: Entity<TextareaState>,
+    pub session_work_input: Entity<TextareaState>,
 }
 
 impl Console {
     pub fn new(
         store: Arc<Store>,
-        manager: Arc<HarnessManager>,
+        runtime: Arc<tokio::runtime::Runtime>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -148,9 +134,12 @@ impl Console {
         let project_tree = cx.new(|cx| TreeState::new(cx));
         let session_task_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.task")));
-        let prompt_input = cx.new(|cx| TextareaState::new(window, cx).default_value(""));
         let handoff_target_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.handoff")));
+        let session_goal_input =
+            cx.new(|cx| TextareaState::new(window, cx).placeholder(i18n::t(locale, "ph.goal")));
+        let session_work_input = cx
+            .new(|cx| TextareaState::new(window, cx).placeholder(i18n::t(locale, "ph.work_items")));
         let sugg_rule_id_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.rule_id")));
         let sugg_title_input =
@@ -161,7 +150,7 @@ impl Console {
 
         let mut console = Self {
             store,
-            manager,
+            runtime,
             nav: Nav::Dashboard,
             locale,
             rules: vec![],
@@ -174,8 +163,13 @@ impl Console {
             selected_project: None,
             project_tree,
             project_stats: std::collections::HashMap::new(),
+            tree_rule_enabled: std::collections::HashMap::new(),
             show_onboarding: false,
             export_stale: false,
+            export_targets: ExportTarget::default_targets(),
+            hook_targets: HookTarget::ALL.to_vec(),
+            hook_statuses: vec![],
+            open_sections: std::collections::HashSet::new(),
             selected_rule: None,
             selected_provenance: None,
             selected_session: None,
@@ -190,8 +184,6 @@ impl Console {
             sugg_content_input,
             sugg_note_input,
             event_log: vec![],
-            active_harness: None,
-            pending_permission: None,
             mcp_running: false,
             mcp_external: false,
             mcp_shutdown: None,
@@ -207,16 +199,16 @@ impl Console {
             project_rename_input,
             session_task_input,
             selected_agent: 0,
-            prompt_input,
             handoff_target_input,
-            poll_task: None,
+            session_goal_input,
+            session_work_input,
         };
         console.refresh_data(cx);
+        console.load_session_work_inputs(window, cx);
         if let Some(id) = console.current_project {
             console.ensure_project_scaffold(id);
         }
         console.start_mcp_http();
-        console.start_polling(cx);
         console.log(i18n::t(locale, "log.ready"));
         console
     }
@@ -255,6 +247,12 @@ impl Console {
         });
         self.handoff_target_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.handoff"), window, cx)
+        });
+        self.session_goal_input.update(cx, |s, cx| {
+            s.set_placeholder(i18n::t(locale, "ph.goal"), window, cx)
+        });
+        self.session_work_input.update(cx, |s, cx| {
+            s.set_placeholder(i18n::t(locale, "ph.work_items"), window, cx)
         });
         self.sugg_rule_id_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.rule_id"), window, cx)
@@ -317,27 +315,40 @@ impl Console {
         self.refresh_evidence();
         self.rebuild_project_tree(cx);
         self.refresh_export_drift();
+        self.refresh_hook_status();
     }
 
-    /// Recompute whether the selected project's native export is stale relative to its current
-    /// enabled rules. Cached here (refresh/select/export), never at render time. Project-only:
-    /// the console export action does not write user-global files, so include_user=false.
+    /// Recompute whether the selected project's native export is stale (missing or outdated-format
+    /// pointer block) for the currently selected targets. Cached here (refresh/select/export/toggle),
+    /// never at render time. Project-only: the console export action does not write user-global files,
+    /// so include_user=false.
     fn refresh_export_drift(&mut self) {
         self.export_stale = self
             .selected_project
             .and_then(|id| self.projects.iter().find(|p| p.id == id))
             .map(|p| {
                 self.store
-                    .export_drift(&p.path, false)
+                    .export_drift(&p.path, &self.export_targets, false)
                     .map(|r| r.stale)
                     .unwrap_or(false)
             })
             .unwrap_or(false);
     }
 
+    /// Detect which harnesses are installed and whether our hook is registered in the selected
+    /// project's settings. Cached here (refresh/select/register/revoke), never at render time.
+    fn refresh_hook_status(&mut self) {
+        self.hook_statuses = self
+            .selected_project
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .and_then(|p| self.store.detect_hooks(&p.path).ok())
+            .unwrap_or_default();
+    }
+
     fn rebuild_project_tree(&mut self, cx: &mut App) {
         let mut roots = Vec::new();
         let mut stats = std::collections::HashMap::new();
+        let mut rule_enabled = std::collections::HashMap::new();
         for project in &self.projects {
             let is_current = self.current_project == Some(project.id);
             let is_selected = self.selected_project == Some(project.id);
@@ -357,6 +368,7 @@ impl Console {
             stats.insert(project.id, (contracts.len(), session_count));
 
             let contract_leaves = contracts.iter().map(|rule| {
+                rule_enabled.insert(format!("rule:{}:{}", project.id, rule.id), rule.enabled);
                 TreeItem::new(
                     format!("rule:{}:{}", project.id, rule.id),
                     rule.title.clone(),
@@ -385,6 +397,7 @@ impl Console {
             );
         }
         self.project_stats = stats;
+        self.tree_rule_enabled = rule_enabled;
 
         let selected_id = self.selected_project.map(|id| format!("project:{id}"));
         self.project_tree.update(cx, |state, cx| {
@@ -453,11 +466,11 @@ impl Console {
             }
         }
 
-        // 3. Fallback (dev run without a sibling binary): host in-process on the manager runtime.
+        // 3. Fallback (dev run without a sibling binary): host in-process on the app runtime.
         let shutdown = CancellationToken::new();
         let store = self.store.clone();
         let sd = shutdown.clone();
-        self.manager.spawn(async move {
+        self.runtime.spawn(async move {
             if let Err(e) = agent_control_mcp::serve_http(store, &bind, sd).await {
                 tracing::error!(error = %e, "MCP HTTP server failed");
             }
@@ -477,87 +490,6 @@ impl Console {
         self.mcp_running = false;
     }
 
-    fn start_polling(&mut self, cx: &mut Context<Self>) {
-        self.poll_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let _ = this.update(cx, |console, cx| {
-                    let mut changed = false;
-                    let events: Vec<HarnessEvent> = match &mut console.active_harness {
-                        Some(harness) => {
-                            let mut events = Vec::new();
-                            while let Ok(event) = harness.event_rx.try_recv() {
-                                events.push(event);
-                            }
-                            events
-                        }
-                        None => Vec::new(),
-                    };
-                    for event in events {
-                        changed = true;
-                        match event {
-                            HarnessEvent::SessionCreated {
-                                control_session_id,
-                                snapshot_hash,
-                                rule_count,
-                                ..
-                            } => {
-                                if let Some(h) = &mut console.active_harness {
-                                    h.control_session_id = Some(control_session_id);
-                                }
-                                console.log(console.tr(
-                                    "log.session_evt",
-                                    &[
-                                        &control_session_id.to_string(),
-                                        &rule_count.to_string(),
-                                        &format!("{snapshot_hash:.12}"),
-                                    ],
-                                ));
-                                console.refresh_data(cx);
-                            }
-                            HarnessEvent::PermissionRequest {
-                                tool_title,
-                                options,
-                                responder,
-                                ..
-                            } => {
-                                console.log(console.tr("log.perm_requested", &[&tool_title]));
-                                console.pending_permission = Some(PendingPermission {
-                                    tool_title,
-                                    options,
-                                    responder: Some(responder),
-                                });
-                            }
-                            HarnessEvent::Disconnected => {
-                                console.log(console.t("log.disconnected"));
-                            }
-                            other => {
-                                console.log(other.summary());
-                                if matches!(other, HarnessEvent::EvidenceRecorded { .. }) {
-                                    console.refresh_evidence();
-                                }
-                            }
-                        }
-                    }
-                    if changed {
-                        cx.notify();
-                    }
-                });
-                cx.background_executor()
-                    .timer(Duration::from_millis(120))
-                    .await;
-            }
-        }));
-    }
-
-    pub fn decide_permission(&mut self, decision: PermissionDecision) {
-        if let Some(mut pending) = self.pending_permission.take() {
-            if let Some(responder) = pending.responder.take() {
-                let _ = responder.send(decision);
-            }
-            self.log(self.tr("log.perm_decision", &[&format!("{decision:?}")]));
-        }
-    }
-
     pub fn save_rule_from_inputs(&mut self, cx: &mut Context<Self>) -> bool {
         let id = self.rule_id_input.read(cx).value().trim().to_string();
         let title = self.rule_title_input.read(cx).value().trim().to_string();
@@ -568,7 +500,7 @@ impl Console {
             return false;
         }
         let scope = self.rules_tab;
-        let project_path = if scope == Scope::Project {
+        let project_path = if matches!(scope, Scope::Project | Scope::Environment) {
             match self.current_project_path() {
                 Some(path) => Some(path),
                 None => {
@@ -588,7 +520,12 @@ impl Console {
         rule.content = content.to_string();
         rule.topic = if topic.is_empty() { None } else { Some(topic) };
         rule.scope = scope;
-        rule.enforcement = self.rule_enforcement;
+        // Environment notes are descriptive context, never an enforced contract.
+        rule.enforcement = if scope == Scope::Environment {
+            Enforcement::Advisory
+        } else {
+            self.rule_enforcement
+        };
         rule.version += 1;
         match self.store.save_rule(&rule, project_path.as_deref()) {
             Ok(path) => {
@@ -623,10 +560,10 @@ impl Console {
         self.rule_content_input
             .update(cx, |s, cx| s.set_value(&rule.content, window, cx));
         self.rule_enforcement = rule.enforcement;
-        self.rules_tab = if rule.scope == Scope::Project {
-            Scope::Project
-        } else {
-            Scope::User
+        self.rules_tab = match rule.scope {
+            Scope::Project => Scope::Project,
+            Scope::Environment => Scope::Environment,
+            _ => Scope::User,
         };
     }
 
@@ -641,6 +578,163 @@ impl Console {
         self.rule_content_input
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.rule_enforcement = Enforcement::Advisory;
+    }
+
+    /// Open the rule editor as an on-demand modal (edit an existing rule, or draft a new one).
+    /// The editor is never docked permanently, so switching views cannot leave stale content.
+    pub fn open_rule_editor_dialog(
+        &mut self,
+        index: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match index {
+            Some(i) => self.load_rule_into_editor(i, window, cx),
+            None => self.clear_rule_editor(window, cx),
+        }
+        let title = self
+            .t(if index.is_some() {
+                "rules.editor_title_edit"
+            } else {
+                "rules.editor_title_new"
+            })
+            .to_string();
+        let save = self.t("rules.save").to_string();
+        let cancel = self.t("common.cancel").to_string();
+        let weak = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let body = weak.update(cx, |console, ccx| {
+                console.render_rule_editor_form(ccx).into_any_element()
+            });
+            let Ok(body) = body else {
+                return dialog.title(title.clone());
+            };
+            let save_weak = weak.clone();
+            let cancel_weak = weak.clone();
+            let cancel_label = cancel.clone();
+            let save_label = save.clone();
+            dialog
+                .title(title.clone())
+                .child(body)
+                .width(px(560.))
+                .centered()
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().trigger(move |b| b.label(cancel_label.clone())))
+                        .child(
+                            Button::new("rule-editor-save")
+                                .label(save_label.clone())
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(Confirm { secondary: false }),
+                                        cx,
+                                    );
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let Some(entity) = save_weak.upgrade() else {
+                        return true;
+                    };
+                    entity.update(cx, |this, ccx| {
+                        if this.save_rule_from_inputs(ccx) {
+                            let msg = this.t("rules.saved");
+                            this.notify(window, ccx, msg);
+                            this.clear_rule_editor(window, ccx);
+                            ccx.notify();
+                            true
+                        } else {
+                            ccx.notify();
+                            false
+                        }
+                    })
+                })
+                .on_cancel(move |_, window, cx| {
+                    if let Some(entity) = cancel_weak.upgrade() {
+                        entity.update(cx, |this, ccx| {
+                            this.clear_rule_editor(window, ccx);
+                            ccx.notify();
+                        });
+                    }
+                    true
+                })
+        });
+    }
+
+    /// Rename the selected project in a modal instead of a permanent inline input.
+    pub fn open_rename_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_project else {
+            return;
+        };
+        if let Some(name) = self
+            .projects
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.name.clone())
+        {
+            self.project_rename_input
+                .update(cx, |s, cx| s.set_value(&name, window, cx));
+        }
+        let title = self.t("proj.rename_title").to_string();
+        let label = self.t("proj.name_label").to_string();
+        let save = self.t("proj.rename_save").to_string();
+        let cancel = self.t("common.cancel").to_string();
+        let weak = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let input = weak.update(cx, |console, _ccx| {
+                Input::new(&console.project_rename_input)
+                    .id("project-rename-input")
+                    .into_any_element()
+            });
+            let Ok(input) = input else {
+                return dialog.title(title.clone());
+            };
+            let ok_weak = weak.clone();
+            let cancel_label = cancel.clone();
+            let save_label = save.clone();
+            dialog
+                .title(title.clone())
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_sm().child(label.clone()))
+                        .child(input),
+                )
+                .width(px(420.))
+                .centered()
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().trigger(move |b| b.label(cancel_label.clone())))
+                        .child(
+                            Button::new("project-rename-save")
+                                .label(save_label.clone())
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(Confirm { secondary: false }),
+                                        cx,
+                                    );
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let Some(entity) = ok_weak.upgrade() else {
+                        return true;
+                    };
+                    entity.update(cx, |this, ccx| {
+                        if this.rename_project_from_input(ccx) {
+                            let msg = this.t("proj.renamed_toast");
+                            this.notify(window, ccx, msg);
+                            ccx.notify();
+                            true
+                        } else {
+                            ccx.notify();
+                            false
+                        }
+                    })
+                })
+        });
     }
 
     pub fn confirm_delete_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -681,7 +775,7 @@ impl Console {
         let Some(rule) = self.rules.get(index) else {
             return;
         };
-        let project_path = if rule.scope == Scope::Project {
+        let project_path = if matches!(rule.scope, Scope::Project | Scope::Environment) {
             self.current_project_path()
         } else {
             None
@@ -700,14 +794,18 @@ impl Console {
         }
     }
 
-    pub fn set_selected_rule_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
-        let Some(index) = self.selected_rule else {
-            return false;
-        };
+    /// Toggle enablement for the rule at `index` (card-level switch / context menu), independent of
+    /// which rule the editor has open.
+    pub fn set_rule_enabled_at(
+        &mut self,
+        index: usize,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(rule) = self.rules.get(index) else {
             return false;
         };
-        let project_path = if rule.scope == Scope::Project {
+        let project_path = if matches!(rule.scope, Scope::Project | Scope::Environment) {
             self.current_project_path()
         } else {
             None
@@ -813,10 +911,10 @@ impl Console {
                     &[&rule.id, &path.display().to_string()],
                 ));
                 let message = self
-                    .t(if rule.scope == Scope::User {
-                        "sugg.approved_toast_user"
-                    } else {
-                        "sugg.approved_toast"
+                    .t(match rule.scope {
+                        Scope::User => "sugg.approved_toast_user",
+                        Scope::Environment => "sugg.approved_toast_environment",
+                        _ => "sugg.approved_toast",
                     })
                     .to_string();
                 self.notify(window, cx, &message);
@@ -834,7 +932,7 @@ impl Console {
         };
         let title = self.t("sugg.reject_confirm_title").to_string();
         let desc = self.t("sugg.reject_confirm_desc").to_string();
-        let ok_text = self.t("sugg.reject").to_string();
+        let ok_text = self.t("sugg.reject_ok").to_string();
         let cancel_text = self.t("common.cancel").to_string();
         let entity = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
@@ -872,7 +970,11 @@ impl Console {
         }
     }
 
-    pub fn create_session_from_inputs(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn create_session_from_inputs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let task = self.session_task_input.read(cx).value().trim().to_string();
         let Some(project) = self.current_project_path() else {
             self.log(self.t("log.no_project"));
@@ -901,95 +1003,13 @@ impl Console {
                 ));
                 self.selected_session = Some(session.id);
                 self.refresh_data(cx);
+                self.load_session_work_inputs(window, cx);
                 true
             }
             Err(e) => {
                 self.log(self.tr("log.session_failed", &[&e.to_string()]));
                 false
             }
-        }
-    }
-
-    pub fn start_harness(&mut self, cx: &mut Context<Self>) {
-        if self.active_harness.is_some() {
-            self.log(self.t("log.already_running"));
-            return;
-        }
-        let Some(registration) = self.agents.get(self.selected_agent).cloned() else {
-            self.log(self.t("log.no_agent"));
-            return;
-        };
-        let Some(project) = self.current_project_path() else {
-            self.log(self.t("log.no_project"));
-            return;
-        };
-        let task = self.session_task_input.read(cx).value().trim().to_string();
-        if task.is_empty() {
-            self.log(self.t("log.set_first"));
-            return;
-        }
-        let config = HarnessConfig {
-            registration,
-            project_path: project,
-            task,
-            task_tags: vec![],
-            mcp_endpoint: Some(McpEndpoint::Http {
-                url: format!("http://{}/mcp", self.mcp_bind),
-            }),
-            permission_policy: PermissionPolicy::Ask,
-        };
-        match self.manager.start(config) {
-            Ok(HarnessChannels {
-                command_tx,
-                event_rx,
-                ..
-            }) => {
-                self.active_harness = Some(ActiveHarness {
-                    agent_id: self.agents[self.selected_agent].id.clone(),
-                    control_session_id: None,
-                    command_tx,
-                    event_rx,
-                });
-                self.log(self.t("log.harness_starting"));
-            }
-            Err(e) => self.log(self.tr("log.harness_failed", &[&e.to_string()])),
-        }
-    }
-
-    pub fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.prompt_input.read(cx).value();
-        if text.trim().is_empty() {
-            return;
-        }
-        if let Some(harness) = &self.active_harness {
-            match harness.command_tx.try_send(HarnessCommand::Prompt {
-                text: text.to_string(),
-            }) {
-                Ok(()) => {
-                    self.log(self.tr(
-                        "log.prompt_sent",
-                        &[&text.chars().take(60).collect::<String>()],
-                    ));
-                    self.prompt_input
-                        .update(cx, |s, cx| s.set_value("", window, cx));
-                }
-                Err(e) => self.log(self.tr("log.send_failed", &[&e.to_string()])),
-            }
-        }
-    }
-
-    pub fn cancel_prompt(&mut self) {
-        if let Some(harness) = &self.active_harness {
-            let _ = harness.command_tx.try_send(HarnessCommand::Cancel);
-            self.log(self.t("log.cancel_sent"));
-        }
-    }
-
-    pub fn stop_harness(&mut self, cx: &mut Context<Self>) {
-        if let Some(harness) = self.active_harness.take() {
-            let _ = harness.command_tx.try_send(HarnessCommand::Shutdown);
-            self.log(self.t("log.harness_stopping"));
-            self.refresh_data(cx);
         }
     }
 
@@ -1008,10 +1028,13 @@ impl Console {
             self.log(self.t("log.enter_target"));
             return false;
         }
-        match self
-            .store
-            .export_handoff(session_id, &target, serde_json::json!({}))
-        {
+        let context = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| serde_json::json!({ "summary": s.task, "exported_from": "console" }))
+            .unwrap_or_else(|| serde_json::json!({ "exported_from": "console" }));
+        match self.store.export_handoff(session_id, &target, context) {
             Ok(bundle) => {
                 self.log(self.tr(
                     "log.handoff_exported",
@@ -1029,6 +1052,110 @@ impl Console {
                 false
             }
         }
+    }
+
+    /// Select a session: move the highlight, refresh its evidence, and load its work-state inputs.
+    pub fn select_session(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_session = Some(id);
+        self.refresh_evidence();
+        self.load_session_work_inputs(window, cx);
+        cx.notify();
+    }
+
+    /// Mirror the selected session's goal + work items into the editor textareas (empty when none).
+    pub fn load_session_work_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (goal, work) = self
+            .selected_session
+            .and_then(|id| self.sessions.iter().find(|s| s.id == id))
+            .map(|s| (s.goal.clone(), format_work_items(&s.work_items)))
+            .unwrap_or_default();
+        self.session_goal_input
+            .update(cx, |state, cx| state.set_value(goal, window, cx));
+        self.session_work_input
+            .update(cx, |state, cx| state.set_value(work, window, cx));
+    }
+
+    /// Persist the edited goal + work items for the selected session.
+    pub fn save_session_work_state(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(session_id) = self.selected_session else {
+            self.log(self.t("log.select_session"));
+            return false;
+        };
+        let goal = self.session_goal_input.read(cx).value().trim().to_string();
+        let work_text = self.session_work_input.read(cx).value().to_string();
+        let work_items = parse_work_items(&work_text);
+        match self
+            .store
+            .set_session_work_state(session_id, goal, work_items)
+        {
+            Ok(session) => {
+                self.log(self.tr(
+                    "log.work_state_saved",
+                    &[&session.work_items.len().to_string()],
+                ));
+                self.refresh_data(cx);
+                self.load_session_work_inputs(window, cx);
+                true
+            }
+            Err(e) => {
+                self.log(self.tr("log.work_state_failed", &[&e.to_string()]));
+                false
+            }
+        }
+    }
+
+    /// Delete the selected session and, cascade, its evidence chain + provenance record.
+    pub fn delete_selected_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(session_id) = self.selected_session else {
+            self.log(self.t("log.select_session"));
+            return false;
+        };
+        match self.store.delete_session(session_id) {
+            Ok(()) => {
+                self.log(self.tr("log.session_deleted", &[&session_id.to_string()]));
+                self.selected_session = None;
+                self.refresh_data(cx);
+                self.load_session_work_inputs(window, cx);
+                true
+            }
+            Err(e) => {
+                self.log(self.tr("log.session_delete_failed", &[&e.to_string()]));
+                false
+            }
+        }
+    }
+
+    pub fn confirm_delete_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_session.is_none() {
+            return;
+        }
+        let title = self.t("sess.delete_confirm_title").to_string();
+        let desc = self.t("sess.delete_hint").to_string();
+        let ok_text = self.t("sess.delete_ok").to_string();
+        let cancel_text = self.t("common.cancel").to_string();
+        let entity = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            alert
+                .title(title.clone())
+                .description(desc.clone())
+                .show_cancel(true)
+                .ok_text(ok_text.clone())
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text(cancel_text.clone())
+                .on_ok(move |_, window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            if this.delete_selected_session(window, cx) {
+                                let msg = this.t("sess.deleted_toast").to_string();
+                                this.notify(window, cx, &msg);
+                            }
+                            cx.notify();
+                        });
+                    }
+                    true
+                })
+        });
     }
 
     pub fn verify_selected_chain(&mut self) {
@@ -1190,6 +1317,7 @@ impl Console {
             }
         });
         self.refresh_export_drift();
+        self.refresh_hook_status();
         cx.notify();
     }
 
@@ -1254,9 +1382,9 @@ impl Console {
         cx.reveal_path(&rules_dir);
     }
 
-    /// Compile the selected project's enabled contracts into native harness entry points
-    /// (AGENTS.md / CLAUDE.md / .cursor/rules) as a managed block. Project-only: personal
-    /// preferences are not written to the user-global Claude memory from this action.
+    /// Write the static pointer block into the selected project's chosen harness entry points. The
+    /// block points at the live rules in `.agent-control/rules/`; it does not copy rule text.
+    /// Project-only: personal preferences are not written to the user-global Claude memory here.
     pub fn export_native_for_selected_project(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self
             .selected_project
@@ -1266,7 +1394,7 @@ impl Console {
             self.log(self.t("log.no_project"));
             return;
         };
-        match self.store.export_native(&path, false) {
+        match self.store.export_native(&path, &self.export_targets, false) {
             Ok(report) => {
                 let targets = report
                     .targets
@@ -1285,13 +1413,226 @@ impl Console {
         cx.notify();
     }
 
+    /// Revoke the pointer block from the selected project's chosen harness entry points, preserving
+    /// surrounding prose. The explicit undo of `export_native_for_selected_project`.
+    pub fn revoke_native_for_selected_project(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .selected_project
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .map(|p| p.path.clone())
+        else {
+            self.log(self.t("log.no_project"));
+            return;
+        };
+        match self.store.revoke_native(&path, &self.export_targets, false) {
+            Ok(report) => {
+                let targets = report
+                    .targets
+                    .iter()
+                    .map(|t| format!("{} ({})", t.path.display(), t.action))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.log(self.tr("log.revoke_done", &[&targets]));
+            }
+            Err(e) => self.log(self.tr("log.revoke_failed", &[&e.to_string()])),
+        }
+        self.refresh_export_drift();
+        cx.notify();
+    }
+
+    /// Toggle one harness entry point in the export selection. Keeps at least the order stable and
+    /// recomputes the stale badge for the new selection.
+    pub fn toggle_export_target(
+        &mut self,
+        target: ExportTarget,
+        checked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if checked {
+            if !self.export_targets.contains(&target) {
+                self.export_targets.push(target);
+            }
+        } else {
+            self.export_targets.retain(|t| *t != target);
+        }
+        self.refresh_export_drift();
+        cx.notify();
+    }
+
+    /// Confirm before revoking: the action can delete block-only files, so it goes through an alert
+    /// dialog like the other destructive actions.
+    pub fn confirm_revoke_native(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_project.is_none() {
+            return;
+        }
+        let title = self.t("proj.revoke_confirm_title").to_string();
+        let desc = self.t("proj.revoke_hint").to_string();
+        let ok_text = self.t("proj.revoke_ok").to_string();
+        let cancel_text = self.t("common.cancel").to_string();
+        let entity = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            alert
+                .title(title.clone())
+                .description(desc.clone())
+                .show_cancel(true)
+                .ok_text(ok_text.clone())
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text(cancel_text.clone())
+                .on_ok(move |_, _, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.revoke_native_for_selected_project(cx);
+                        });
+                    }
+                    true
+                })
+        });
+    }
+
+    /// Register the Agent Control hook (SessionStart briefing + PreToolUse gate) into the selected
+    /// project's chosen harness settings. The command runs the bundled hook script with Node; this is
+    /// what turns a declared Hard rule into an Enforced one. Other config and user hooks are preserved.
+    pub fn register_hooks_for_selected_project(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self
+            .selected_project
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .map(|p| p.path.clone())
+        else {
+            self.log(self.t("log.no_project"));
+            return;
+        };
+        let Some(command) = agent_control_core::hooks::default_hook_command() else {
+            self.log(self.t("log.hooks_no_script"));
+            self.notify(window, cx, self.t("proj.hooks_no_script_toast"));
+            return;
+        };
+        match self
+            .store
+            .register_hooks(&path, &self.hook_targets, &command)
+        {
+            Ok(report) => {
+                let targets = report
+                    .targets
+                    .iter()
+                    .map(|t| format!("{} ({})", t.path.display(), t.action))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.log(self.tr("log.hooks_register_done", &[&targets]));
+                let msg = self.tr(
+                    "proj.hooks_register_toast",
+                    &[&report.targets.len().to_string()],
+                );
+                self.notify(window, cx, &msg);
+            }
+            Err(e) => {
+                self.log(self.tr("log.hooks_register_failed", &[&e.to_string()]));
+                let msg = self.tr("proj.hooks_failed_toast", &[&e.to_string()]);
+                self.notify(window, cx, &msg);
+            }
+        }
+        self.refresh_hook_status();
+        cx.notify();
+    }
+
+    /// Revoke the Agent Control hook from the selected project's chosen harness settings, preserving
+    /// other config and user hooks. The explicit undo of `register_hooks_for_selected_project`.
+    pub fn revoke_hooks_for_selected_project(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self
+            .selected_project
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .map(|p| p.path.clone())
+        else {
+            self.log(self.t("log.no_project"));
+            return;
+        };
+        match self.store.revoke_hooks(&path, &self.hook_targets) {
+            Ok(report) => {
+                let targets = report
+                    .targets
+                    .iter()
+                    .map(|t| format!("{} ({})", t.path.display(), t.action))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.log(self.tr("log.hooks_revoke_done", &[&targets]));
+                let msg = self.tr(
+                    "proj.hooks_revoke_toast",
+                    &[&report.targets.len().to_string()],
+                );
+                self.notify(window, cx, &msg);
+            }
+            Err(e) => {
+                self.log(self.tr("log.hooks_revoke_failed", &[&e.to_string()]));
+                let msg = self.tr("proj.hooks_failed_toast", &[&e.to_string()]);
+                self.notify(window, cx, &msg);
+            }
+        }
+        self.refresh_hook_status();
+        cx.notify();
+    }
+
+    /// Toggle one harness in the hook selection.
+    pub fn toggle_hook_target(
+        &mut self,
+        target: HookTarget,
+        checked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if checked {
+            if !self.hook_targets.contains(&target) {
+                self.hook_targets.push(target);
+            }
+        } else {
+            self.hook_targets.retain(|t| *t != target);
+        }
+        cx.notify();
+    }
+
+    /// Confirm before revoking hooks: the action can delete settings files that held only our hook.
+    pub fn confirm_revoke_hooks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_project.is_none() {
+            return;
+        }
+        let title = self.t("proj.hooks_revoke_confirm_title").to_string();
+        let desc = self.t("proj.hooks_revoke_hint").to_string();
+        let ok_text = self.t("proj.hooks_revoke_ok").to_string();
+        let cancel_text = self.t("common.cancel").to_string();
+        let entity = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            alert
+                .title(title.clone())
+                .description(desc.clone())
+                .show_cancel(true)
+                .ok_text(ok_text.clone())
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text(cancel_text.clone())
+                .on_ok(move |_, window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.revoke_hooks_for_selected_project(window, cx);
+                        });
+                    }
+                    true
+                })
+        });
+    }
+
     pub fn confirm_remove_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_project.is_none() {
             return;
         }
         let title = self.t("proj.remove_confirm_title").to_string();
         let desc = self.t("proj.remove_hint").to_string();
-        let ok_text = self.t("proj.remove").to_string();
+        let ok_text = self.t("proj.remove_ok").to_string();
         let cancel_text = self.t("common.cancel").to_string();
         let entity = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
@@ -1391,7 +1732,34 @@ impl Console {
                 .iter()
                 .position(|r| r.id == rule_id && r.scope == Scope::Project)
             {
-                self.load_rule_into_editor(index, window, cx);
+                self.open_rule_editor_dialog(Some(index), window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Enable/disable a project contract straight from the project tree context menu.
+    pub fn toggle_rule_from_tree(
+        &mut self,
+        pid: Uuid,
+        rule_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_project(pid, Scope::Project, Nav::Rules, cx);
+        if let Some(index) = self
+            .rules
+            .iter()
+            .position(|r| r.id == rule_id && r.scope == Scope::Project)
+        {
+            let enabled = self.rules[index].enabled;
+            if self.set_rule_enabled_at(index, !enabled, cx) {
+                let msg = self.t(if !enabled {
+                    "rules.enabled_toast"
+                } else {
+                    "rules.disabled_toast"
+                });
+                self.notify(window, cx, msg);
             }
         }
         cx.notify();
@@ -1400,6 +1768,75 @@ impl Console {
     pub fn notify(&mut self, window: &mut Window, cx: &mut App, message: &str) {
         window.push_notification(Notification::info(message), cx);
     }
+
+    /// Toggle a named disclosure section (project export/help, hooks help, session verification).
+    pub fn toggle_section(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.open_sections.remove(key) {
+            self.open_sections.insert(key.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Run a command dispatched from the project tree's right-click context menu. Project-scoped
+    /// commands select the target first so the existing detail-pane actions operate on it.
+    pub fn run_tree_action(
+        &mut self,
+        action: TreeAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            TreeAction::SetCurrent(id) => self.set_current_project(id, cx),
+            TreeAction::Rename(id) => {
+                self.select_project(id, window, cx);
+                self.open_rename_dialog(window, cx);
+            }
+            TreeAction::Export(id) => {
+                self.select_project(id, window, cx);
+                self.export_native_for_selected_project(cx);
+            }
+            TreeAction::Revoke(id) => {
+                self.select_project(id, window, cx);
+                self.confirm_revoke_native(window, cx);
+            }
+            TreeAction::RegisterHooks(id) => {
+                self.select_project(id, window, cx);
+                self.register_hooks_for_selected_project(window, cx);
+            }
+            TreeAction::RevokeHooks(id) => {
+                self.select_project(id, window, cx);
+                self.confirm_revoke_hooks(window, cx);
+            }
+            TreeAction::Reveal(id) => {
+                self.select_project(id, window, cx);
+                self.reveal_project_contracts(cx);
+            }
+            TreeAction::Remove(id) => {
+                self.select_project(id, window, cx);
+                self.confirm_remove_project(window, cx);
+            }
+            TreeAction::Open(node) => self.handle_tree_click(&node, window, cx),
+            TreeAction::ToggleRule(id, rule_id) => {
+                self.toggle_rule_from_tree(id, &rule_id, window, cx)
+            }
+        }
+        cx.notify();
+    }
+}
+
+/// A command dispatched from the project tree's right-click context menu.
+#[derive(Clone)]
+pub enum TreeAction {
+    SetCurrent(Uuid),
+    Rename(Uuid),
+    Export(Uuid),
+    Revoke(Uuid),
+    RegisterHooks(Uuid),
+    RevokeHooks(Uuid),
+    Reveal(Uuid),
+    Remove(Uuid),
+    Open(String),
+    ToggleRule(Uuid, String),
 }
 
 impl Render for Console {
@@ -1409,6 +1846,7 @@ impl Render for Console {
             Nav::Projects => self.render_projects(cx).into_any_element(),
             Nav::Preferences => self.render_rules(cx).into_any_element(),
             Nav::Rules => self.render_rules(cx).into_any_element(),
+            Nav::Environment => self.render_rules(cx).into_any_element(),
             Nav::Suggestions => self.render_suggestions(cx).into_any_element(),
             Nav::Provenance => self.render_provenance(cx).into_any_element(),
             Nav::Evidence => self.render_evidence(cx).into_any_element(),
@@ -1475,6 +1913,7 @@ impl Console {
             Nav::Projects => self.t("header.projects"),
             Nav::Preferences => self.t("header.preferences"),
             Nav::Rules => self.t("header.rules"),
+            Nav::Environment => self.t("header.environment"),
             Nav::Suggestions => self.t("header.suggestions"),
             Nav::Provenance => self.t("header.provenance"),
             Nav::Evidence => self.t("header.evidence"),
@@ -1489,6 +1928,7 @@ impl Console {
             Nav::Projects => self.t("desc.projects"),
             Nav::Preferences => self.t("desc.preferences"),
             Nav::Rules => self.t("desc.rules"),
+            Nav::Environment => self.t("desc.environment"),
             Nav::Suggestions => self.t("desc.suggestions"),
             Nav::Provenance => self.t("desc.provenance"),
             Nav::Evidence => self.t("desc.evidence"),
@@ -1523,7 +1963,11 @@ impl Console {
                         this.child(Badge::new().count(badge).color(primary))
                     }),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.nav != nav {
+                    this.clear_rule_editor(window, cx);
+                    window.close_dialog(cx);
+                }
                 this.nav = nav;
                 this.refresh_data(cx);
                 cx.notify();
@@ -1582,6 +2026,14 @@ impl Console {
                 "nav.rules",
                 "nav-rules",
                 IconName::BookOpen,
+                0,
+                cx,
+            ))
+            .child(self.nav_item(
+                Nav::Environment,
+                "nav.environment",
+                "nav-environment",
+                IconName::Cpu,
                 0,
                 cx,
             ))
@@ -1756,10 +2208,6 @@ impl Console {
         } else {
             cx.theme().danger
         };
-        let harness_label = match &self.active_harness {
-            Some(h) => self.tr("dash.harness", &[&h.agent_id]),
-            None => self.t("dash.no_harness").to_string(),
-        };
         let project_label = match self.current_project() {
             Some(p) => self.tr("header.project", &[&p.name]),
             None => self.t("header.no_project").to_string(),
@@ -1788,17 +2236,6 @@ impl Console {
                     .child(ui::dot(mcp_color))
                     .child(div().child("MCP"))
                     .child(ui::mono(cx, format!("http://{}/mcp", self.mcp_bind))),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(ui::dot(if self.active_harness.is_some() {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().muted_foreground
-                    }))
-                    .child(div().child(harness_label)),
             )
             .child(div().flex_1())
             .child(div().child(project_label))
@@ -1844,4 +2281,41 @@ fn request_daemon_shutdown(bind: &str) {
     );
     let _ = stream.write_all(req.as_bytes());
     let _ = stream.flush();
+}
+
+/// Render work items as one `status: title` line each, for the editor textarea.
+fn format_work_items(items: &[WorkItem]) -> String {
+    items
+        .iter()
+        .map(|item| format!("{}: {}", item.status.label(), item.title))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Parse the editor textarea back into work items. Each non-empty line is `status: title`; an
+/// unknown or missing prefix defaults to `todo`, so free-form notes still become resumable items.
+fn parse_work_items(text: &str) -> Vec<WorkItem> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (status, title) = match line.split_once(':') {
+                Some((prefix, rest)) => {
+                    let status = match prefix.trim().to_ascii_lowercase().as_str() {
+                        "done" => WorkItemStatus::Done,
+                        "doing" => WorkItemStatus::Doing,
+                        "todo" => WorkItemStatus::Todo,
+                        _ => WorkItemStatus::Todo,
+                    };
+                    (status, rest.trim())
+                }
+                None => (WorkItemStatus::Todo, line),
+            };
+            WorkItem {
+                title: title.to_string(),
+                status,
+            }
+        })
+        .filter(|item| !item.title.is_empty())
+        .collect()
 }

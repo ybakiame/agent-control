@@ -1,25 +1,33 @@
 #!/usr/bin/env node
-// Agent Control — Claude Code SessionStart hook.
+// Agent Control — harness hook for Claude Code / CodeBuddy / WorkBuddy / Qoder.
 //
-// Pushes the project's binding rules into the session context at start, so Claude Code inherits
-// the contracts before it calls any MCP tool. Read-only: it calls get_applicable_rules over the
-// local MCP HTTP endpoint and injects a concise briefing; it never writes files. If the Agent
-// Control daemon is unreachable it exits 0 silently, so a session is never blocked.
+// Dispatches on the stdin `hook_event_name`:
 //
-// Wire it up by adding this to .claude/settings.json (project) or ~/.claude/settings.json (user).
-// Copy-ready snippet — adjust the absolute path to this script:
+//   SessionStart — pushes the project's binding rules into the session context, so the harness
+//     inherits the contracts before it calls any MCP tool. Read-only: calls get_applicable_rules
+//     (+ a best-effort check_export_drift) over the local MCP HTTP endpoint and injects a concise
+//     briefing via hookSpecificOutput.additionalContext. Never writes files.
+//
+//   PreToolUse — the deny-capable enforcement chokepoint. Calls check_tool_call with the pending
+//     tool_name/tool_input; if the gate denies (a hard rule's repo gate fails, or a tool_guard
+//     matches), it BLOCKS the call by exiting 2 with the denial reason on stderr (the universal
+//     deny signal across these harnesses — stderr is fed back to the agent). On allow it exits 0.
+//     This is what turns a declared hard rule into an Enforced one.
+//
+// Fail-open by design: if the Agent Control daemon is unreachable, times out, or errors, the hook
+// exits 0 silently so a session is never blocked and a tool is never denied by infrastructure.
+//
+// Register both events with the MCP `register_hooks` tool (or the console's Hooks panel), which
+// writes the managed group into each harness's settings.json. Manual copy-ready snippet — adjust
+// the absolute path to this script:
 //
 //   {
 //     "hooks": {
 //       "SessionStart": [
-//         {
-//           "hooks": [
-//             {
-//               "type": "command",
-//               "command": "node \"C:/path/to/agent-control/scripts/agent-control-hook.mjs\""
-//             }
-//           ]
-//         }
+//         { "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control-hook.mjs\"" } ] }
+//       ],
+//       "PreToolUse": [
+//         { "matcher": "", "hooks": [ { "type": "command", "command": "node \"C:/path/to/agent-control-hook.mjs\"" } ] }
 //       ]
 //     }
 //   }
@@ -120,72 +128,59 @@ async function callMcp(tool, args) {
   return r?.structuredContent ?? JSON.parse(r?.content?.[0]?.text ?? "{}");
 }
 
-function renderBriefing(data, cwd) {
-  const applied = Array.isArray(data?.applied_rules) ? data.applied_rules : [];
-  const conflicts = Array.isArray(data?.conflicts) ? data.conflicts : [];
-  if (applied.length === 0 && conflicts.length === 0) return "";
-
-  const lines = [
-    "# Agent Control — binding rules for this project",
-    "",
-    `Resolved from Agent Control for ${cwd}. These contracts are binding for this session: follow them and record evidence of your work. Use the agent-control MCP tools (get_applicable_rules, explain_rule, check_conflicts) for provenance and conflict detail.`,
-    "",
-  ];
-  for (const m of applied) {
-    const r = m?.rule;
-    if (!r) continue;
-    lines.push(`## ${r.title} (${r.id})`);
-    const meta = [r.kind, r.scope, `priority ${r.priority}`].filter(Boolean).join(" · ");
-    if (meta) lines.push(`_${meta}_`);
-    if (typeof r.content === "string" && r.content.trim()) {
-      lines.push("", r.content.trim());
-    }
-    if (Array.isArray(m.warnings) && m.warnings.length) {
-      lines.push("");
-      for (const w of m.warnings) lines.push(`> Warning: ${w}`);
-    }
-    lines.push("");
-  }
-  if (conflicts.length) {
-    lines.push("## Conflicts — resolve with the user before proceeding", "");
-    for (const c of conflicts) {
-      const hint = c.resolution_hint ? ` (hint: ${c.resolution_hint})` : "";
-      lines.push(`- ${c.description ?? "conflict"}${hint}`);
-    }
-    lines.push("");
-  }
-  return lines.join("\n");
-}
-
 function renderStaleWarning(report) {
   const stale = Array.isArray(report?.targets) ? report.targets.filter((t) => t.stale) : [];
   const lines = [
-    "## Agent Control — native export is stale",
+    "## Agent Control — native export needs migration",
     "",
-    "The managed agent-control blocks in this project's native entry points (AGENTS.md / CLAUDE.md / .cursor rules) no longer match the current enabled rules. Rules resolved live from Agent Control are authoritative for this session; the exported files are out of date.",
+    "Some native entry points in this project are missing the current Agent Control pointer block, or still hold a legacy full-text block. The pointer block directs agents to read the live rules in `.agent-control/rules/`; rules resolved live from Agent Control are authoritative for this session regardless.",
     "",
   ];
   for (const t of stale) {
-    if (t?.path) lines.push(`- stale: ${t.path}`);
+    if (t?.path) lines.push(`- outdated: ${t.path}`);
   }
   lines.push(
     "",
-    "Re-run the MCP `export_native` tool (or the console's Export to harnesses button) to refresh them. This hook is read-only and rewrote nothing. This detects file-vs-store drift only, not whether an already-running session's context is stale.",
+    "Re-run the MCP `export_native` tool (or the console's Export to harnesses button) to write the current pointer block. This hook is read-only and rewrote nothing. This detects a missing/older-format block only — not whether an already-running session's context is stale, and not rule edits (the pointer is static).",
     "",
   );
   return lines.join("\n");
 }
 
+// PreToolUse: the deny-capable chokepoint. Ask the gate about the pending call; on deny, exit 2
+// with the reason on stderr (the universal block signal — the harness feeds stderr to the agent).
+// No session_id is passed: the harness's stdin session id is not an Agent Control session UUID, and
+// the gate evaluates the project's enabled hard rules regardless of session.
+async function handlePreToolUse(parsed, cwd) {
+  const toolName = typeof parsed?.tool_name === "string" ? parsed.tool_name : "";
+  if (!toolName) return { code: 0 };
+  const data = await callMcp("check_tool_call", {
+    project_path: cwd,
+    tool_name: toolName,
+    tool_input: parsed?.tool_input ?? {},
+    agent_id: AGENT_ID,
+  });
+  if (data?.report?.allowed === false) {
+    const reason = data.denial_reason || data.instruction || "Denied by Agent Control hard rules.";
+    return { code: 2, stderr: `Agent Control gate denied this tool call. ${reason}\n` };
+  }
+  return { code: 0 };
+}
+
 async function main() {
   const input = await readStdin();
-  let cwd = process.cwd();
+  let parsed = null;
   try {
-    const parsed = JSON.parse(input);
-    if (parsed?.cwd) cwd = parsed.cwd;
+    parsed = JSON.parse(input);
   } catch {
-    /* no/invalid stdin: fall back to process.cwd() */
+    /* no/invalid stdin: fall back to defaults */
   }
+  const cwd = parsed?.cwd || process.cwd();
+  const event = parsed?.hook_event_name;
 
+  if (event === "PreToolUse") return handlePreToolUse(parsed, cwd);
+
+  // SessionStart (and any unrecognized event): inject the binding-rule briefing.
   const data = await callMcp("get_applicable_rules", {
     project_path: cwd,
     agent_id: AGENT_ID,
@@ -193,12 +188,16 @@ async function main() {
     languages: [],
     task_tags: [],
   });
-  let briefing = renderBriefing(data, cwd);
+  // The briefing is rendered by core (render_constraint_briefing) and returned by get_applicable_rules,
+  // so the hook, the MCP constraint-briefing prompt and any other reach path present identical text.
+  let briefing = typeof data?.briefing === "string" ? data.briefing : "";
 
-  // Best-effort staleness check (layer 1: file-vs-store). Never blocks the session.
+  // Best-effort format-drift check (layer 1: missing/legacy pointer block). Never blocks the session.
+  // Check every entry point read-only so a legacy block in any of them is surfaced.
   try {
     const drift = await callMcp("check_export_drift", {
       project_path: cwd,
+      targets: ["agents", "claude", "gemini", "cursor"],
       include_user: false,
     });
     if (drift?.report?.stale) {
@@ -209,22 +208,38 @@ async function main() {
     debug(`drift check skipped: ${e?.message ?? String(e)}`);
   }
 
-  if (!briefing) return null;
-  return JSON.stringify({
-    hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: briefing },
-  });
+  if (!briefing) return { code: 0 };
+  return {
+    code: 0,
+    stdout: JSON.stringify({
+      hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: briefing },
+    }),
+  };
+}
+
+// Flush both streams before exiting so a deny reason on stderr is never truncated. Exit code 2
+// blocks the tool call; 0 allows. The guard timer is cleared so it cannot override the verdict.
+function finish(code, stdout, stderr) {
+  clearTimeout(guard);
+  let pending = 0;
+  const done = () => {
+    if (--pending <= 0) process.exit(code);
+  };
+  if (stderr) {
+    pending++;
+    process.stderr.write(stderr, done);
+  }
+  if (stdout) {
+    pending++;
+    process.stdout.write(stdout, done);
+  }
+  if (pending === 0) process.exit(code);
 }
 
 main()
-  .then((output) => {
-    clearTimeout(guard);
-    if (output) {
-      process.stdout.write(output, () => process.exit(0));
-    } else {
-      process.exit(0);
-    }
-  })
+  .then((result) => finish(result?.code ?? 0, result?.stdout, result?.stderr))
   .catch((e) => {
+    // Fail-open: an unreachable/slow daemon or any error must never block a session or deny a tool.
     clearTimeout(guard);
     debug(e?.message ?? String(e));
     process.exit(0);

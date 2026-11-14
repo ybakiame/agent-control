@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/mcp", "crates/acp", "crates/app"]
+members = ["crates/core", "crates/mcp", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,13 +10,10 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 agent-control-core = { path = "crates/core" }
-agent-control-acp = { path = "crates/acp" }
 agent-control-mcp = { path = "crates/mcp" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-futures = "0.3"
-async-trait = "0.1"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -41,7 +38,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
 rmcp = { version = "3.9", default-features = false }
-agent-client-protocol = { version = "5.0", default-features = false }
 axum = "0.8"
 
 gpui-kit = "0.9"

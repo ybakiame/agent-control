@@ -1,11 +1,13 @@
-use agent_control_core::model::{AssuranceTier, Scope, SessionStatus};
+use agent_control_core::model::{AssuranceTier, Scope, SessionStatus, WorkItemStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, Selectable, Sizable, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use uuid::Uuid;
 
 use crate::console::Console;
 use crate::i18n::{self, Locale};
@@ -22,17 +24,29 @@ fn status_tag(status: SessionStatus, locale: Locale) -> Tag {
     }
 }
 
+fn work_status_tag(status: WorkItemStatus, locale: Locale) -> Tag {
+    match status {
+        WorkItemStatus::Done => Tag::success().child(i18n::t(locale, "work.done")),
+        WorkItemStatus::Doing => Tag::primary().child(i18n::t(locale, "work.doing")),
+        WorkItemStatus::Todo => Tag::secondary().child(i18n::t(locale, "work.todo")),
+    }
+}
+
 impl Console {
     pub fn render_sessions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let bg = cx.theme().background;
-        let muted_bg = cx.theme().muted;
+        let list_hover = cx.theme().list_hover;
+        let list_active = cx.theme().list_active;
         let primary = cx.theme().primary;
 
+        let weak = cx.weak_entity();
         let session_rows = self.sessions.iter().map(|s| {
             let id = s.id;
             let selected = self.selected_session == Some(id);
+            let row_weak = weak.clone();
+            let delete_label = self.t("sess.delete").to_string();
             v_flex()
                 .id(format!("session-row-{id}"))
                 .role(Role::Button)
@@ -42,13 +56,20 @@ impl Console {
                 .border_1()
                 .border_color(if selected { primary } else { border })
                 .rounded_md()
-                .bg(if selected { muted_bg } else { bg })
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected_session = Some(id);
-                    this.refresh_evidence();
-                    cx.notify();
+                .bg(if selected { list_active } else { bg })
+                .hover(move |s| {
+                    if selected {
+                        s.bg(list_active)
+                    } else {
+                        s.bg(list_hover)
+                    }
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_session(id, window, cx);
                 }))
+                .context_menu(move |menu, _window, _cx| {
+                    session_row_menu(menu, row_weak.clone(), id, delete_label.clone())
+                })
                 .child(div().font_medium().text_sm().child(s.task.clone()))
                 .child(
                     h_flex()
@@ -81,91 +102,6 @@ impl Console {
                 .into_any_element()
         });
 
-        let harness_panel = if let Some(harness) = &self.active_harness {
-            let agent_id = harness.agent_id.clone();
-            let session_label = harness
-                .control_session_id
-                .map(|id| id.to_string()[..8].to_string())
-                .unwrap_or_else(|| self.t("sess.pending").into());
-            ui::card(cx)
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Tag::primary().child(self.t("sess.harness.running")))
-                        .child(div().text_sm().child(agent_id))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(self.tr("sess.session_label", &[&session_label])),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            Button::new("harness-stop")
-                                .label(self.t("sess.stop"))
-                                .danger()
-                                .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.stop_harness(cx);
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .child(Textarea::new(&self.prompt_input).h(px(90.)))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("harness-send")
-                                .label(self.t("sess.send"))
-                                .primary()
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.send_prompt(window, cx);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("harness-cancel")
-                                .label(self.t("sess.cancel_turn"))
-                                .ghost()
-                                .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cancel_prompt();
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .into_any_element()
-        } else {
-            h_flex()
-                .p_3()
-                .gap_2()
-                .items_center()
-                .border_1()
-                .border_color(border)
-                .rounded_md()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(self.t("sess.no_harness")),
-                )
-                .child(div().flex_1())
-                .child(
-                    Button::new("harness-start")
-                        .label(self.t("sess.start"))
-                        .primary()
-                        .small()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.start_harness(cx);
-                            cx.notify();
-                        })),
-                )
-                .into_any_element()
-        };
-
         let detail = if let Some(session) = self
             .selected_session
             .and_then(|id| self.sessions.iter().find(|s| s.id == id))
@@ -178,12 +114,21 @@ impl Console {
                     Scope::User => Tag::primary().child(self.t("scope.user.tag")),
                     Scope::Project => Tag::warning().child(self.t("scope.project.tag")),
                     Scope::Session => Tag::info().child(self.t("scope.session.tag")),
+                    Scope::Environment => Tag::secondary().child(self.t("scope.environment.tag")),
                 };
                 h_flex()
                     .gap_2()
                     .items_center()
                     .child(scope_tag)
                     .child(div().text_sm().child(rule.title.clone()))
+                    .into_any_element()
+            });
+            let work_rows = session.work_items.iter().map(|item| {
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(work_status_tag(item.status, self.locale))
+                    .child(div().text_sm().child(item.title.clone()))
                     .into_any_element()
             });
             let assurance_rows = session.assurance.iter().map(|a| {
@@ -241,6 +186,60 @@ impl Console {
                     .into_any_element()
             });
 
+            let work_editor = v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    Textarea::new(&self.session_goal_input)
+                        .w_full()
+                        .h(px(56.))
+                        .aria_label(self.t("sess.goal_label")),
+                )
+                .child(
+                    Textarea::new(&self.session_work_input)
+                        .w_full()
+                        .h(px(120.))
+                        .aria_label(self.t("sess.work_title")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(self.t("sess.work_hint")),
+                )
+                .child(
+                    Button::new("session-work-save")
+                        .label(self.t("sess.work_save"))
+                        .primary()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.save_session_work_state(window, cx) {
+                                let msg = this.t("sess.work_saved_toast").to_string();
+                                this.notify(window, cx, &msg);
+                            }
+                            cx.notify();
+                        })),
+                );
+
+            let verification = v_flex()
+                .gap_1()
+                .child(ui::mono(
+                    cx,
+                    self.tr(
+                        "sess.snapshot",
+                        &[
+                            &snapshot_short,
+                            &session.constraint_snapshot.provenance_id.to_string(),
+                        ],
+                    ),
+                ))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(self.t("sess.verification_hint")),
+                );
+
             v_flex()
                 .gap_3()
                 .child(ui::section_label(cx, self.t("sess.selected")))
@@ -252,7 +251,23 @@ impl Console {
                                 .gap_2()
                                 .items_center()
                                 .child(status_tag(session.status, self.locale))
-                                .child(div().font_medium().text_sm().child(session.task.clone())),
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .font_medium()
+                                        .text_sm()
+                                        .child(session.task.clone()),
+                                )
+                                .child(
+                                    Button::new("session-delete")
+                                        .label(self.t("sess.delete"))
+                                        .danger()
+                                        .small()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.confirm_delete_session(window, cx);
+                                        })),
+                                ),
                         )
                         .child(div().text_sm().text_color(muted).child(self.tr(
                             "sess.agent_project",
@@ -260,20 +275,51 @@ impl Console {
                                 &session.agent_id,
                                 &session.project_path.display().to_string(),
                             ],
-                        )))
-                        .child(ui::mono(
-                            cx,
-                            self.tr(
-                                "sess.snapshot",
-                                &[
-                                    &snapshot_short,
-                                    &session.constraint_snapshot.provenance_id.to_string(),
-                                ],
-                            ),
-                        )),
+                        ))),
                 )
                 .child(ui::section_label(cx, self.t("sess.binding_title")))
                 .child(v_flex().gap_1().children(binding_rules))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(ui::section_label(cx, self.t("sess.work_title")))
+                        .child(if session.goal.is_empty() {
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(self.t("sess.goal_empty"))
+                                .into_any_element()
+                        } else {
+                            v_flex()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(self.t("sess.goal_label")),
+                                )
+                                .child(div().text_sm().child(session.goal.clone()))
+                                .into_any_element()
+                        })
+                        .child(if session.work_items.is_empty() {
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(self.t("sess.work_empty"))
+                                .into_any_element()
+                        } else {
+                            v_flex().gap_1().children(work_rows).into_any_element()
+                        })
+                        .child(ui::disclosure(
+                            "sess-work-edit",
+                            self.t("sess.work_edit"),
+                            self.open_sections.contains("sess-work-edit"),
+                            work_editor,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_section("sess-work-edit", cx);
+                            }),
+                        )),
+                )
                 .child(
                     v_flex()
                         .gap_2()
@@ -311,6 +357,15 @@ impl Console {
                             v_flex().gap_1().children(assurance_rows).into_any_element()
                         }),
                 )
+                .child(ui::disclosure(
+                    "sess-verification",
+                    self.t("sess.verification_title"),
+                    self.open_sections.contains("sess-verification"),
+                    verification,
+                    cx.listener(|this, _, _, cx| {
+                        this.toggle_section("sess-verification", cx);
+                    }),
+                ))
                 .child(
                     v_flex()
                         .gap_2()
@@ -410,16 +465,38 @@ impl Console {
                                         .primary()
                                         .small()
                                         .on_click(cx.listener(|this, _, window, cx| {
-                                            if this.create_session_from_inputs(cx) {
+                                            if this.create_session_from_inputs(window, cx) {
                                                 this.notify(window, cx, this.t("sess.created"));
                                             }
                                             cx.notify();
                                         })),
                                 ),
                         )
-                        .child(harness_panel)
                         .child(detail),
                 ),
         )
     }
+}
+
+/// Right-click menu for a session row: delete (cascade) the session it belongs to.
+fn session_row_menu(
+    menu: PopupMenu,
+    weak: WeakEntity<Console>,
+    id: Uuid,
+    delete_label: String,
+) -> PopupMenu {
+    let delete = weak.clone();
+    menu.item(
+        PopupMenuItem::new(delete_label)
+            .icon(Icon::new(IconName::Close))
+            .on_click(move |_, window, cx| {
+                if let Some(entity) = delete.upgrade() {
+                    entity.update(cx, |this, ccx| {
+                        this.selected_session = Some(id);
+                        this.confirm_delete_session(window, ccx);
+                        ccx.notify();
+                    });
+                }
+            }),
+    )
 }

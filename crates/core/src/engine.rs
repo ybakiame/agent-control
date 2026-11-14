@@ -50,11 +50,17 @@ impl RuleEngine {
         }
 
         let mut groups: HashMap<String, Vec<RuleMatch>> = HashMap::new();
+        let mut applied: Vec<RuleMatch> = Vec::new();
         for m in candidates {
-            groups.entry(m.rule.competition_key()).or_default().push(m);
+            // Environment rules are descriptive machine/project context: always applied, never
+            // competing on a topic. Everything else groups by competition key for precedence.
+            if m.rule.scope == Scope::Environment {
+                applied.push(m);
+            } else {
+                groups.entry(m.rule.competition_key()).or_default().push(m);
+            }
         }
 
-        let mut applied: Vec<RuleMatch> = Vec::new();
         for (_key, mut group) in groups {
             group.sort_by(|a, b| {
                 b.rule
@@ -283,6 +289,13 @@ fn glob_matches(pattern: &str, value: &str) -> bool {
     set.is_match(&normalized) || set.is_match(value)
 }
 
-pub fn scope_precedence_order() -> [Scope; 3] {
-    [Scope::Session, Scope::Project, Scope::User]
+/// Competitive precedence, highest first. `Environment` is listed last because it does not compete:
+/// it is always-applied descriptive context, not an authority that can supersede a contract.
+pub fn scope_precedence_order() -> [Scope; 4] {
+    [
+        Scope::Session,
+        Scope::Project,
+        Scope::User,
+        Scope::Environment,
+    ]
 }

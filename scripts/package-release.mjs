@@ -25,6 +25,8 @@ for (const exe of ["agent-control-app.exe", "agent-control-mcp.exe"]) {
 }
 copyFileSync(join(root, "README.md"), join(stage, "README.md"));
 copyFileSync(join(root, "crates", "app", "assets", "icon.png"), join(stage, "icon.png"));
+// Ship the hook script beside the exes so register_hooks can resolve it without a repo checkout.
+copyFileSync(join(root, "scripts", "agent-control-hook.mjs"), join(stage, "agent-control-hook.mjs"));
 // Ship portable by default: the store lives beside the exe, never in the global home dir.
 writeFileSync(join(stage, "portable.marker"), "");
 

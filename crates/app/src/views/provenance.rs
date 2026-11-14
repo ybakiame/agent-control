@@ -14,6 +14,7 @@ fn scope_name(scope: Scope, locale: Locale) -> &'static str {
         Scope::User => i18n::t(locale, "scope.user.tag"),
         Scope::Project => i18n::t(locale, "scope.project.tag"),
         Scope::Session => i18n::t(locale, "scope.session.tag"),
+        Scope::Environment => i18n::t(locale, "scope.environment.tag"),
     }
 }
 
@@ -67,7 +68,8 @@ impl Console {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
         let bg = cx.theme().background;
-        let muted_bg = cx.theme().muted;
+        let list_hover = cx.theme().list_hover;
+        let list_active = cx.theme().list_active;
         let primary = cx.theme().primary;
         let accent = cx.theme().accent;
         let warning = cx.theme().warning;
@@ -83,8 +85,14 @@ impl Console {
                 .border_1()
                 .border_color(if selected { primary } else { border })
                 .rounded_md()
-                .bg(if selected { muted_bg } else { bg })
-                .cursor_pointer()
+                .bg(if selected { list_active } else { bg })
+                .hover(move |s| {
+                    if selected {
+                        s.bg(list_active)
+                    } else {
+                        s.bg(list_hover)
+                    }
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected_provenance = Some(index);
                     cx.notify();

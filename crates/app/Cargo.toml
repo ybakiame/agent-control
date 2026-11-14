@@ -7,7 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 agent-control-core = { workspace = true }
-agent-control-acp = { workspace = true }
 agent-control-mcp = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -1,4 +1,3 @@
-use agent_control_acp::PermissionDecision;
 use agent_control_core::model::Scope;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -31,10 +30,6 @@ impl Console {
             Tag::success().child(self.t("dash.mcp.running"))
         } else {
             Tag::danger().child(self.t("dash.mcp.stopped"))
-        };
-        let harness_tag = match &self.active_harness {
-            Some(h) => Tag::primary().child(self.tr("dash.harness", &[&h.agent_id])),
-            None => Tag::secondary().child(self.t("dash.no_harness")),
         };
 
         let suggestions_banner = if self.pending_suggestions > 0 {
@@ -78,72 +73,6 @@ impl Console {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.nav = Nav::Suggestions;
                                     this.refresh_data(cx);
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .into_any_element()
-        } else {
-            div().into_any_element()
-        };
-
-        let permission_panel = if let Some(pending) = &self.pending_permission {
-            let options_text = pending
-                .options
-                .iter()
-                .map(|o| format!("{} ({})", o.name, o.kind))
-                .collect::<Vec<_>>()
-                .join(", ");
-            ui::card(cx)
-                .border_color(cx.theme().warning)
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Tag::warning().child(self.t("dash.perm.required")))
-                        .child(div().font_bold().child(pending.tool_title.clone())),
-                )
-                .child(div().text_sm().text_color(muted).child(options_text))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .child(
-                            Button::new("perm-allow-once")
-                                .label(self.t("dash.perm.allow_once"))
-                                .primary()
-                                .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.decide_permission(PermissionDecision::AllowOnce);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("perm-allow-always")
-                                .label(self.t("dash.perm.allow_always"))
-                                .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.decide_permission(PermissionDecision::AllowAlways);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("perm-reject")
-                                .label(self.t("dash.perm.reject"))
-                                .danger()
-                                .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.decide_permission(PermissionDecision::RejectOnce);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("perm-cancel")
-                                .label(self.t("dash.perm.cancel"))
-                                .ghost()
-                                .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.decide_permission(PermissionDecision::Cancel);
                                     cx.notify();
                                 })),
                         ),
@@ -258,7 +187,6 @@ impl Console {
                     .gap_2()
                     .items_center()
                     .child(mcp_tag)
-                    .child(harness_tag)
                     .child(project_tag)
                     .child(div().flex_1())
                     .child(
@@ -272,7 +200,6 @@ impl Console {
                     ),
             )
             .child(suggestions_banner)
-            .child(permission_panel)
             .when(!self.conflicts.is_empty(), |this| {
                 this.child(
                     v_flex()

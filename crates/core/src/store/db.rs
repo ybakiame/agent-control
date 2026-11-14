@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::model::{
@@ -55,7 +55,9 @@ impl Db {
                 updated_at TEXT NOT NULL,
                 snapshot_json TEXT NOT NULL,
                 handoffs_json TEXT NOT NULL DEFAULT '[]',
-                assurance_json TEXT NOT NULL DEFAULT '[]'
+                assurance_json TEXT NOT NULL DEFAULT '[]',
+                goal TEXT NOT NULL DEFAULT '',
+                work_items_json TEXT NOT NULL DEFAULT '[]'
             );
             CREATE TABLE IF NOT EXISTS evidence (
                 session_id TEXT NOT NULL,
@@ -139,14 +141,22 @@ impl Db {
                 "ALTER TABLE rule_suggestions ADD COLUMN enforcement TEXT NOT NULL DEFAULT 'advisory';",
             )?;
         }
+        // Resumable work state (goal + done/doing/todo) carried across handoffs; backfill once.
+        let has_work_state = conn.prepare("SELECT goal FROM sessions LIMIT 0").is_ok();
+        if !has_work_state {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN goal TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE sessions ADD COLUMN work_items_json TEXT NOT NULL DEFAULT '[]';",
+            )?;
+        }
         Ok(())
     }
 
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 task = excluded.task,
                 project_path = excluded.project_path,
@@ -155,7 +165,9 @@ impl Db {
                 updated_at = excluded.updated_at,
                 snapshot_json = excluded.snapshot_json,
                 handoffs_json = excluded.handoffs_json,
-                assurance_json = excluded.assurance_json",
+                assurance_json = excluded.assurance_json,
+                goal = excluded.goal,
+                work_items_json = excluded.work_items_json",
             rusqlite::params![
                 session.id.to_string(),
                 session.task,
@@ -167,6 +179,8 @@ impl Db {
                 serde_json::to_string(&session.constraint_snapshot)?,
                 serde_json::to_string(&session.handoffs)?,
                 serde_json::to_string(&session.assurance)?,
+                session.goal,
+                serde_json::to_string(&session.work_items)?,
             ],
         )?;
         Ok(())
@@ -175,7 +189,7 @@ impl Db {
     pub fn get_session(&self, id: Uuid) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json FROM sessions WHERE id = ?1",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id.to_string()])?;
         match rows.next()? {
@@ -187,11 +201,44 @@ impl Db {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json FROM sessions ORDER BY updated_at DESC",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json FROM sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], session_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Remove a session together with its evidence chain and provenance record: they are
+    /// session-scoped, so leaving them behind would orphan unverifiable rows.
+    pub fn delete_session(&self, id: Uuid) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let snapshot_json: Option<String> = conn
+            .query_row(
+                "SELECT snapshot_json FROM sessions WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let provenance_id = snapshot_json
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+            .and_then(|v| {
+                v.get("provenance_id")
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string())
+            });
+        conn.execute(
+            "DELETE FROM evidence WHERE session_id = ?1",
+            [id.to_string()],
+        )?;
+        conn.execute(
+            "DELETE FROM provenance WHERE session_id = ?1",
+            [id.to_string()],
+        )?;
+        if let Some(pid) = provenance_id {
+            conn.execute("DELETE FROM provenance WHERE id = ?1", [pid])?;
+        }
+        conn.execute("DELETE FROM sessions WHERE id = ?1", [id.to_string()])?;
+        Ok(())
     }
 
     pub fn append_evidence(
@@ -585,6 +632,8 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     let snapshot_json: String = row.get(7)?;
     let handoffs_json: String = row.get(8)?;
     let assurance_json: String = row.get(9)?;
+    let goal: String = row.get(10)?;
+    let work_items_json: String = row.get(11)?;
     Ok(Session {
         id: Uuid::parse_str(&id).map_err(invalid_uuid)?,
         task: row.get(1)?,
@@ -596,6 +645,8 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         constraint_snapshot: serde_json::from_str(&snapshot_json).map_err(json_err)?,
         handoffs: serde_json::from_str(&handoffs_json).map_err(json_err)?,
         assurance: serde_json::from_str(&assurance_json).map_err(json_err)?,
+        goal,
+        work_items: serde_json::from_str(&work_items_json).map_err(json_err)?,
     })
 }
 

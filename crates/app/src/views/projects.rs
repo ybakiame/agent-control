@@ -1,21 +1,43 @@
+use agent_control_core::{ExportTarget, HookTarget};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tree::tree;
-use gpui_kit::component::{ActiveTheme as _, Sizable, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use uuid::Uuid;
 
-use crate::console::Console;
+use crate::console::{Console, TreeAction};
 use crate::ui;
 
 impl Console {
     pub fn render_projects(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
 
+        let labels = TreeMenuLabels {
+            set_current: self.t("proj.set_current").to_string(),
+            rename: self.t("proj.rename").to_string(),
+            export: self.t("proj.export").to_string(),
+            revoke: self.t("proj.revoke").to_string(),
+            register_hooks: self.t("proj.hooks_register").to_string(),
+            revoke_hooks: self.t("proj.hooks_revoke").to_string(),
+            reveal: self.t("proj.reveal").to_string(),
+            remove: self.t("proj.remove").to_string(),
+            open: self.t("proj.ctx_open").to_string(),
+            open_rule: self.t("proj.ctx_open_rule").to_string(),
+            enable: self.t("rules.enable").to_string(),
+            disable: self.t("rules.disable").to_string(),
+        };
+
         let weak = cx.weak_entity();
+        let render_weak = weak.clone();
+        let menu_weak = weak.clone();
+        let menu_labels = labels.clone();
         let project_tree = tree(
             &self.project_tree,
             move |ix, entry, selected, _window, _cx| {
@@ -24,30 +46,57 @@ impl Console {
                 let depth = entry.depth();
                 let is_folder = entry.is_folder();
                 let expanded = entry.is_expanded();
-                let weak = weak.clone();
+                let weak = render_weak.clone();
+                let icon_name = if node_id.starts_with("project:") {
+                    if expanded {
+                        IconName::FolderOpen
+                    } else {
+                        IconName::Folder
+                    }
+                } else if node_id.starts_with("contracts:") {
+                    if expanded {
+                        IconName::FolderOpen
+                    } else {
+                        IconName::FolderClosed
+                    }
+                } else if node_id.starts_with("rule:") {
+                    IconName::FileText
+                } else if node_id.starts_with("sessions:") {
+                    IconName::Bot
+                } else if node_id.starts_with("conflicts:") {
+                    IconName::TriangleAlert
+                } else {
+                    IconName::File
+                };
                 ListItem::new(format!("proj-tree-node-{ix}"))
                     .accessibility_label(label.clone())
                     .selected(selected)
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap_1()
                             .items_center()
-                            .pl(px(depth as f32 * 14.))
+                            .pl(px(depth as f32 * 16.))
                             .child(
                                 h_flex()
-                                    .size(px(22.))
+                                    .size(px(16.))
                                     .flex_shrink_0()
                                     .items_center()
                                     .justify_center()
-                                    .text_sm()
-                                    .text_color(muted)
                                     .child(if is_folder {
-                                        if expanded { "▾" } else { "▸" }
+                                        Icon::new(if expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size(px(14.))
+                                        .text_color(muted)
+                                        .into_any_element()
                                     } else {
-                                        ""
+                                        div().size(px(16.)).into_any_element()
                                     }),
                             )
-                            .child(div().text_sm().child(label.to_string())),
+                            .child(Icon::new(icon_name).size(px(16.)).text_color(muted))
+                            .child(div().text_sm().truncate().child(label.to_string())),
                     )
                     .on_click(move |_, window, cx| {
                         let _ = weak.update(cx, |console, ccx| {
@@ -55,7 +104,23 @@ impl Console {
                         });
                     })
             },
-        );
+        )
+        .context_menu(move |_ix, entry, menu, _window, cx| {
+            let node_id = entry.item().id.to_string();
+            let nid = node_id.clone();
+            let enabled = menu_weak
+                .read_with(cx, |c, _| {
+                    c.tree_rule_enabled.get(&nid).copied().unwrap_or(true)
+                })
+                .unwrap_or(true);
+            build_tree_menu(
+                menu,
+                menu_weak.clone(),
+                node_id,
+                enabled,
+                menu_labels.clone(),
+            )
+        });
 
         let detail_card = self
             .selected_project
@@ -64,6 +129,22 @@ impl Console {
                 let id = project.id;
                 let is_current = self.current_project == Some(id);
                 let (contracts, sessions) = self.project_stats.get(&id).copied().unwrap_or((0, 0));
+                let registered_count = self.hook_statuses.iter().filter(|s| s.registered).count();
+                let hooks_total = HookTarget::ALL.len();
+                let hooks_summary = self.tr(
+                    "proj.hooks_summary",
+                    &[&registered_count.to_string(), &hooks_total.to_string()],
+                );
+                let hooks_tag = if registered_count == hooks_total {
+                    Tag::success().child(hooks_summary)
+                } else if registered_count > 0 {
+                    Tag::warning().child(hooks_summary)
+                } else {
+                    Tag::secondary().child(hooks_summary)
+                };
+                let export_help_open = self.open_sections.contains("proj-export-help");
+                let hooks_help_open = self.open_sections.contains("proj-hooks-help");
+
                 ui::card(cx)
                     .child(
                         h_flex()
@@ -96,38 +177,42 @@ impl Console {
                         h_flex()
                             .gap_2()
                             .flex_wrap()
-                            .when(!is_current, |this| {
-                                this.child(
-                                    Button::new("project-set-current")
-                                        .label(self.t("proj.set_current"))
-                                        .primary()
-                                        .small()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_current_project(id, cx);
-                                            cx.notify();
-                                        })),
-                                )
-                            })
+                            .items_center()
+                            .justify_between()
                             .child(
-                                Button::new("project-reveal")
-                                    .label(self.t("proj.reveal"))
-                                    .small()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.reveal_project_contracts(cx);
-                                        cx.notify();
-                                    })),
+                                h_flex()
+                                    .gap_2()
+                                    .flex_wrap()
+                                    .when(!is_current, |this| {
+                                        this.child(
+                                            Button::new("project-set-current")
+                                                .label(self.t("proj.set_current"))
+                                                .primary()
+                                                .small()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_current_project(id, cx);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    })
+                                    .child(
+                                        Button::new("project-rename")
+                                            .label(self.t("proj.rename"))
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.open_rename_dialog(window, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("project-reveal")
+                                            .label(self.t("proj.reveal"))
+                                            .small()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.reveal_project_contracts(cx);
+                                                cx.notify();
+                                            })),
+                                    ),
                             )
-                            .child(
-                                Button::new("project-export")
-                                    .label(self.t("proj.export"))
-                                    .small()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.export_native_for_selected_project(cx);
-                                    })),
-                            )
-                            .when(self.export_stale, |this| {
-                                this.child(Tag::warning().child(self.t("proj.export_stale")))
-                            })
                             .child(
                                 Button::new("project-remove")
                                     .label(self.t("proj.remove"))
@@ -139,55 +224,220 @@ impl Console {
                                     })),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(self.t("proj.export_hint")),
-                    )
-                    .when(self.export_stale, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().warning)
-                                .child(self.t("proj.export_stale_hint")),
-                        )
-                    })
+                    .child(div().h(px(1.)).w_full().bg(cx.theme().border))
                     .child(
                         v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(muted)
-                                    .child(self.t("proj.rename_title")),
-                            )
+                            .gap_2()
                             .child(
                                 h_flex()
                                     .gap_2()
                                     .items_center()
+                                    .child(ui::section_label(cx, self.t("proj.export_title")))
+                                    .when(self.export_stale, |this| {
+                                        this.child(
+                                            Tag::warning().child(self.t("proj.export_stale")),
+                                        )
+                                    }),
+                            )
+                            .child(h_flex().gap_3().flex_wrap().children(
+                                ExportTarget::ALL.iter().map(|t| {
+                                    let (key, id) = match t {
+                                        ExportTarget::Agents => {
+                                            ("proj.target_agents", "export-target-agents")
+                                        }
+                                        ExportTarget::Claude => {
+                                            ("proj.target_claude", "export-target-claude")
+                                        }
+                                        ExportTarget::Gemini => {
+                                            ("proj.target_gemini", "export-target-gemini")
+                                        }
+                                        ExportTarget::Cursor => {
+                                            ("proj.target_cursor", "export-target-cursor")
+                                        }
+                                    };
+                                    let checked = self.export_targets.contains(t);
+                                    let target = *t;
+                                    Checkbox::new(id)
+                                        .label(self.t(key))
+                                        .checked(checked)
+                                        .on_click(cx.listener(move |this, next, _, cx| {
+                                            this.toggle_export_target(target, *next, cx);
+                                        }))
+                                        .into_any_element()
+                                }),
+                            ))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .flex_wrap()
                                     .child(
-                                        div().flex_1().min_w_0().child(
-                                            Input::new(&self.project_rename_input)
-                                                .id("project-rename-input"),
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("project-rename-save")
-                                            .label(self.t("proj.rename_save"))
+                                        Button::new("project-export")
+                                            .label(self.t("proj.export"))
+                                            .primary()
                                             .small()
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.rename_project_from_input(cx);
-                                                cx.notify();
+                                                this.export_native_for_selected_project(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("project-revoke")
+                                            .label(self.t("proj.revoke"))
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.confirm_revoke_native(window, cx);
                                             })),
                                     ),
-                            ),
+                            )
+                            .child(ui::disclosure(
+                                "proj-export-help",
+                                self.t("proj.export_details"),
+                                export_help_open,
+                                v_flex()
+                                    .gap_1()
+                                    .pt_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(self.t("proj.export_targets_hint")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(self.t("proj.export_hint")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(self.t("proj.revoke_hint")),
+                                    )
+                                    .when(self.export_stale, |this| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().warning)
+                                                .child(self.t("proj.export_stale_hint")),
+                                        )
+                                    }),
+                                cx.listener(|this, _, _, cx| {
+                                    this.toggle_section("proj-export-help", cx);
+                                }),
+                            )),
                     )
+                    .child(div().h(px(1.)).w_full().bg(cx.theme().border))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(self.t("proj.remove_hint")),
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(ui::section_label(cx, self.t("proj.hooks_title")))
+                                    .child(hooks_tag),
+                            )
+                            .child(h_flex().gap_3().flex_wrap().children(
+                                HookTarget::ALL.iter().map(|t| {
+                                    let (key, id) = match t {
+                                        HookTarget::Claude => {
+                                            ("proj.hook_target_claude", "hook-target-claude")
+                                        }
+                                        HookTarget::CodeBuddy => {
+                                            ("proj.hook_target_codebuddy", "hook-target-codebuddy")
+                                        }
+                                        HookTarget::WorkBuddy => {
+                                            ("proj.hook_target_workbuddy", "hook-target-workbuddy")
+                                        }
+                                        HookTarget::Qoder => {
+                                            ("proj.hook_target_qoder", "hook-target-qoder")
+                                        }
+                                    };
+                                    let target = *t;
+                                    let checked = self.hook_targets.contains(&target);
+                                    let status =
+                                        self.hook_statuses.iter().find(|s| s.target == target);
+                                    let registered = status.map(|s| s.registered).unwrap_or(false);
+                                    let installed = status.map(|s| s.installed).unwrap_or(false);
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(
+                                            Checkbox::new(id)
+                                                .label(self.t(key))
+                                                .checked(checked)
+                                                .on_click(cx.listener(move |this, next, _, cx| {
+                                                    this.toggle_hook_target(target, *next, cx);
+                                                })),
+                                        )
+                                        .when(registered, |this| {
+                                            this.child(
+                                                Tag::success()
+                                                    .child(self.t("proj.hook_registered")),
+                                            )
+                                        })
+                                        .when(!registered && installed, |this| {
+                                            this.child(
+                                                Tag::secondary()
+                                                    .child(self.t("proj.hook_installed")),
+                                            )
+                                        })
+                                        .into_any_element()
+                                }),
+                            ))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .flex_wrap()
+                                    .child(
+                                        Button::new("project-hooks-register")
+                                            .label(self.t("proj.hooks_register"))
+                                            .primary()
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.register_hooks_for_selected_project(
+                                                    window, cx,
+                                                );
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("project-hooks-revoke")
+                                            .label(self.t("proj.hooks_revoke"))
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.confirm_revoke_hooks(window, cx);
+                                            })),
+                                    ),
+                            )
+                            .child(ui::disclosure(
+                                "proj-hooks-help",
+                                self.t("proj.hooks_details"),
+                                hooks_help_open,
+                                v_flex()
+                                    .gap_1()
+                                    .pt_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(self.t("proj.hooks_hint")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(self.t("proj.hooks_register_hint")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(self.t("proj.hooks_revoke_hint")),
+                                    ),
+                                cx.listener(|this, _, _, cx| {
+                                    this.toggle_section("proj-hooks-help", cx);
+                                }),
+                            )),
                     )
                     .into_any_element()
             });
@@ -286,10 +536,17 @@ impl Console {
             )
             .into_any_element()
         } else {
-            div()
+            v_flex()
                 .flex_1()
                 .min_h_0()
-                .child(project_tree)
+                .gap_1()
+                .child(div().flex_1().min_h_0().child(project_tree))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(self.t("proj.tree_hint")),
+                )
                 .into_any_element()
         };
 
@@ -339,4 +596,159 @@ impl Console {
                 ),
         )
     }
+}
+
+/// Localized labels for the project tree context menu (captured once per render).
+#[derive(Clone)]
+struct TreeMenuLabels {
+    set_current: String,
+    rename: String,
+    export: String,
+    revoke: String,
+    register_hooks: String,
+    revoke_hooks: String,
+    reveal: String,
+    remove: String,
+    open: String,
+    open_rule: String,
+    enable: String,
+    disable: String,
+}
+
+/// One context-menu item that dispatches a [`TreeAction`] on the Console when clicked.
+fn tree_item(
+    weak: &WeakEntity<Console>,
+    label: String,
+    icon: IconName,
+    action: TreeAction,
+) -> PopupMenuItem {
+    let weak = weak.clone();
+    PopupMenuItem::new(label)
+        .icon(Icon::new(icon))
+        .on_click(move |_, window, cx| {
+            if let Some(entity) = weak.upgrade() {
+                entity.update(cx, |this, ccx| {
+                    this.run_tree_action(action.clone(), window, ccx);
+                });
+            }
+        })
+}
+
+/// Build the right-click menu for a tree node, shaped by what the node represents.
+fn build_tree_menu(
+    mut menu: PopupMenu,
+    weak: WeakEntity<Console>,
+    node_id: String,
+    rule_enabled: bool,
+    labels: TreeMenuLabels,
+) -> PopupMenu {
+    if let Some(rest) = node_id.strip_prefix("project:") {
+        if let Ok(id) = Uuid::parse_str(rest) {
+            menu = menu
+                .item(tree_item(
+                    &weak,
+                    labels.set_current,
+                    IconName::Check,
+                    TreeAction::SetCurrent(id),
+                ))
+                .item(tree_item(
+                    &weak,
+                    labels.rename,
+                    IconName::FileText,
+                    TreeAction::Rename(id),
+                ))
+                .separator()
+                .item(tree_item(
+                    &weak,
+                    labels.export,
+                    IconName::ExternalLink,
+                    TreeAction::Export(id),
+                ))
+                .item(tree_item(
+                    &weak,
+                    labels.revoke,
+                    IconName::Close,
+                    TreeAction::Revoke(id),
+                ))
+                .separator()
+                .item(tree_item(
+                    &weak,
+                    labels.register_hooks,
+                    IconName::Settings2,
+                    TreeAction::RegisterHooks(id),
+                ))
+                .item(tree_item(
+                    &weak,
+                    labels.revoke_hooks,
+                    IconName::Close,
+                    TreeAction::RevokeHooks(id),
+                ))
+                .separator()
+                .item(tree_item(
+                    &weak,
+                    labels.reveal,
+                    IconName::FolderOpen,
+                    TreeAction::Reveal(id),
+                ))
+                .item(tree_item(
+                    &weak,
+                    labels.remove,
+                    IconName::Close,
+                    TreeAction::Remove(id),
+                ));
+        }
+    } else if let Some(rest) = node_id.strip_prefix("contracts:") {
+        if let Ok(id) = Uuid::parse_str(rest) {
+            menu = menu
+                .item(tree_item(
+                    &weak,
+                    labels.open,
+                    IconName::ChevronRight,
+                    TreeAction::Open(node_id.clone()),
+                ))
+                .item(tree_item(
+                    &weak,
+                    labels.reveal,
+                    IconName::FolderOpen,
+                    TreeAction::Reveal(id),
+                ))
+                .item(tree_item(
+                    &weak,
+                    labels.export,
+                    IconName::ExternalLink,
+                    TreeAction::Export(id),
+                ));
+        }
+    } else if let Some(rest) = node_id.strip_prefix("rule:") {
+        if let Some((pid, rid)) = rest.split_once(':')
+            && let Ok(id) = Uuid::parse_str(pid)
+        {
+            let (toggle_label, toggle_icon) = if rule_enabled {
+                (labels.disable, IconName::Close)
+            } else {
+                (labels.enable, IconName::Check)
+            };
+            menu = menu
+                .item(tree_item(
+                    &weak,
+                    labels.open_rule,
+                    IconName::FileText,
+                    TreeAction::Open(node_id.clone()),
+                ))
+                .item(tree_item(
+                    &weak,
+                    toggle_label,
+                    toggle_icon,
+                    TreeAction::ToggleRule(id, rid.to_string()),
+                ));
+        }
+    } else if node_id.starts_with("sessions:") || node_id.starts_with("conflicts:") {
+        menu = menu.item(tree_item(
+            &weak,
+            labels.open,
+            IconName::ChevronRight,
+            TreeAction::Open(node_id.clone()),
+        ));
+    }
+    menu
 }
