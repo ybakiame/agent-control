@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use agent_control_core::Store;
 use agent_control_core::model::{
-    Decision, EvidenceKind, QueryContext, RuleKind, Scope, SuggestionStatus, WorkItem,
-    WorkItemStatus,
+    Decision, EvidenceKind, QueryContext, RuleKind, Scope, SessionStatus, SuggestionStatus,
+    WorkItem, WorkItemStatus,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -206,11 +206,21 @@ pub struct SessionRequest {
 pub struct ExportHandoffRequest {
     /// Session UUID to hand off
     pub session_id: String,
-    /// Target harness id
-    pub to_agent: String,
+    /// Optional receiver hint recorded in the handoff history. The real receiver is chosen at
+    /// import_handoff (new_agent), so this may be omitted.
+    #[serde(default)]
+    pub to_agent: Option<String>,
     /// Context summary to carry over (conversation state, files touched, decisions)
     #[serde(default)]
     pub context: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetSessionStatusRequest {
+    /// Session UUID
+    pub session_id: String,
+    /// New lifecycle status: active | completed | failed (handed_off is set by export_handoff)
+    pub status: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -543,7 +553,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Create a work session with a frozen constraint snapshot. The snapshot binds the applicable rules at session start so continuity can be verified across harness handoffs."
+        description = "Create a work session with a frozen constraint snapshot. The snapshot binds the applicable rules at session start so continuity can be verified across harness handoffs. Idempotent per (project_path, agent_id, task): an existing ACTIVE session with the same triple is returned unchanged with reused=true instead of piling up duplicates; a new task freezes a fresh snapshot."
     )]
     async fn create_session(
         &self,
@@ -555,8 +565,9 @@ impl ControlServer {
             &req.agent_id,
             req.task_tags,
         ) {
-            Ok(session) => json_result(&serde_json::json!({
+            Ok((session, reused)) => json_result(&serde_json::json!({
                 "session_id": session.id,
+                "reused": reused,
                 "snapshot_hash": session.constraint_snapshot.snapshot_hash,
                 "rules": session.constraint_snapshot.rules,
                 "instruction": "Acknowledge these rules with acknowledge_rules before making changes.",
@@ -628,7 +639,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Export a handoff bundle to transfer this session to another harness. The bundle carries the frozen constraints and evidence chain head so the next harness can be verified against the same rules."
+        description = "Export a handoff bundle to transfer this session to another harness, and refresh the project-local handoff/latest.md continuity brief. The bundle carries the frozen constraints, achieved tiers, goal/work state and evidence chain head so the next harness can be verified against the same rules. to_agent is an optional hint; the receiver chooses itself at import_handoff. Marks the source session handed_off."
     )]
     async fn export_handoff(
         &self,
@@ -637,7 +648,7 @@ impl ControlServer {
         let session_id = parse_uuid(&req.session_id)?;
         match self
             .store
-            .export_handoff(session_id, &req.to_agent, req.context)
+            .export_handoff(session_id, req.to_agent.as_deref(), req.context)
         {
             Ok(bundle) => json_result(&serde_json::to_value(bundle).unwrap()),
             Err(e) => tool_err(e),
@@ -1085,6 +1096,38 @@ impl ControlServer {
             .store
             .set_session_work_state(session_id, req.goal, items)
         {
+            Ok(session) => json_result(&serde_json::to_value(session).unwrap()),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Close or reopen a session: status = active | completed | failed. Completing or failing appends a session_end evidence entry (the chain stays auditable) and takes the session out of the active list; reopen with active to resume. handed_off cannot be set here — export_handoff owns that transition. Call it when a unit of work ends so sessions do not pile up as forever-active."
+    )]
+    async fn set_session_status(
+        &self,
+        Parameters(req): Parameters<SetSessionStatusRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let session_id = parse_uuid(&req.session_id)?;
+        let status: SessionStatus = serde_json::from_value(serde_json::Value::String(
+            req.status.clone(),
+        ))
+        .map_err(|_| {
+            ErrorData::invalid_params(
+                format!(
+                    "unknown status '{}'; use active|completed|failed",
+                    req.status
+                ),
+                None,
+            )
+        })?;
+        if status == SessionStatus::HandedOff {
+            return Err(ErrorData::invalid_params(
+                "handed_off is set by export_handoff, not set_session_status",
+                None,
+            ));
+        }
+        match self.store.set_session_status(session_id, status) {
             Ok(session) => json_result(&serde_json::to_value(session).unwrap()),
             Err(e) => tool_err(e),
         }

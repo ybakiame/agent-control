@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 pub const APP_DIR_NAME: &str = ".agent-control";
 pub const PROJECT_DIR_NAME: &str = ".agent-control";
@@ -12,6 +13,61 @@ pub const PORTABLE_ENV: &str = "AGENT_CONTROL_PORTABLE";
 /// Per-project scaffold marker recording the template version and the content hash of each
 /// generated file, so upgrades can refresh untouched scaffolds without clobbering user edits.
 pub const SCAFFOLD_MARKER: &str = ".scaffold.json";
+/// User-editable application config (TOML) at the data root.
+pub const CONFIG_FILE_NAME: &str = "config.toml";
+/// Legacy JSON prefs, converted to `config.toml` on first load and then removed.
+const LEGACY_PREFS_FILE: &str = "ui.json";
+/// Default loopback port for the MCP daemon; distinct ports isolate test vs production.
+pub const DEFAULT_MCP_PORT: u16 = 9870;
+
+/// Application preferences persisted as TOML beside the store (locale + MCP port).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppConfig {
+    /// UI locale code (`en` | `zh`).
+    pub locale: String,
+    /// Loopback port the MCP daemon binds.
+    pub mcp_port: u16,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            locale: "en".to_string(),
+            mcp_port: DEFAULT_MCP_PORT,
+        }
+    }
+}
+
+impl AppConfig {
+    /// Read `config.toml`; on first run convert a legacy `ui.json` (locale only) and delete it.
+    pub fn load(layout: &DataLayout) -> Self {
+        if let Ok(text) = std::fs::read_to_string(layout.config_file())
+            && let Ok(cfg) = toml::from_str::<Self>(&text)
+        {
+            return cfg;
+        }
+        let mut cfg = Self::default();
+        let legacy = layout.root.join(LEGACY_PREFS_FILE);
+        if let Ok(text) = std::fs::read_to_string(&legacy) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
+                && let Some(locale) = value.get("locale").and_then(|v| v.as_str())
+            {
+                cfg.locale = locale.to_string();
+            }
+            if cfg.save(layout).is_ok() {
+                let _ = std::fs::remove_file(&legacy);
+            }
+        }
+        cfg
+    }
+
+    pub fn save(&self, layout: &DataLayout) -> Result<()> {
+        let text = toml::to_string_pretty(self).context("serializing config")?;
+        std::fs::write(layout.config_file(), text)
+            .with_context(|| format!("writing {}", layout.config_file().display()))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DataLayout {
@@ -70,6 +126,10 @@ impl DataLayout {
 
     pub fn agents_file(&self) -> PathBuf {
         self.root.join("agents.yaml")
+    }
+
+    pub fn config_file(&self) -> PathBuf {
+        self.root.join(CONFIG_FILE_NAME)
     }
 
     pub fn db_path(&self) -> PathBuf {

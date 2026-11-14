@@ -64,7 +64,7 @@ Three crates under `crates/`. Dependency direction: `app → {mcp, core}`, `mcp 
 | Crate | Package | Kind | Responsibility | Key files |
 |-------|---------|------|----------------|-----------|
 | core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native pointer export + drift + revoke, assurance tiers, tool-call gate, hooks config | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Enforcement`, `AssuranceTier`, `ConstraintAssurance`, `ToolGuard`, `ToolGateReport`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs` (`evaluate_code_checks`), `gate.rs` (`check_tool_call`, repo gate + tool guards), `hooks.rs` (`HookTarget`, `register_hooks`/`revoke_hooks`/`detect_hooks`), `export.rs` (`PROJECT_GUIDANCE`, `render_constraint_briefing`, `handoff_tier_warning`, `render_handoff_brief`, `wrap_block`, `upsert_managed_block`, `remove_managed_block`, `ExportTarget`, `ExportReport`, `RevokeReport`, `DriftReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
-| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 24 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
+| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 25 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
 | app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review, native export + hooks registration | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
 
 Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`, `Store`,
@@ -88,6 +88,13 @@ wrapper). Session work state is written via `set_session_work_state(id, goal, wo
 (replaces the goal + done/doing/todo list; backs MCP `update_work_state` and the Sessions-view work
 editor). `delete_session(id)` removes a session and, **cascade**, its evidence chain + provenance
 record (backs the Sessions-view Delete button / row menu, behind a confirm dialog).
+`create_session(task, project_path, agent_id, task_tags) -> (Session, bool)` is **get-or-create**: an
+**active** session with the same project + agent + task is returned unchanged (`reused = true`), so
+repeated calls from one harness conversation never pile up duplicate sessions; a new task or a closed
+source session freezes a fresh snapshot. `set_session_status(id, status) -> Session` closes
+(`Completed`/`Failed`, appending a `session_end` evidence entry) or reopens (`Active`) a session;
+`HandedOff` is set only by `export_handoff` (whose `to_agent` is an optional receiver hint — the real
+receiver is chosen at `import_handoff`).
 
 **Native export** (`core/src/export.rs` + `Store::export_native`): writes a *static pointer block*
 into the selected harness entry points so agents that never call MCP still learn where the contracts
@@ -255,7 +262,7 @@ isolate test runs; `open_with_root` / `--data-dir` still override everything.
 ```
 ~/.agent-control/
 ├── control.db          # SQLite (rusqlite, bundled): sessions, provenance, evidence chain, projects, rule_suggestions
-├── ui.json             # UI prefs: {"locale":"en"|"zh"}
+├── config.toml         # app prefs (TOML): locale ("en"|"zh") + mcp_port (default 9870); migrated once from legacy ui.json
 ├── agents.yaml         # registered harness commands
 ├── logs/               # app.log + mcp.log (tracing-appender, non-rolling; visible with no console)
 ├── rules/user/         # user-scope rule files (committed/reviewed)
@@ -293,7 +300,8 @@ live outside `rules/` so they never load as binding contracts.
 ## MCP protocol / MCP 协议
 
 Transports (rmcp 3.9): **stdio** and **Streamable HTTP** (axum, route `/mcp`, `mcp-session-id`
-header). The desktop app runs MCP as a **background daemon** at `http://127.0.0.1:9870/mcp`:
+header). The desktop app runs MCP as a **background daemon** at `http://127.0.0.1:<mcp_port>/mcp`
+(default port `9870`):
 `console.rs::start_mcp_http` first probes the bind address and reuses an already-running daemon,
 otherwise spawns the sibling `agent-control-mcp` binary **detached** (`DETACHED_PROCESS |
 CREATE_NO_WINDOW`) so it survives closing the GUI; it falls back to in-process
@@ -304,6 +312,19 @@ route (rejects non-loopback peers) so the console's Stop button can stop a daemo
 as a child; `stop_mcp_http` signals it for external daemons and cancels the token for in-process.
 Both binaries are `#![windows_subsystem = "windows"]` (no popped cmd window) and log to
 `<root>/logs/{app,mcp}.log` via `tracing-appender` (the `WorkerGuard` must outlive the process).
+
+**App config (`AppConfig`, `core/src/config.rs`):** user-editable preferences live in `config.toml`
+at the data root (`DataLayout::config_file`): `locale` (`en`|`zh`) and `mcp_port` (u16, default
+`DEFAULT_MCP_PORT = 9870`). `AppConfig::load` reads it (serde defaults fill missing keys) and, on
+first run, **migrates** a legacy `ui.json` (locale only) into `config.toml` then deletes the json —
+a one-time conversion, not a lingering shim. `Console` loads it in `new()` (deriving `locale` and
+`mcp_bind = 127.0.0.1:<mcp_port>`); `set_locale` and `apply_mcp_port` persist via `AppConfig::save`.
+The port is editable in **Settings → MCP server** (`mcp_port_input` + Apply): `save_mcp_port_from_input`
+parses/validates (1–65535), then `apply_mcp_port` saves, stops the old daemon and starts a new one on
+the new bind. Because each data root keeps its own `config.toml`, a **portable/dev** instance can bind
+a different port (e.g. `9871`) and stay fully isolated from a production daemon on `9870`. The sidebar
+footer also carries an **icon start/stop toggle** (`mcp-sidebar-toggle`, `Play`/`Square` from the
+default icon set) beside the MCP status, calling `toggle_mcp_http`.
 
 MCP bin CLI (`crates/mcp/src/main.rs`):
 
@@ -317,8 +338,9 @@ cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 **Single-instance:** the TCP bind is the lock — a second HTTP launch on a busy address logs
 "already serving" and exits cleanly (`AddrInUse` guard), so daemon spawns are idempotent.
 
-**24 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
-`record_evidence`, `acknowledge_rules`, `get_session_context`, `update_work_state`, `export_handoff`,
+**25 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
+`record_evidence`, `acknowledge_rules`, `get_session_context`, `update_work_state`,
+`set_session_status`, `export_handoff`,
 `import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`,
 `list_suggestions`, `export_native`, `check_export_drift`, `revoke_native`, `verify_constraints`,
 `check_tool_call`, `register_hooks`, `revoke_hooks`, `detect_hooks` (plus resources & prompts).
@@ -394,7 +416,8 @@ Projects-view Hooks UI.
 Recommended harness call order:
 
 1. `get_applicable_rules` — resolve binding rules + provenance + conflicts before working.
-2. `create_session` — freeze the constraint snapshot.
+2. `create_session` — freeze the constraint snapshot (get-or-create: an active session with the same
+   project + agent + task is reused, `reused: true`, instead of piling up duplicates).
 3. `acknowledge_rules` — prove you received exactly the snapshot's rules.
 4. `record_evidence` — append tool calls / file changes / test results to the hash chain.
 5. `verify_constraints` — run the snapshot's `code_checks` against the repo, record achieved tiers.
@@ -406,6 +429,9 @@ Recommended harness call order:
    state** sections) beside the JSON bundle, so a harness that never calls MCP can inherit the handoff
    by reading that file (the exported `AGENTS.md` block points at it).
 8. `verify_evidence` — recompute the chain, detect tampering.
+9. `set_session_status` — `completed`/`failed` when the unit of work ends (appends `session_end`
+   evidence, keeps the chain auditable, leaves the active list); `active` reopens. `handed_off` is
+   set only by `export_handoff`.
 
 When adding a tool: implement the handler in `crates/mcp/src/lib.rs` with the rmcp `#[tool]`
 macro, keep it a thin adapter over `Store`/`RuleEngine` (no business logic in the transport
@@ -457,7 +483,7 @@ flow, update the script + the e2e together.
 
 ## i18n / 多语言
 
-Bilingual **English / 简体中文**, runtime-switchable in Settings, persisted to `ui.json`.
+Bilingual **English / 简体中文**, runtime-switchable in Settings, persisted to `config.toml` (`locale`).
 
 - All strings live in the static table `STRINGS: &[(&str, &str, &str)]` in
   `crates/app/src/i18n.rs`, as `(key, English, 简体中文)` rows. Keys are namespaced
@@ -467,7 +493,7 @@ Bilingual **English / 简体中文**, runtime-switchable in Settings, persisted 
 - Lookup: `i18n::t(locale, key) -> &'static str` (unknown key falls back to the key itself).
   Templates: `i18n::tr(locale, key, &[args]) -> String` replaces each `{}` **in order**.
 - In views/console use the entity helpers **`self.t(key)`** and **`self.tr(key, &[args])`**.
-  `Console` holds `pub locale: Locale`; `set_locale(locale, window, cx)` saves `ui.json`,
+  `Console` holds `pub locale: Locale`; `set_locale(locale, window, cx)` saves `config.toml`,
   re-localizes every `InputState` placeholder, and calls `cx.notify()`.
 - `Locale` is `En` (default) / `Zh`; `code()` → `"en"`/`"zh"`, `from_code()` parses.
 
@@ -580,8 +606,16 @@ status + kind tags; the approve button label, edit hint and success toast are sc
 read-only with status, review note and `approved_rule_id`. `refresh_data` reloads the queue + pending
 count and repairs a dangling selection.
 
-**Sessions work state & deletion** (`views/sessions.rs`): the selected-session detail keeps the
+**Sessions lifecycle, work state & deletion** (`views/sessions.rs`): the selected-session detail keeps the
 snapshot summary, binding constraints, achieved assurance and handoffs in the open, and collapses the rest.
+The header carries a **Mark completed** / **Reopen** button (`set_selected_session_status` →
+`Store::set_session_status`, toast feedback) beside the danger **Delete session** button; the list
+header has a **Show completed** Switch (`Console.session_show_completed`, default off) that hides
+Completed/Failed rows so finished work leaves the active list. The **Handoff bundle** panel has no
+target input: a hint + **Export bundle** button (`Console::export_handoff`, `to_agent = None`) plus
+mono rows showing the deterministic bundle path (`<root>/bundles/<session_id>.json`) and the
+project-local `handoff/latest.md` brief path; handoff history rows render an unspecified receiver as
+`sess.unspecified`.
 A **Work state** section shows the `goal` plus read-only done/doing/todo rows (`work.*` tags); an
 `ui::disclosure` ("sess-work-edit") holds the editor — two `TextareaState`s (`session_goal_input`,
 `session_work_input`) + a format hint + **Save** (`save_session_work_state` → `Store::set_session_work_state`).
@@ -629,7 +663,7 @@ process, which may be a production install. Run the scripts under the existing `
 
 Typical loop: launch with `mise run run` → find the HWND → `uia-dump` to confirm names →
 `uia-invoke` each nav item / the language buttons → `uia-dump` again to assert the localized
-names changed → `uia-shot` for pixels. Verify locale persistence by reading `ui.json`.
+names changed → `uia-shot` for pixels. Verify locale persistence by reading `config.toml`.
 
 **Windows gotchas:**
 
@@ -637,7 +671,7 @@ names changed → `uia-shot` for pixels. Verify locale persistence by reading `u
   `cargo build` then fails with `failed to remove … (os error 5 / 拒绝访问)`. Find and kill it:
   `tasklist | grep agent-control-app` then `taskkill //PID <pid> //F` (Git Bash needs `//`).
 - **Locked session ⇒ screenshots show the lock screen / black.** That is not an app bug. The
-  UIA tree still returns correct elements, so verify functionally (names, geometry, `ui.json`)
+  UIA tree still returns correct elements, so verify functionally (names, geometry, `config.toml`)
   and note that pixel confirmation is blocked until the session is unlocked.
 - **Clickable list rows must be named to be UIA-drivable.** A raw `div().id(...).on_click(...)`
   is pruned from the control view (generic role, no name). Add `.role(Role::Button)` +

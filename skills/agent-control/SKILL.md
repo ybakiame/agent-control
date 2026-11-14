@@ -23,15 +23,18 @@ work). It is not the guide for editing the console's Rust source — that lives 
 
 ## Connect
 
-The console exposes an **MCP server** (24 tools + resources + prompts). Pick one transport:
+The console exposes an **MCP server** (25 tools + resources + prompts). Pick one transport:
 
 - **Streamable HTTP** — the desktop app runs a **background daemon** at `http://127.0.0.1:9870/mcp`
-  (`mcp-session-id` header). It reuses an already-running daemon or spawns the sibling
+  by default (`mcp-session-id` header). It reuses an already-running daemon or spawns the sibling
   `agent-control-mcp` binary detached, so the endpoint **stays alive after you close the console**.
   Configure your MCP client to point at that URL. To run it headless yourself:
   `agent-control-mcp --bind 127.0.0.1:9870`, or `agent-control-mcp --daemon` to detach and exit.
   Single-instance: a second launch on a busy address exits cleanly. Stop a daemon with a loopback
-  `POST /shutdown` (the console's Stop button does this).
+  `POST /shutdown` (the console's Stop button or sidebar icon toggle does this). The **port is
+  configurable** in Settings → MCP server (persisted to `<data root>/config.toml` as `mcp_port`), so
+  a test instance may bind a different port (e.g. `9871`) to stay isolated from production — confirm
+  the actual endpoint before connecting.
 - **stdio** — for harnesses that spawn the server process: `agent-control-mcp --stdio`.
 
 Optional `--data-dir <path>` overrides the data root (default `~/.agent-control`; a `portable.marker`
@@ -39,7 +42,7 @@ next to the binary switches to `<exe dir>/data`). Both binaries run with **no co
 Windows and log to `<root>/logs/{app,mcp}.log`. Build the binary
 with `mise run build` (→ `target/debug/agent-control-mcp`), or run via `mise run mcp` (stdio).
 
-Verify the connection by listing tools (expect 24) or reading resource `control://overview`.
+Verify the connection by listing tools (expect 25) or reading resource `control://overview`.
 If your client cannot reach the server, confirm the desktop app is running (HTTP) or that your
 harness spawned the stdio binary correctly.
 
@@ -53,7 +56,9 @@ Follow this order for every unit of work. Tool parameters and JSON examples are 
    `conflicts`. **If conflicts exist, resolve them with the user before proceeding.** Use
    `explain_rule` to justify a specific rule and `check_conflicts` for a conflict-only view.
 2. **Create a session** — `create_session` with `task`, `project_path`, `agent_id`. This freezes a
-   constraint snapshot. Keep the returned `session_id` and `rules`.
+   constraint snapshot. It is **idempotent per (project, agent, task)**: while a session with the
+   same triple is active, repeated calls return it (`reused: true`) instead of piling up duplicates
+   — call it freely at conversation start. Keep the returned `session_id` and `rules`.
 3. **Acknowledge** — `acknowledge_rules` with `session_id`, `agent_id`, and the exact `rule_ids`
    from the snapshot. The server reports missing/unexpected rules; a partial acknowledgment is
    flagged. Required after session start **and after every handoff**.
@@ -70,7 +75,8 @@ Follow this order for every unit of work. Tool parameters and JSON examples are 
    `done`/`doing`/`todo`) records the objective (the `/goal`) and resumable progress. Call it as work
    completes or starts and **before handing off**, so the next harness inherits progress instead of
    relying on its own todo list. It replaces the session's goal + items.
-7. **Hand off (when switching harness)** — `export_handoff` (`session_id`, `to_agent`, `context`)
+7. **Hand off (when switching harness)** — `export_handoff` (`session_id`, optional `to_agent` hint,
+   `context`)
    produces a bundle carrying the achieved tiers **and the goal + work items**, and writes a readable
    continuity brief to
    `<project>/.agent-control/handoff/latest.md` (with **Goal** and **Work state** sections). The next
@@ -80,6 +86,9 @@ Follow this order for every unit of work. Tool parameters and JSON examples are 
    calls MCP can still inherit continuity by reading `latest.md` (the exported `AGENTS.md` block
    points at it); re-running `export_handoff` refreshes that file.
 8. **Verify** — `verify_evidence` (`session_id`) recomputes the chain and reports tampering/gaps.
+9. **Close out** — `set_session_status` (`session_id`, `status: completed|failed`) when the unit of
+   work ends, so finished sessions leave the active list (a `session_end` evidence entry keeps the
+   chain auditable). Reopen with `active`; `handed_off` is set only by `export_handoff`.
 
 Always pass a stable `agent_id` identifying your harness (e.g. `claude-code`, `gemini-cli`).
 Project contracts live in `<project>/.agent-control/rules/`; user preferences in
@@ -220,7 +229,7 @@ does the same with one click.
 
 ## Resources
 
-- [references/mcp-tools.md](references/mcp-tools.md) — all 24 tools (parameters + returns), the 3
+- [references/mcp-tools.md](references/mcp-tools.md) — all 25 tools (parameters + returns), the 3
   resources, the `constraint-briefing` prompt, and concrete call examples.
 - In the source repo: `scripts/mcp-e2e.mjs` and `scripts/mcp-http-e2e.mjs` are runnable lifecycle
   examples; `scripts/hook-e2e.mjs` exercises the SessionStart/PreToolUse hook against a live daemon;

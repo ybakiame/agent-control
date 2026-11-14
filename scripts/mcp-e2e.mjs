@@ -119,7 +119,7 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  check("tools/list has 24 tools", names.length === 24, names);
+  check("tools/list has 25 tools", names.length === 25, names);
   check("save_rule registered", names.includes("save_rule"), names);
   check("set_rule_enabled registered", names.includes("set_rule_enabled"), names);
   check("suggest_rule registered", names.includes("suggest_rule"), names);
@@ -171,6 +171,18 @@ try {
   check("create_session freezes 2 rules", session.rules?.length === 2, session);
   const ruleIds = session.rules.map((r) => r.id);
 
+  // Idempotent creation: same (project, agent, task) while active returns the same session.
+  const again = await tool("create_session", {
+    task: "e2e: refactor module",
+    project_path: projectDir,
+    agent_id: "harness-a",
+  });
+  check(
+    "create_session reuses active same-task session",
+    again.session_id === sessionId && again.reused === true,
+    again,
+  );
+
   const ack = await tool("acknowledge_rules", {
     session_id: sessionId,
     agent_id: "harness-a",
@@ -219,10 +231,15 @@ try {
 
   const bundle = await tool("export_handoff", {
     session_id: sessionId,
-    to_agent: "harness-b",
     context: { summary: "module refactor in progress" },
   });
   check("export_handoff returns bundle", !!bundle.bundle_hash, bundle);
+  const handedOff = await tool("get_session_context", { session_id: sessionId });
+  check(
+    "export_handoff marks source handed_off (to_agent optional)",
+    handedOff.session?.status === "handed_off",
+    handedOff,
+  );
   check(
     "handoff bundle carries goal + work items",
     bundle.goal === "ship the refactor without breaking the public API" &&
@@ -835,6 +852,33 @@ try {
   check(
     "verify_constraints rejects an unknown session",
     await toolRejects("verify_constraints", { session_id: "00000000-0000-0000-0000-000000000000", agent_id: "a" }),
+  );
+
+  // Session lifecycle: close/reopen via set_session_status; handed_off stays export-only.
+  const lifeSession = await tool("create_session", {
+    task: "e2e: lifecycle",
+    project_path: projectDir,
+    agent_id: "harness-a",
+  });
+  const closed = await tool("set_session_status", {
+    session_id: lifeSession.session_id,
+    status: "completed",
+  });
+  check("set_session_status completes", closed.status === "completed", closed);
+  const lifeChain = await tool("verify_evidence", { session_id: lifeSession.session_id });
+  check("session_end evidence keeps chain valid", lifeChain.valid === true, lifeChain);
+  const reopened = await tool("set_session_status", {
+    session_id: lifeSession.session_id,
+    status: "active",
+  });
+  check("set_session_status reopens", reopened.status === "active", reopened);
+  check(
+    "set_session_status rejects handed_off",
+    await toolRejects("set_session_status", { session_id: lifeSession.session_id, status: "handed_off" }),
+  );
+  check(
+    "set_session_status rejects unknown status",
+    await toolRejects("set_session_status", { session_id: lifeSession.session_id, status: "bogus" }),
   );
 
   // ---- Layer 2: the deny-capable PreToolUse gate (check_tool_call) ----

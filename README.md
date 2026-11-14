@@ -92,9 +92,11 @@ Agent Control 是同一规则库之上的**解析层**，会**编译进**这些�
   with a pending-count badge in the sidebar). A user edits, **approves** (the draft becomes a
   binding project rule) or **rejects** it — keeping humans in the loop for inferred contracts.
 - **Bilingual UI (English / 简体中文)** with a runtime switcher in Settings; the choice is
-  persisted to `<data root>/ui.json`.
-- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 24 tools plus
-  resources and prompts.
+  persisted to `<data root>/config.toml`.
+- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 25 tools plus
+  resources and prompts. The daemon's loopback **port is configurable** in Settings (default
+  `9870`) and stored in `config.toml`, so a portable/dev instance can bind a different port and
+  stay isolated from production; a sidebar icon button starts/stops the daemon at a glance.
 - **Hooks enforcement** for Claude Code / CodeBuddy / WorkBuddy / Qoder: a one-click
   `register_hooks` (or the Projects → Hooks panel) writes a **SessionStart** hook (injects the
   binding-rule briefing) and a **PreToolUse** hook (calls `check_tool_call` to deny tool calls that
@@ -119,7 +121,8 @@ mise run mcp          # MCP server in stdio mode (for agent harnesses)
 mise run fmt          # cargo fmt --all
 ```
 
-The desktop app auto-starts the MCP Streamable HTTP endpoint at `http://127.0.0.1:9870/mcp`.
+The desktop app auto-starts the MCP Streamable HTTP endpoint at `http://127.0.0.1:9870/mcp`
+(default port; change it in **Settings → MCP server** to isolate instances — stored in `config.toml`).
 
 End-to-end protocol checks (Node.js, no extra deps):
 
@@ -159,7 +162,7 @@ Recommended call order for a harness:
 ### MCP tools
 
 `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`, `record_evidence`,
-`acknowledge_rules`, `get_session_context`, `update_work_state`, `export_handoff`, `import_handoff`,
+`acknowledge_rules`, `get_session_context`, `update_work_state`, `set_session_status`, `export_handoff`, `import_handoff`,
 `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`, `list_suggestions`,
 `export_native`, `check_export_drift`, `revoke_native`, `verify_constraints`, `check_tool_call`,
 `register_hooks`, `revoke_hooks`, `detect_hooks`.
@@ -422,7 +425,7 @@ Default data root: `~/.agent-control` (override with `--data-dir`).
 **Portable mode / 便携模式.** Place a `portable.marker` file next to the executable (or set
 `AGENT_CONTROL_PORTABLE=1`) and the whole store moves beside the binary instead of the global
 home directory: data root `<exe dir>/data`, database at `<exe dir>/data/db/control.db`, with
-rules / `ui.json` / bundles under `<exe dir>/data/`. Nothing reads or writes `~/.agent-control`,
+rules / `config.toml` / bundles under `<exe dir>/data/`. Nothing reads or writes `~/.agent-control`,
 so a portable copy is fully isolated — ideal for testing. Delete the marker to return to the
 global store. Release zips ship the marker so they run portable out of the box.
 
@@ -433,7 +436,7 @@ global store. Release zips ship the marker so they run portable out of the box.
 ```
 ~/.agent-control/
 ├── control.db          # SQLite: sessions, provenance, evidence chain, projects, rule suggestions
-├── ui.json             # UI preferences (locale)
+├── config.toml         # app preferences (TOML): locale + MCP port (default 9870)
 ├── agents.yaml         # registered harness commands
 ├── rules/user/         # user-scope rule files (Markdown + YAML frontmatter)
 └── bundles/            # exported handoff bundles

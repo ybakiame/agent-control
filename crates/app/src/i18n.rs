@@ -1,5 +1,3 @@
-use std::path::Path;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Locale {
     #[default]
@@ -42,27 +40,6 @@ pub fn tr(locale: Locale, key: &'static str, args: &[&str]) -> String {
         out = out.replacen("{}", arg, 1);
     }
     out
-}
-
-pub fn prefs_path(root: &Path) -> std::path::PathBuf {
-    root.join("ui.json")
-}
-
-pub fn load(root: &Path) -> Locale {
-    let Ok(text) = std::fs::read_to_string(prefs_path(root)) else {
-        return Locale::default();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Locale::default();
-    };
-    Locale::from_code(value.get("locale").and_then(|v| v.as_str()).unwrap_or("en"))
-}
-
-pub fn save(root: &Path, locale: Locale) {
-    let _ = std::fs::write(
-        prefs_path(root),
-        serde_json::json!({ "locale": locale.code() }).to_string(),
-    );
 }
 
 /// (key, English, Simplified Chinese)
@@ -285,6 +262,20 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("sess.new", "New session", "新建会话"),
     ("sess.create", "Create session", "创建会话"),
     ("sess.created", "Session created", "会话已创建"),
+    ("sess.reused", "Reused existing session", "已复用现有会话"),
+    ("sess.complete", "Mark completed", "标记完成"),
+    ("sess.reopen", "Reopen", "恢复进行中"),
+    (
+        "sess.completed_toast",
+        "Session marked completed",
+        "会话已标记完成",
+    ),
+    (
+        "sess.reopened_toast",
+        "Session reopened",
+        "会话已恢复进行中",
+    ),
+    ("sess.show_completed", "Show completed", "显示已完成"),
     ("sess.status.active", "active", "进行中"),
     ("sess.status.handed_off", "handed off", "已交接"),
     ("sess.status.completed", "completed", "已完成"),
@@ -306,13 +297,17 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "约束快照: {}… · 溯源 {}",
     ),
     ("sess.binding_title", "Binding constraints", "绑定约束"),
+    ("sess.handoff_title", "Handoff bundle", "交接包"),
     (
-        "sess.handoff_title",
-        "Handoff to another harness",
-        "交接给另一个 harness",
+        "sess.handoff_hint",
+        "Writes the bundle and refreshes handoff/latest.md. The receiving harness chooses itself when importing, so no target is needed here.",
+        "写出交接包并刷新 handoff/latest.md。接收方 harness 在导入时自行指定，此处无需填写目标。",
     ),
     ("sess.export", "Export bundle", "导出交接包"),
     ("sess.exported", "Handoff bundle exported", "交接包已导出"),
+    ("sess.bundle_path", "bundle: {}", "交接包：{}"),
+    ("sess.latest_path", "brief: {}", "简报：{}"),
+    ("sess.unspecified", "unspecified", "未指定"),
     ("sess.ack", "acknowledged", "已确认"),
     ("sess.pending_ack", "pending ack", "待确认"),
     ("sess.bundle", "bundle {}… · {}", "交接包 {}… · {}"),
@@ -377,6 +372,13 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ),
     ("set.mcp.stop", "Stop MCP server", "停止 MCP 服务"),
     ("set.mcp.start", "Start MCP server", "启动 MCP 服务"),
+    ("set.mcp.port", "MCP port", "MCP 端口"),
+    (
+        "set.mcp.port.desc",
+        "Loopback port the daemon binds. Change it to isolate a test instance from production (each data root keeps its own port). Applying restarts the daemon on the new port.",
+        "守护进程绑定的本地回环端口。修改它可让测试实例与生产隔离（每个数据根各自保留端口）。应用后守护进程会在新端口重启。",
+    ),
+    ("set.mcp.port.apply", "Apply port", "应用端口"),
     ("set.agents", "Registered agents", "已注册代理"),
     (
         "set.agents.desc",
@@ -434,7 +436,7 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ),
     ("ph.project", "C:/path/to/project", "C:/路径/到/项目"),
     ("ph.task", "What should the agent do?", "希望代理做什么？"),
-    ("ph.handoff", "target harness id", "目标 harness ID"),
+    ("ph.mcp_port", "9870", "9870"),
     (
         "ph.goal",
         "What is the goal of this session?",
@@ -477,8 +479,13 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ),
     (
         "log.session_failed",
-        "session creation failed: {}",
-        "会话创建失败: {}",
+        "session operation failed: {}",
+        "会话操作失败: {}",
+    ),
+    (
+        "log.session_status",
+        "session {} status → {}",
+        "会话 {} 状态 → {}",
     ),
     (
         "log.work_state_saved",
@@ -506,14 +513,9 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "请先选择会话",
     ),
     (
-        "log.enter_target",
-        "enter a target harness id",
-        "请输入目标 harness ID",
-    ),
-    (
         "log.handoff_exported",
-        "handoff bundle exported: {} → {} (hash {}…)",
-        "交接包已导出: {} → {}（哈希 {}…）",
+        "handoff bundle exported from {} (hash {}…)",
+        "已从 {} 导出交接包（哈希 {}…）",
     ),
     ("log.handoff_failed", "handoff failed: {}", "交接失败: {}"),
     (
@@ -558,6 +560,21 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "log.mcp_daemon",
         "started background MCP daemon at {} (survives closing the console)",
         "已启动后台 MCP 守护进程：{}（关闭指挥台后仍常驻）",
+    ),
+    (
+        "log.mcp_port",
+        "MCP port set; daemon restarted at {}",
+        "已设置 MCP 端口；守护进程已在 {} 重启",
+    ),
+    (
+        "log.mcp_port_invalid",
+        "invalid MCP port (enter 1–65535)",
+        "MCP 端口无效（请输入 1–65535）",
+    ),
+    (
+        "log.mcp_port_failed",
+        "failed to save MCP port: {}",
+        "保存 MCP 端口失败：{}",
     ),
     // Projects / onboarding
     ("nav.projects", "Projects", "项目"),

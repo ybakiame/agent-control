@@ -1,8 +1,10 @@
+use agent_control_core::DataLayout;
 use agent_control_core::model::{AssuranceTier, Scope, SessionStatus, WorkItemStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -42,7 +44,15 @@ impl Console {
         let primary = cx.theme().primary;
 
         let weak = cx.weak_entity();
-        let session_rows = self.sessions.iter().map(|s| {
+        let visible_sessions: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|s| {
+                self.session_show_completed
+                    || !matches!(s.status, SessionStatus::Completed | SessionStatus::Failed)
+            })
+            .collect();
+        let session_rows = visible_sessions.iter().map(|s| {
             let id = s.id;
             let selected = self.selected_session == Some(id);
             let row_weak = weak.clone();
@@ -169,11 +179,11 @@ impl Console {
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .child(format!("{} → {}", h.from_agent, h.to_agent)),
-                            )
+                            .child(div().text_sm().child(format!(
+                                "{} → {}",
+                                h.from_agent,
+                                h.to_agent.as_deref().unwrap_or(self.t("sess.unspecified"))
+                            )))
                             .child(ack),
                     )
                     .child(div().text_xs().text_color(muted).child(self.tr(
@@ -185,6 +195,13 @@ impl Console {
                     )))
                     .into_any_element()
             });
+
+            let bundle_path = self
+                .store
+                .layout
+                .bundles_dir()
+                .join(format!("{}.json", session.id));
+            let latest_path = DataLayout::project_handoff_latest(&session.project_path);
 
             let work_editor = v_flex()
                 .w_full()
@@ -258,6 +275,42 @@ impl Console {
                                         .font_medium()
                                         .text_sm()
                                         .child(session.task.clone()),
+                                )
+                                .child(
+                                    if matches!(
+                                        session.status,
+                                        SessionStatus::Completed | SessionStatus::Failed
+                                    ) {
+                                        Button::new("session-reopen")
+                                            .label(self.t("sess.reopen"))
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                if this.set_selected_session_status(
+                                                    SessionStatus::Active,
+                                                    cx,
+                                                ) {
+                                                    let msg =
+                                                        this.t("sess.reopened_toast").to_string();
+                                                    this.notify(window, cx, &msg);
+                                                }
+                                                cx.notify();
+                                            }))
+                                    } else {
+                                        Button::new("session-complete")
+                                            .label(self.t("sess.complete"))
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                if this.set_selected_session_status(
+                                                    SessionStatus::Completed,
+                                                    cx,
+                                                ) {
+                                                    let msg =
+                                                        this.t("sess.completed_toast").to_string();
+                                                    this.notify(window, cx, &msg);
+                                                }
+                                                cx.notify();
+                                            }))
+                                    },
                                 )
                                 .child(
                                     Button::new("session-delete")
@@ -371,27 +424,30 @@ impl Console {
                         .gap_2()
                         .child(ui::section_label(cx, self.t("sess.handoff_title")))
                         .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    div().flex_1().min_w_0().child(
-                                        Input::new(&self.handoff_target_input)
-                                            .id("handoff-target-input"),
-                                    ),
-                                )
-                                .child(
-                                    Button::new("handoff-export")
-                                        .label(self.t("sess.export"))
-                                        .small()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            if this.export_handoff(cx) {
-                                                this.notify(window, cx, this.t("sess.exported"));
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(self.t("sess.handoff_hint")),
                         )
+                        .child(
+                            Button::new("handoff-export")
+                                .label(self.t("sess.export"))
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if this.export_handoff(cx) {
+                                        this.notify(window, cx, this.t("sess.exported"));
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(ui::mono(
+                            cx,
+                            self.tr("sess.bundle_path", &[&bundle_path.display().to_string()]),
+                        ))
+                        .child(ui::mono(
+                            cx,
+                            self.tr("sess.latest_path", &[&latest_path.display().to_string()]),
+                        ))
                         .children(handoff_rows),
                 )
                 .into_any_element()
@@ -418,9 +474,30 @@ impl Console {
                         .child(
                             h_flex()
                                 .items_center()
-                                .justify_between()
+                                .gap_2()
                                 .child(ui::section_label(cx, self.t("sess.title")))
-                                .child(Tag::secondary().child(self.sessions.len().to_string())),
+                                .child(div().flex_1())
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(self.t("sess.show_completed")),
+                                        )
+                                        .child(
+                                            Switch::new("sessions-show-completed")
+                                                .checked(self.session_show_completed)
+                                                .accessibility_label(self.t("sess.show_completed"))
+                                                .on_click(cx.listener(|this, next, _, cx| {
+                                                    this.session_show_completed = *next;
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                )
+                                .child(Tag::secondary().child(visible_sessions.len().to_string())),
                         )
                         .child(
                             v_flex()
@@ -465,8 +542,14 @@ impl Console {
                                         .primary()
                                         .small()
                                         .on_click(cx.listener(|this, _, window, cx| {
-                                            if this.create_session_from_inputs(window, cx) {
-                                                this.notify(window, cx, this.t("sess.created"));
+                                            match this.create_session_from_inputs(window, cx) {
+                                                Some(true) => {
+                                                    this.notify(window, cx, this.t("sess.reused"))
+                                                }
+                                                Some(false) => {
+                                                    this.notify(window, cx, this.t("sess.created"))
+                                                }
+                                                None => {}
                                             }
                                             cx.notify();
                                         })),

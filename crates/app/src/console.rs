@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use agent_control_core::model::{
     AgentRegistration, Conflict, Enforcement, EvidenceEntry, Project, ProvenanceRecord, Rule,
-    RuleSuggestion, Scope, Session, SuggestionEdits, SuggestionStatus, VerificationReport,
-    WorkItem, WorkItemStatus,
+    RuleSuggestion, Scope, Session, SessionStatus, SuggestionEdits, SuggestionStatus,
+    VerificationReport, WorkItem, WorkItemStatus,
 };
-use agent_control_core::{ExportTarget, HookStatus, HookTarget, Store};
+use agent_control_core::{AppConfig, ExportTarget, HookStatus, HookTarget, Store};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::badge::Badge;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants, DropdownButton};
@@ -50,6 +50,7 @@ pub struct Console {
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub nav: Nav,
     pub locale: Locale,
+    pub config: AppConfig,
 
     pub rules: Vec<Rule>,
     pub sessions: Vec<Session>,
@@ -91,6 +92,7 @@ pub struct Console {
     pub mcp_external: bool,
     pub mcp_shutdown: Option<CancellationToken>,
     pub mcp_bind: String,
+    pub mcp_port_input: Entity<InputState>,
 
     pub rule_id_input: Entity<InputState>,
     pub rule_title_input: Entity<InputState>,
@@ -105,7 +107,7 @@ pub struct Console {
 
     pub session_task_input: Entity<InputState>,
     pub selected_agent: usize,
-    pub handoff_target_input: Entity<InputState>,
+    pub session_show_completed: bool,
     pub session_goal_input: Entity<TextareaState>,
     pub session_work_input: Entity<TextareaState>,
 }
@@ -117,7 +119,9 @@ impl Console {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let locale = i18n::load(&store.layout.root);
+        let config = AppConfig::load(&store.layout);
+        let locale = Locale::from_code(&config.locale);
+        let mcp_bind = format!("127.0.0.1:{}", config.mcp_port);
         let rule_id_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.rule_id")));
         let rule_title_input =
@@ -134,8 +138,6 @@ impl Console {
         let project_tree = cx.new(|cx| TreeState::new(cx));
         let session_task_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.task")));
-        let handoff_target_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.handoff")));
         let session_goal_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder(i18n::t(locale, "ph.goal")));
         let session_work_input = cx
@@ -147,12 +149,18 @@ impl Console {
         let sugg_content_input = cx.new(|cx| TextareaState::new(window, cx).default_value(""));
         let sugg_note_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.sugg_note")));
+        let mcp_port_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(i18n::t(locale, "ph.mcp_port"))
+                .default_value(config.mcp_port.to_string())
+        });
 
         let mut console = Self {
             store,
             runtime,
             nav: Nav::Dashboard,
             locale,
+            config,
             rules: vec![],
             sessions: vec![],
             provenance: vec![],
@@ -187,7 +195,8 @@ impl Console {
             mcp_running: false,
             mcp_external: false,
             mcp_shutdown: None,
-            mcp_bind: "127.0.0.1:9870".into(),
+            mcp_bind,
+            mcp_port_input,
             rule_id_input,
             rule_title_input,
             rule_topic_input,
@@ -199,7 +208,7 @@ impl Console {
             project_rename_input,
             session_task_input,
             selected_agent: 0,
-            handoff_target_input,
+            session_show_completed: false,
             session_goal_input,
             session_work_input,
         };
@@ -223,7 +232,8 @@ impl Console {
 
     pub fn set_locale(&mut self, locale: Locale, window: &mut Window, cx: &mut Context<Self>) {
         self.locale = locale;
-        i18n::save(&self.store.layout.root, locale);
+        self.config.locale = locale.code().to_string();
+        let _ = self.config.save(&self.store.layout);
         self.rule_id_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.rule_id"), window, cx)
         });
@@ -245,9 +255,6 @@ impl Console {
         self.session_task_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.task"), window, cx)
         });
-        self.handoff_target_input.update(cx, |s, cx| {
-            s.set_placeholder(i18n::t(locale, "ph.handoff"), window, cx)
-        });
         self.session_goal_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.goal"), window, cx)
         });
@@ -262,6 +269,9 @@ impl Console {
         });
         self.sugg_note_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.sugg_note"), window, cx)
+        });
+        self.mcp_port_input.update(cx, |s, cx| {
+            s.set_placeholder(i18n::t(locale, "ph.mcp_port"), window, cx)
         });
         self.rebuild_project_tree(cx);
         cx.notify();
@@ -488,6 +498,59 @@ impl Console {
         }
         self.mcp_external = false;
         self.mcp_running = false;
+    }
+
+    /// Start/stop the MCP daemon from the sidebar icon button.
+    pub fn toggle_mcp_http(&mut self, cx: &mut Context<Self>) {
+        if self.mcp_running {
+            self.stop_mcp_http();
+            self.log(self.t("log.mcp_stopped"));
+        } else {
+            self.start_mcp_http();
+            self.log(self.t("log.mcp_starting"));
+        }
+        cx.notify();
+    }
+
+    /// Persist a new MCP port and restart the daemon on it, so test and production can bind
+    /// distinct loopback ports instead of sharing one daemon.
+    pub fn apply_mcp_port(&mut self, port: u16, cx: &mut Context<Self>) -> bool {
+        if port == 0 {
+            self.log(self.t("log.mcp_port_invalid"));
+            return false;
+        }
+        self.config.mcp_port = port;
+        if let Err(e) = self.config.save(&self.store.layout) {
+            self.log(self.tr("log.mcp_port_failed", &[&e.to_string()]));
+            return false;
+        }
+        self.stop_mcp_http();
+        self.mcp_bind = format!("127.0.0.1:{port}");
+        self.start_mcp_http();
+        self.log(self.tr("log.mcp_port", &[&self.mcp_bind]));
+        cx.notify();
+        true
+    }
+
+    /// Read the Settings MCP port field, validate, persist and restart the daemon on it.
+    pub fn save_mcp_port_from_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let raw = self.mcp_port_input.read(cx).value().trim().to_string();
+        let Some(port) = raw.parse::<u16>().ok().filter(|p| *p > 0) else {
+            let msg = self.t("log.mcp_port_invalid").to_string();
+            self.log(msg.clone());
+            self.notify(window, cx, &msg);
+            return false;
+        };
+        if !self.apply_mcp_port(port, cx) {
+            return false;
+        }
+        let msg = self.tr("log.mcp_port", &[&self.mcp_bind]);
+        self.notify(window, cx, &msg);
+        true
     }
 
     pub fn save_rule_from_inputs(&mut self, cx: &mut Context<Self>) -> bool {
@@ -970,19 +1033,21 @@ impl Console {
         }
     }
 
+    /// Returns `Some(reused)` on success (`reused` = an existing active session was returned
+    /// instead of creating a duplicate), `None` on failure (already logged).
     pub fn create_session_from_inputs(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Option<bool> {
         let task = self.session_task_input.read(cx).value().trim().to_string();
         let Some(project) = self.current_project_path() else {
             self.log(self.t("log.no_project"));
-            return false;
+            return None;
         };
         if task.is_empty() {
             self.log(self.t("log.task_required"));
-            return false;
+            return None;
         }
         let agent_id = self
             .agents
@@ -993,7 +1058,7 @@ impl Console {
             .store
             .create_session(&task, &project, &agent_id, vec![])
         {
-            Ok(session) => {
+            Ok((session, reused)) => {
                 self.log(self.tr(
                     "log.session_created",
                     &[
@@ -1004,11 +1069,11 @@ impl Console {
                 self.selected_session = Some(session.id);
                 self.refresh_data(cx);
                 self.load_session_work_inputs(window, cx);
-                true
+                Some(reused)
             }
             Err(e) => {
                 self.log(self.tr("log.session_failed", &[&e.to_string()]));
-                false
+                None
             }
         }
     }
@@ -1018,37 +1083,52 @@ impl Console {
             self.log(self.t("log.select_session"));
             return false;
         };
-        let target = self
-            .handoff_target_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
-        if target.is_empty() {
-            self.log(self.t("log.enter_target"));
-            return false;
-        }
         let context = self
             .sessions
             .iter()
             .find(|s| s.id == session_id)
             .map(|s| serde_json::json!({ "summary": s.task, "exported_from": "console" }))
             .unwrap_or_else(|| serde_json::json!({ "exported_from": "console" }));
-        match self.store.export_handoff(session_id, &target, context) {
+        match self.store.export_handoff(session_id, None, context) {
             Ok(bundle) => {
                 self.log(self.tr(
                     "log.handoff_exported",
-                    &[
-                        &bundle.from_agent,
-                        &target,
-                        &format!("{:.12}", bundle.bundle_hash),
-                    ],
+                    &[&bundle.from_agent, &format!("{:.12}", bundle.bundle_hash)],
                 ));
                 self.refresh_data(cx);
                 true
             }
             Err(e) => {
                 self.log(self.tr("log.handoff_failed", &[&e.to_string()]));
+                false
+            }
+        }
+    }
+
+    /// Close (Completed) or reopen (Active) the selected session; the evidence chain is kept.
+    pub fn set_selected_session_status(
+        &mut self,
+        status: SessionStatus,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(session_id) = self.selected_session else {
+            self.log(self.t("log.select_session"));
+            return false;
+        };
+        match self.store.set_session_status(session_id, status) {
+            Ok(session) => {
+                let label = match session.status {
+                    SessionStatus::Active => self.t("sess.status.active"),
+                    SessionStatus::HandedOff => self.t("sess.status.handed_off"),
+                    SessionStatus::Completed => self.t("sess.status.completed"),
+                    SessionStatus::Failed => self.t("sess.status.failed"),
+                };
+                self.log(self.tr("log.session_status", &[&session.id.to_string(), label]));
+                self.refresh_data(cx);
+                true
+            }
+            Err(e) => {
+                self.log(self.tr("log.session_failed", &[&e.to_string()]));
                 false
             }
         }
@@ -2095,6 +2175,7 @@ impl Console {
                     }))
                     .child(
                         div()
+                            .flex_1()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(self.tr(
@@ -2105,6 +2186,29 @@ impl Console {
                                     "mcp.stopped"
                                 })],
                             )),
+                    )
+                    .child(
+                        Button::new("mcp-sidebar-toggle")
+                            .icon(Icon::new(if self.mcp_running {
+                                IconName::Square
+                            } else {
+                                IconName::Play
+                            }))
+                            .ghost()
+                            .small()
+                            .accessibility_label(self.t(if self.mcp_running {
+                                "set.mcp.stop"
+                            } else {
+                                "set.mcp.start"
+                            }))
+                            .tooltip(self.t(if self.mcp_running {
+                                "set.mcp.stop"
+                            } else {
+                                "set.mcp.start"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_mcp_http(cx);
+                            })),
                     ),
             )
     }
@@ -2269,18 +2373,25 @@ fn sibling_mcp_exe() -> Option<std::path::PathBuf> {
 /// Ask a background daemon to shut down via its loopback-only `POST /shutdown` route. Best-effort:
 /// the daemon may have been started by another console, so we signal it rather than kill a PID.
 fn request_daemon_shutdown(bind: &str) {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
     let Ok(mut stream) = TcpStream::connect(bind) else {
         return;
     };
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let req = format!(
         "POST /shutdown HTTP/1.1\r\nHost: {bind}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
-    let _ = stream.write_all(req.as_bytes());
+    if stream.write_all(req.as_bytes()).is_err() {
+        return;
+    }
     let _ = stream.flush();
+    // Read the reply before closing: on Windows, dropping a socket with unread data sends RST,
+    // which can abort the request before the daemon processes it (the daemon would keep running).
+    let mut buf = [0u8; 256];
+    let _ = stream.read(&mut buf);
 }
 
 /// Render work items as one `status: title` line each, for the editor textarea.

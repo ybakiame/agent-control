@@ -1,4 +1,5 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Selectable, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -163,7 +164,44 @@ impl Console {
                             .text_color(muted)
                             .child(self.t("set.mcp.desc")),
                     )
-                    .child(mcp_button),
+                    .child(mcp_button)
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(border)
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(muted)
+                                    .child(self.t("set.mcp.port")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(self.t("set.mcp.port.desc")),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().w(px(140.)).child(
+                                        Input::new(&self.mcp_port_input).id("mcp-port-input"),
+                                    ))
+                                    .child(
+                                        Button::new("mcp-port-apply")
+                                            .label(self.t("set.mcp.port.apply"))
+                                            .primary()
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.save_mcp_port_from_input(window, cx);
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ),
+                    ),
             )
             .child(
                 ui::card(cx)

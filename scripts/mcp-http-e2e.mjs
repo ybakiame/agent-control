@@ -83,7 +83,7 @@ try {
   await rpc("notifications/initialized", {}, true);
 
   const tools = await rpc("tools/list", {});
-  check("tools/list over HTTP", tools.result?.tools?.length === 24, tools);
+  check("tools/list over HTTP", tools.result?.tools?.length === 25, tools);
   check(
     "update_work_state available over HTTP",
     tools.result?.tools?.some((t) => t.name === "update_work_state"),
@@ -124,6 +124,11 @@ try {
     tools.result?.tools?.some((t) => t.name === "verify_constraints"),
     tools,
   );
+  check(
+    "set_session_status available over HTTP",
+    tools.result?.tools?.some((t) => t.name === "set_session_status"),
+    tools,
+  );
   for (const name of ["check_tool_call", "register_hooks", "revoke_hooks", "detect_hooks"]) {
     check(
       `${name} available over HTTP`,
@@ -138,6 +143,15 @@ try {
   });
   const data = res.result?.structuredContent ?? JSON.parse(res.result?.content?.[0]?.text ?? "{}");
   check("create_session over HTTP", !!data.session_id, res);
+
+  const statusRes = await rpc("tools/call", {
+    name: "set_session_status",
+    arguments: { session_id: data.session_id, status: "completed" },
+  });
+  const statusData =
+    statusRes.result?.structuredContent ??
+    JSON.parse(statusRes.result?.content?.[0]?.text ?? "{}");
+  check("set_session_status over HTTP", statusData.status === "completed", statusRes);
 
   // export_native over HTTP against the throwaway root (include_user=false: no writes outside it).
   // Select all four targets explicitly; the block is a static pointer, not a copy of rule text.

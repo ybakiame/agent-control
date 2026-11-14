@@ -4,7 +4,9 @@ use agent_control_core::model::{
     AppliesTo, CodeCheck, Decision, EvidenceKind, QueryContext, Rule, RuleKind, Scope,
     SessionStatus, SourceKind, SuggestionEdits, SuggestionStatus, WorkItem, WorkItemStatus,
 };
-use agent_control_core::{ExportTarget, RuleEngine, Store};
+use agent_control_core::{
+    AppConfig, DEFAULT_MCP_PORT, DataLayout, ExportTarget, RuleEngine, Store,
+};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -143,7 +145,8 @@ fn evidence_chain_verifies_and_detects_tampering() {
     let project = tempfile::tempdir().unwrap();
     let session = store
         .create_session("test task", project.path(), "tester", vec![])
-        .unwrap();
+        .unwrap()
+        .0;
     store
         .record_evidence(
             session.id,
@@ -180,13 +183,14 @@ fn handoff_roundtrip_preserves_constraints() {
 
     let session = store
         .create_session("handoff test", project.path(), "harness-a", vec![])
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(session.constraint_snapshot.rules.len(), 1);
 
     let bundle = store
         .export_handoff(
             session.id,
-            "harness-b",
+            Some("harness-b"),
             serde_json::json!({"summary": "work so far"}),
         )
         .unwrap();
@@ -225,7 +229,8 @@ fn work_state_roundtrip_and_handoff_carry() {
     let project = tempfile::tempdir().unwrap();
     let session = store
         .create_session("work state", project.path(), "harness-a", vec![])
-        .unwrap();
+        .unwrap()
+        .0;
 
     let items = vec![
         WorkItem {
@@ -250,7 +255,7 @@ fn work_state_roundtrip_and_handoff_carry() {
     assert_eq!(loaded.work_items[0].status, WorkItemStatus::Done);
 
     let bundle = store
-        .export_handoff(session.id, "harness-b", serde_json::json!({}))
+        .export_handoff(session.id, Some("harness-b"), serde_json::json!({}))
         .unwrap();
     assert_eq!(bundle.goal, "the goal");
     assert_eq!(bundle.work_items.len(), 3);
@@ -267,13 +272,98 @@ fn work_state_roundtrip_and_handoff_carry() {
 }
 
 #[test]
+fn create_session_reuses_active_same_task() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let (first, reused) = store
+        .create_session("same task", project.path(), "harness-a", vec![])
+        .unwrap();
+    assert!(!reused);
+    let (again, reused) = store
+        .create_session("same task", project.path(), "harness-a", vec![])
+        .unwrap();
+    assert!(reused);
+    assert_eq!(again.id, first.id);
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+
+    let (other, reused) = store
+        .create_session("other task", project.path(), "harness-a", vec![])
+        .unwrap();
+    assert!(!reused);
+    assert_ne!(other.id, first.id);
+
+    // A closed session no longer absorbs new calls for the same task.
+    store
+        .set_session_status(first.id, SessionStatus::Completed)
+        .unwrap();
+    let (fresh, reused) = store
+        .create_session("same task", project.path(), "harness-a", vec![])
+        .unwrap();
+    assert!(!reused);
+    assert_ne!(fresh.id, first.id);
+}
+
+#[test]
+fn set_session_status_closes_and_reopens_with_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let session = store
+        .create_session("lifecycle", project.path(), "tester", vec![])
+        .unwrap()
+        .0;
+
+    let closed = store
+        .set_session_status(session.id, SessionStatus::Completed)
+        .unwrap();
+    assert_eq!(closed.status, SessionStatus::Completed);
+    let chain = store.get_evidence(session.id).unwrap();
+    assert!(chain.iter().any(|e| e.kind == EvidenceKind::SessionEnd));
+    assert!(store.verify_chain(session.id).unwrap().valid);
+
+    let reopened = store
+        .set_session_status(session.id, SessionStatus::Active)
+        .unwrap();
+    assert_eq!(reopened.status, SessionStatus::Active);
+}
+
+#[test]
+fn export_handoff_without_to_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let session = store
+        .create_session("no target", project.path(), "harness-a", vec![])
+        .unwrap()
+        .0;
+
+    let bundle = store
+        .export_handoff(session.id, None, serde_json::json!({}))
+        .unwrap();
+    let loaded = store.get_session(session.id).unwrap().unwrap();
+    assert_eq!(loaded.status, SessionStatus::HandedOff);
+    assert_eq!(loaded.handoffs.last().unwrap().to_agent, None);
+    assert!(
+        project
+            .path()
+            .join(".agent-control/handoff/latest.md")
+            .exists()
+    );
+    let resumed = store.import_handoff(&bundle, "harness-b").unwrap();
+    assert_eq!(resumed.agent_id, "harness-b");
+    assert_eq!(resumed.status, SessionStatus::Active);
+}
+
+#[test]
 fn delete_session_cascades_evidence_and_provenance() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
     let session = store
         .create_session("to delete", project.path(), "tester", vec![])
-        .unwrap();
+        .unwrap()
+        .0;
     store
         .record_evidence(
             session.id,
@@ -1462,7 +1552,8 @@ fn verify_constraints_computes_achieved_tiers_and_records_evidence() {
 
     let session = store
         .create_session("verify", project.path(), "tester", vec![])
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(session.constraint_snapshot.rules.len(), 3);
 
     let report = store.verify_constraints(session.id, "tester").unwrap();
@@ -1531,13 +1622,14 @@ fn handoff_carries_assurance_baseline() {
 
     let session = store
         .create_session("handoff", project.path(), "harness-a", vec![])
-        .unwrap();
+        .unwrap()
+        .0;
     store.verify_constraints(session.id, "harness-a").unwrap();
 
     let bundle = store
         .export_handoff(
             session.id,
-            "harness-b",
+            Some("harness-b"),
             serde_json::json!({"summary": "verified"}),
         )
         .unwrap();
@@ -1567,9 +1659,10 @@ fn export_handoff_writes_project_latest_md() {
         .unwrap();
     let session = store
         .create_session("layer 1 continuity", project.path(), "harness-a", vec![])
-        .unwrap();
+        .unwrap()
+        .0;
     let bundle = store
-        .export_handoff(session.id, "harness-b", serde_json::json!({}))
+        .export_handoff(session.id, Some("harness-b"), serde_json::json!({}))
         .unwrap();
 
     let latest = project.path().join(".agent-control/handoff/latest.md");
@@ -1612,10 +1705,11 @@ fn import_handoff_refreshes_latest_md_with_resumed_state() {
 
     let session = store
         .create_session("resume brief", project.path(), "harness-a", vec![])
-        .unwrap();
+        .unwrap()
+        .0;
     store.verify_constraints(session.id, "harness-a").unwrap();
     let bundle = store
-        .export_handoff(session.id, "harness-b", serde_json::json!({}))
+        .export_handoff(session.id, Some("harness-b"), serde_json::json!({}))
         .unwrap();
 
     let latest = project.path().join(".agent-control/handoff/latest.md");
@@ -1831,7 +1925,8 @@ fn check_tool_call_marks_enforced_and_records_evidence() {
 
     let session = store
         .create_session("gate", project.path(), "tester", vec![])
-        .unwrap();
+        .unwrap()
+        .0;
     let report = store
         .check_tool_call(
             project.path(),
@@ -2017,4 +2112,40 @@ fn detect_hooks_reports_registration() {
             .filter(|s| s.target != HookTarget::Qoder)
             .all(|s| !s.registered)
     );
+}
+
+#[test]
+fn app_config_toml_roundtrip_and_defaults() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = DataLayout::new(root.path().to_path_buf());
+    let cfg = AppConfig::load(&layout);
+    assert_eq!(cfg, AppConfig::default());
+    assert_eq!(cfg.mcp_port, DEFAULT_MCP_PORT);
+
+    let custom = AppConfig {
+        locale: "zh".into(),
+        mcp_port: 9871,
+    };
+    custom.save(&layout).unwrap();
+    assert!(layout.config_file().exists());
+    assert_eq!(AppConfig::load(&layout), custom);
+
+    // A partial TOML file fills missing fields from the defaults.
+    std::fs::write(layout.config_file(), "locale = \"en\"\n").unwrap();
+    assert_eq!(AppConfig::load(&layout).mcp_port, DEFAULT_MCP_PORT);
+}
+
+#[test]
+fn app_config_migrates_legacy_ui_json_once() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = DataLayout::new(root.path().to_path_buf());
+    let legacy = root.path().join("ui.json");
+    std::fs::write(&legacy, r#"{"locale":"zh"}"#).unwrap();
+
+    let cfg = AppConfig::load(&layout);
+    assert_eq!(cfg.locale, "zh");
+    assert_eq!(cfg.mcp_port, DEFAULT_MCP_PORT);
+    assert!(layout.config_file().exists(), "toml written");
+    assert!(!legacy.exists(), "legacy json removed after conversion");
+    assert_eq!(AppConfig::load(&layout).locale, "zh");
 }

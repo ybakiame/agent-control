@@ -217,13 +217,24 @@ impl Store {
         }))
     }
 
+    /// Get-or-create: an **active** session with the same project + agent + task is returned
+    /// as-is (`reused = true`) so repeated calls from one harness conversation never pile up
+    /// duplicate sessions. A new task (or a closed source session) freezes a fresh snapshot.
     pub fn create_session(
         &self,
         task: &str,
         project_path: &Path,
         agent_id: &str,
         task_tags: Vec<String>,
-    ) -> Result<Session> {
+    ) -> Result<(Session, bool)> {
+        if let Some(existing) = self.db.list_sessions()?.into_iter().find(|s| {
+            s.status == SessionStatus::Active
+                && s.agent_id == agent_id
+                && s.project_path == project_path
+                && s.task == task
+        }) {
+            return Ok((existing, true));
+        }
         let ctx = QueryContext {
             project_path: project_path.to_path_buf(),
             agent_id: agent_id.to_string(),
@@ -267,7 +278,7 @@ impl Store {
                 "provenance_id": record.id,
             }),
         )?;
-        Ok(session)
+        Ok((session, false))
     }
 
     pub fn get_session(&self, id: Uuid) -> Result<Option<Session>> {
@@ -278,11 +289,22 @@ impl Store {
         self.db.list_sessions()
     }
 
-    pub fn set_session_status(&self, id: Uuid, status: SessionStatus) -> Result<()> {
+    /// Close or reopen a session. Closing (Completed/Failed) appends a `session_end` evidence
+    /// entry so the lifecycle change stays auditable; the chain itself is never deleted.
+    pub fn set_session_status(&self, id: Uuid, status: SessionStatus) -> Result<Session> {
         let mut session = self.db.get_session(id)?.context("session not found")?;
         session.status = status;
         session.updated_at = Utc::now();
-        self.db.upsert_session(&session)
+        self.db.upsert_session(&session)?;
+        if matches!(status, SessionStatus::Completed | SessionStatus::Failed) {
+            self.db.append_evidence(
+                id,
+                EvidenceKind::SessionEnd,
+                &session.agent_id,
+                serde_json::json!({ "status": db::status_label(status) }),
+            )?;
+        }
+        Ok(session)
     }
 
     /// Record the resumable work state (goal + done/doing/todo) so a handoff carries progress
@@ -600,7 +622,7 @@ impl Store {
     pub fn export_handoff(
         &self,
         session_id: Uuid,
-        to_agent: &str,
+        to_agent: Option<&str>,
         context: serde_json::Value,
     ) -> Result<HandoffBundle> {
         let mut session = self
@@ -626,7 +648,7 @@ impl Store {
         let record = HandoffRecord {
             id: Uuid::new_v4(),
             from_agent: session.agent_id.clone(),
-            to_agent: to_agent.to_string(),
+            to_agent: to_agent.map(str::to_string),
             timestamp: bundle.created_at,
             bundle_hash: bundle.bundle_hash.clone(),
             acknowledged: false,

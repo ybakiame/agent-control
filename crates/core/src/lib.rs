@@ -7,7 +7,7 @@ pub mod hooks;
 pub mod model;
 pub mod store;
 
-pub use config::DataLayout;
+pub use config::{AppConfig, DEFAULT_MCP_PORT, DataLayout};
 pub use engine::RuleEngine;
 pub use export::{
     DriftReport, ExportReport, ExportTarget, RevokeReport, TargetDrift, TargetOutcome,

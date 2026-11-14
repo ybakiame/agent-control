@@ -606,7 +606,9 @@ pub struct Session {
 pub struct HandoffRecord {
     pub id: Uuid,
     pub from_agent: String,
-    pub to_agent: String,
+    /// Optional receiver hint; the real receiver is chosen at `import_handoff` (`new_agent`).
+    #[serde(default)]
+    pub to_agent: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub bundle_hash: String,
     pub acknowledged: bool,
