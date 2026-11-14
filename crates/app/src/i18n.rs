@@ -310,6 +310,7 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("sess.unspecified", "unspecified", "未指定"),
     ("sess.ack", "acknowledged", "已确认"),
     ("sess.pending_ack", "pending ack", "待确认"),
+    ("sess.superseded", "superseded", "已取代"),
     ("sess.bundle", "bundle {}… · {}", "交接包 {}… · {}"),
     (
         "sess.empty",
@@ -340,6 +341,7 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "快照哈希与溯源 ID。完整证据链见「证据」与「溯源」视图。",
     ),
     ("sess.work_title", "Work state", "工作态"),
+    ("sess.work_updated", "Last updated: {}", "最近更新：{}"),
     ("sess.goal_label", "Goal", "目标"),
     ("sess.goal_empty", "No goal recorded yet.", "尚未记录目标。"),
     ("sess.work_edit", "Edit work state", "编辑工作态"),

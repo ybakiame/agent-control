@@ -94,7 +94,11 @@ repeated calls from one harness conversation never pile up duplicate sessions; a
 source session freezes a fresh snapshot. `set_session_status(id, status) -> Session` closes
 (`Completed`/`Failed`, appending a `session_end` evidence entry) or reopens (`Active`) a session;
 `HandedOff` is set only by `export_handoff` (whose `to_agent` is an optional receiver hint — the real
-receiver is chosen at `import_handoff`).
+receiver is chosen at `import_handoff`). Each `export_handoff` marks every prior **unacknowledged**
+`HandoffRecord` as `superseded` (a `#[serde(default)]` bool, so old session JSON needs no migration):
+only the latest handoff can be acknowledged, and superseded records no longer read as pending action.
+`acknowledge_rules` still marks only the last record acknowledged; acknowledged records are never
+superseded.
 
 **Native export** (`core/src/export.rs` + `Store::export_native`): writes a *static pointer block*
 into the selected harness entry points so agents that never call MCP still learn where the contracts
@@ -662,8 +666,10 @@ Completed/Failed rows so finished work leaves the active list. The **Handoff bun
 target input: a hint + **Export bundle** button (`Console::export_handoff`, `to_agent = None`) plus
 mono rows showing the deterministic bundle path (`<root>/bundles/<session_id>.json`) and the
 project-local `handoff/latest.md` brief path; handoff history rows render an unspecified receiver as
-`sess.unspecified`.
-A **Work state** section shows the `goal` plus read-only done/doing/todo rows (`work.*` tags); an
+`sess.unspecified` and tag each record acknowledged (`sess.ack`) / superseded (`sess.superseded`,
+a newer export replaced it) / pending ack (`sess.pending_ack`).
+A **Work state** section shows a locale-formatted last-updated line (`sess.work_updated`,
+`session.updated_at` in local time) above the `goal` plus read-only done/doing/todo rows (`work.*` tags); an
 `ui::disclosure` ("sess-work-edit") holds the editor — two `TextareaState`s (`session_goal_input`,
 `session_work_input`) + a format hint + **Save** (`save_session_work_state` → `Store::set_session_work_state`).
 Work items are edited as one `status: title` line each (`parse_work_items` / `format_work_items`; an

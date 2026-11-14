@@ -612,6 +612,10 @@ pub struct HandoffRecord {
     pub timestamp: DateTime<Utc>,
     pub bundle_hash: String,
     pub acknowledged: bool,
+    /// Set when a newer `export_handoff` replaces this still-unacknowledged record, so it no
+    /// longer reads as pending action.
+    #[serde(default)]
+    pub superseded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

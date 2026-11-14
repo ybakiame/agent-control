@@ -223,6 +223,63 @@ fn handoff_roundtrip_preserves_constraints() {
 }
 
 #[test]
+fn export_handoff_supersedes_prior_unacknowledged() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".agent-control/rules")).unwrap();
+    let rule = make_rule("project-contract", Scope::Project, 100, None);
+    store.save_rule(&rule, Some(project.path())).unwrap();
+
+    let session = store
+        .create_session("supersede test", project.path(), "harness-a", vec![])
+        .unwrap()
+        .0;
+    let rule_ids: Vec<String> = session
+        .constraint_snapshot
+        .rules
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+
+    // Two exports without acknowledgment: the first is superseded, the latest stays pending.
+    store
+        .export_handoff(session.id, None, serde_json::json!({}))
+        .unwrap();
+    store
+        .export_handoff(session.id, None, serde_json::json!({}))
+        .unwrap();
+    let session = store.get_session(session.id).unwrap().unwrap();
+    assert_eq!(session.handoffs.len(), 2);
+    assert!(session.handoffs[0].superseded);
+    assert!(!session.handoffs[0].acknowledged);
+    assert!(!session.handoffs[1].superseded);
+    assert!(!session.handoffs[1].acknowledged);
+
+    // Acknowledging closes only the latest; the superseded record keeps its state.
+    let report = store
+        .acknowledge_rules(session.id, "harness-a", &rule_ids)
+        .unwrap();
+    assert!(report.fully_compliant);
+    let session = store.get_session(session.id).unwrap().unwrap();
+    assert!(session.handoffs[0].superseded);
+    assert!(!session.handoffs[0].acknowledged);
+    assert!(session.handoffs[1].acknowledged);
+    assert!(!session.handoffs[1].superseded);
+
+    // An acknowledged record is never superseded by a later export.
+    store
+        .export_handoff(session.id, None, serde_json::json!({}))
+        .unwrap();
+    let session = store.get_session(session.id).unwrap().unwrap();
+    assert_eq!(session.handoffs.len(), 3);
+    assert!(session.handoffs[1].acknowledged);
+    assert!(!session.handoffs[1].superseded);
+    assert!(!session.handoffs[2].superseded);
+    assert!(!session.handoffs[2].acknowledged);
+}
+
+#[test]
 fn work_state_roundtrip_and_handoff_carry() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();

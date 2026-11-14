@@ -97,6 +97,9 @@ Produce a bundle to transfer the session to another harness.
   **file-based reach** counterpart of the bundle: the `AGENTS.md` managed block points agents at
   `latest.md`, so a harness that never calls MCP still inherits continuity by reading a file. Calling
   `export_handoff` again refreshes `latest.md` in place.
+- **Supersedes pending history.** Each export marks every prior *unacknowledged* handoff record
+  `superseded: true` (only the latest record can be acknowledged via `acknowledge_rules`), so older
+  exports no longer read as pending action. Acknowledged records are never superseded.
 
 ### import_handoff
 Resume a session under a new harness; verifies bundle integrity + snapshot consistency.

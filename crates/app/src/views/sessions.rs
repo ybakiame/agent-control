@@ -166,6 +166,8 @@ impl Console {
             let handoff_rows = session.handoffs.iter().map(|h| {
                 let ack = if h.acknowledged {
                     Tag::success().child(self.t("sess.ack"))
+                } else if h.superseded {
+                    Tag::secondary().child(self.t("sess.superseded"))
                 } else {
                     Tag::warning().child(self.t("sess.pending_ack"))
                 };
@@ -336,6 +338,18 @@ impl Console {
                     v_flex()
                         .gap_2()
                         .child(ui::section_label(cx, self.t("sess.work_title")))
+                        .child(
+                            div().text_xs().text_color(muted).child(
+                                self.tr(
+                                    "sess.work_updated",
+                                    &[&session
+                                        .updated_at
+                                        .with_timezone(&chrono::Local)
+                                        .format("%Y-%m-%d %H:%M")
+                                        .to_string()],
+                                ),
+                            ),
+                        )
                         .child(if session.goal.is_empty() {
                             div()
                                 .text_sm()

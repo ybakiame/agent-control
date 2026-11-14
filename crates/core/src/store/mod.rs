@@ -652,6 +652,7 @@ impl Store {
             timestamp: bundle.created_at,
             bundle_hash: bundle.bundle_hash.clone(),
             acknowledged: false,
+            superseded: false,
         };
         self.db.append_evidence(
             session_id,
@@ -663,6 +664,13 @@ impl Store {
                 "handoff_id": record.id,
             }),
         )?;
+        // A newer export replaces every still-unacknowledged prior record; only the latest
+        // handoff can be acknowledged, so older ones must not read as pending forever.
+        for handoff in session.handoffs.iter_mut() {
+            if !handoff.acknowledged {
+                handoff.superseded = true;
+            }
+        }
         session.handoffs.push(record);
         session.status = SessionStatus::HandedOff;
         session.updated_at = Utc::now();
