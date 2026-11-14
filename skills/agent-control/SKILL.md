@@ -181,7 +181,8 @@ instead of calling MCP. Two mechanisms deliver the binding set to them:
   `claude` | `codebuddy` | `workbuddy` | `qoder` | `qoder-cn` | `codex` | `cursor` | `antigravity` |
   `kimi`; omitted → all nine) or the console's Projects → **Hooks** panel; it writes a managed group into
   each harness's own config (project-level for seven; user-level for Kimi/Antigravity, still gating
-  per-project by `cwd`), preserving your other config and hooks. **`detect_hooks`** reports what is
+  per-project by `cwd`), preserving your other config and hooks. Qoder and Qoder CN share one project
+  file (`.qoder/settings.json`), so registering both writes it once. **`detect_hooks`** reports what is
   installed/registered (with a `scope` field); **`revoke_hooks`** removes the managed group. Manual
   copy-ready snippet for a claude-shaped harness — adjust the absolute path and keep the vendor + event:
 

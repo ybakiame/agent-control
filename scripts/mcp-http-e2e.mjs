@@ -254,8 +254,11 @@ try {
   const hookTargets = ["claude", "codebuddy", "workbuddy", "qoder", "qoder-cn", "codex", "cursor"];
   const registered = await call("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });
   check(
-    "register_hooks over HTTP writes all seven project-scope configs",
-    registered.report?.targets?.length === 7 && registered.command === hookCmd,
+    "register_hooks over HTTP writes the six project-scope config files (qoder + qoder-cn share one)",
+    registered.report?.targets?.length === 6 &&
+      registered.command === hookCmd &&
+      existsSync(join(hooksDir, ".qoder", "settings.json")) &&
+      !existsSync(join(hooksDir, ".qoder-cn", "settings.json")),
     registered,
   );
   const claudeJson = JSON.parse(readFileSync(claudeSettings, "utf8"));

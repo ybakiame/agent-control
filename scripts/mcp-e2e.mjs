@@ -984,14 +984,15 @@ try {
     hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo user" }] }] },
   }));
   const hookCmd = 'node "C:/throwaway/agent-control-hook.mjs"';
-  // The seven project-scope targets write inside the throwaway project dir. Kimi + Antigravity are
-  // user-scope (they resolve to the real home config) and are covered by the core codec unit tests —
-  // never written here, so this e2e stays fully isolated.
+  // The seven project-scope targets write inside the throwaway project dir (qoder + qoder-cn share
+  // .qoder/settings.json, so seven targets yield six files). Kimi + Antigravity are user-scope (they
+  // resolve to the real home config) and are covered by the core codec unit tests — never written
+  // here, so this e2e stays fully isolated.
   const hookTargets = ["claude", "codebuddy", "workbuddy", "qoder", "qoder-cn", "codex", "cursor"];
   const registered = await tool("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });
   check(
-    "register_hooks writes all seven project-scope harness configs",
-    registered.report?.targets?.length === 7 && registered.command === hookCmd,
+    "register_hooks writes the six project-scope config files (qoder + qoder-cn share one)",
+    registered.report?.targets?.length === 6 && registered.command === hookCmd,
     registered,
   );
   const claudeJson = JSON.parse(readFileSync(claudeSettings, "utf8"));
@@ -1004,12 +1005,21 @@ try {
     claudeJson,
   );
   check(
-    "register_hooks creates the nested-JSON stubs (codebuddy/workbuddy/qoder/qoder-cn/codex)",
+    "register_hooks creates the nested-JSON stubs (codebuddy/workbuddy/qoder/codex)",
     existsSync(join(hooksDir, ".codebuddy", "settings.json")) &&
       existsSync(join(hooksDir, ".workbuddy", "settings.json")) &&
       existsSync(join(hooksDir, ".qoder", "settings.json")) &&
-      existsSync(join(hooksDir, ".qoder-cn", "settings.json")) &&
       existsSync(join(hooksDir, ".codex", "hooks.json")),
+  );
+  // Qoder CN shares the international build's project file: no separate .qoder-cn dir is written,
+  // and the shared entry carries the first requested target's vendor id (qoder).
+  const qoderJson = JSON.parse(readFileSync(join(hooksDir, ".qoder", "settings.json"), "utf8"));
+  check(
+    "register_hooks writes qoder + qoder-cn to the shared .qoder/settings.json once",
+    !existsSync(join(hooksDir, ".qoder-cn", "settings.json")) &&
+      qoderJson.hooks.PreToolUse.filter((g) => g.hooks?.[0]?.command?.includes("agent-control-hook.mjs")).length === 1 &&
+      qoderJson.hooks.PreToolUse.some((g) => g.hooks?.[0]?.command?.endsWith("qoder PreToolUse")),
+    qoderJson,
   );
   // Codex uses the same nested shape as Claude, in a dedicated hooks.json.
   const codexJson = JSON.parse(readFileSync(join(hooksDir, ".codex", "hooks.json"), "utf8"));

@@ -461,10 +461,11 @@ pub struct RegisterHooksRequest {
     /// Absolute project path whose harness config files receive the hook
     pub project_path: String,
     /// Which harnesses to register: claude | codebuddy | workbuddy | qoder | qoder-cn | codex |
-    /// cursor | antigravity | kimi. Omitted defaults to all nine. Each reads only its own config, so
-    /// there is no cross-harness conflict. Kimi and Antigravity are user-scope: they write the
-    /// user-global config, but the gate still evaluates per project_path (cwd), so enforcement is
-    /// project-aware even though registration is global.
+    /// cursor | antigravity | kimi. Omitted defaults to all nine. Qoder and Qoder CN share one
+    /// project file (.qoder/settings.json), so selecting both writes it once (one report outcome
+    /// per file). Kimi and Antigravity are user-scope: they write the user-global config, but the
+    /// gate still evaluates per project_path (cwd), so enforcement is project-aware even though
+    /// registration is global.
     #[serde(default)]
     pub targets: Option<Vec<String>>,
     /// Full command line that runs the hook script (e.g. node "/abs/agent-control-hook.mjs"). Omitted
@@ -478,7 +479,8 @@ pub struct RevokeHooksRequest {
     /// Absolute project path whose harness config files should have the hook removed
     pub project_path: String,
     /// Which harnesses to revoke: claude | codebuddy | workbuddy | qoder | qoder-cn | codex |
-    /// cursor | antigravity | kimi. Omitted defaults to all nine.
+    /// cursor | antigravity | kimi. Omitted defaults to all nine. Qoder and Qoder CN share
+    /// .qoder/settings.json, so revoking either removes the shared entry for both.
     #[serde(default)]
     pub targets: Option<Vec<String>>,
 }
@@ -1193,7 +1195,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Register the Agent Control hook into the selected harnesses' config so each harness drives enforcement itself. Writes a start hook (freezes the constraint snapshot and, where supported, injects the binding-rule briefing) and a gate hook (runs check_tool_call to deny calls that violate hard rules) — this is what turns a hard rule into an Enforced one. Nine targets: claude | codebuddy | workbuddy | qoder | qoder-cn | codex | cursor | antigravity | kimi; omitted registers all nine. Each writes its own config in its own schema: nested settings.json hooks (claude, codebuddy, workbuddy, qoder, qoder-cn, codex), Cursor flat hooks.json (version:1, sessionStart/preToolUse), Antigravity named bundle in ~/.gemini/config/hooks.json (PreInvocation/PreToolUse), Kimi [[hooks]] block in ~/.kimi-code/config.toml. Kimi and Antigravity are user-scope (write the user-global config) but the gate evaluates per project_path/cwd, so enforcement stays project-aware. Deny shapes are vendor-native: exit 2 + stderr for the claude family, {permission:deny} JSON for Cursor, {decision:deny} JSON for Antigravity. The hook command defaults to the bundled agent-control-hook.mjs beside the executable (vendor + event baked into argv); override with `command`. Every other config key and user-authored hook is preserved; re-registering is idempotent. The daemon must be reachable at the hook endpoint (default http://127.0.0.1:9870/mcp). Use revoke_hooks to undo, detect_hooks to inspect."
+        description = "Register the Agent Control hook into the selected harnesses' config so each harness drives enforcement itself. Writes a start hook (freezes the constraint snapshot and, where supported, injects the binding-rule briefing) and a gate hook (runs check_tool_call to deny calls that violate hard rules) — this is what turns a hard rule into an Enforced one. Nine targets: claude | codebuddy | workbuddy | qoder | qoder-cn | codex | cursor | antigravity | kimi; omitted registers all nine. Each writes its own config in its own schema: nested settings.json hooks (claude, codebuddy, workbuddy, qoder, qoder-cn, codex — qoder and qoder-cn SHARE .qoder/settings.json, written once with one report outcome), Cursor flat hooks.json (version:1, sessionStart/preToolUse), Antigravity named bundle in ~/.gemini/config/hooks.json (PreInvocation/PreToolUse), Kimi [[hooks]] block in ~/.kimi-code/config.toml. Kimi and Antigravity are user-scope (write the user-global config) but the gate evaluates per project_path/cwd, so enforcement stays project-aware. Deny shapes are vendor-native: exit 2 + stderr for the claude family, {permission:deny} JSON for Cursor, {decision:deny} JSON for Antigravity. The hook command defaults to the bundled agent-control-hook.mjs beside the executable (vendor + event baked into argv); override with `command`. Every other config key and user-authored hook is preserved; re-registering is idempotent. The daemon must be reachable at the hook endpoint (default http://127.0.0.1:9870/mcp). Use revoke_hooks to undo, detect_hooks to inspect."
     )]
     async fn register_hooks(
         &self,
@@ -1227,7 +1229,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Revoke (remove) the Agent Control hook from the selected harnesses' config — the explicit undo of register_hooks. Other config and user-authored hooks are preserved; a config file that held only our hook is deleted (for Kimi, only our managed [[hooks]] block is stripped from config.toml, leaving the rest byte-for-byte). Choose targets (claude | codebuddy | workbuddy | qoder | qoder-cn | codex | cursor | antigravity | kimi); omitted defaults to all nine. Kimi and Antigravity are user-scope, so this edits the user-global config. A target with no managed hook is left unchanged, so re-running is safe. After revoking, hard rules are no longer mediated and cap at Advisory/Verified."
+        description = "Revoke (remove) the Agent Control hook from the selected harnesses' config — the explicit undo of register_hooks. Other config and user-authored hooks are preserved; a config file that held only our hook is deleted (for Kimi, only our managed [[hooks]] block is stripped from config.toml, leaving the rest byte-for-byte). Choose targets (claude | codebuddy | workbuddy | qoder | qoder-cn | codex | cursor | antigravity | kimi); omitted defaults to all nine. Kimi and Antigravity are user-scope, so this edits the user-global config. Qoder and Qoder CN share .qoder/settings.json, so revoking either removes the shared entry for both. A target with no managed hook is left unchanged, so re-running is safe. After revoking, hard rules are no longer mediated and cap at Advisory/Verified."
     )]
     async fn revoke_hooks(
         &self,
@@ -1251,7 +1253,7 @@ impl ControlServer {
     }
 
     #[tool(
-        description = "Detect which harnesses are installed and whether the Agent Control hook is already registered in each one's config. Covers all nine: Claude Code, CodeBuddy, WorkBuddy, Qoder, Qoder CN, Codex, Cursor, Antigravity, Kimi Code. Read-only; drives the console's one-click register/restore UI. Returns per-harness installed/registered flags, the config path, and the scope (project or user — kimi and antigravity inspect the user-global config). Use before register_hooks to choose targets."
+        description = "Detect which harnesses are installed and whether the Agent Control hook is already registered in each one's config. Covers all nine: Claude Code, CodeBuddy, WorkBuddy, Qoder, Qoder CN, Codex, Cursor, Antigravity, Kimi Code. Read-only; drives the console's one-click register/restore UI. Returns per-harness installed/registered flags, the config path, and the scope (project or user — kimi and antigravity inspect the user-global config; qoder and qoder-cn inspect the same shared .qoder/settings.json). Use before register_hooks to choose targets."
     )]
     async fn detect_hooks(
         &self,

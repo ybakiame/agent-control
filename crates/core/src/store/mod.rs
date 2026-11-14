@@ -1007,9 +1007,10 @@ impl Store {
     /// hook script; the vendor id and event are appended per entry). Project-scope vendors write the
     /// repo config; user-only vendors (Kimi, Antigravity) write a user-global file whose gate still
     /// only enforces for the matching project (rules resolve by the call's `cwd`). Every other key and
-    /// user-authored hook is preserved; re-registering is idempotent and writes are atomic. This is
-    /// what turns a `Hard` rule into an `Enforced` one: the harness mediates tool calls through
-    /// `check_tool_call`.
+    /// user-authored hook is preserved; re-registering is idempotent and writes are atomic. Targets
+    /// that share a config file (Qoder + Qoder CN → `.qoder/settings.json`) are written once, so the
+    /// report carries one outcome per file. This is what turns a `Hard` rule into an `Enforced` one:
+    /// the harness mediates tool calls through `check_tool_call`.
     pub fn register_hooks(
         &self,
         project_path: &Path,
@@ -1020,12 +1021,8 @@ impl Store {
             bail!("hook command cannot be empty");
         }
         let mut outcomes = Vec::new();
-        for target in targets {
-            outcomes.push(write_hooks_file(
-                &target.config_path(project_path)?,
-                *target,
-                command,
-            )?);
+        for (path, target) in hook_config_files(project_path, targets)? {
+            outcomes.push(write_hooks_file(&path, target, command)?);
         }
         Ok(HookReport {
             project_path: project_path.to_path_buf(),
@@ -1035,14 +1032,12 @@ impl Store {
 
     /// Revoke the Agent Control hook from the selected harnesses' config — the explicit undo of
     /// `register_hooks`. Other config and user hooks are preserved; a file that held only our hook is
-    /// deleted. A target with no managed hook is left unchanged.
+    /// deleted. A target with no managed hook is left unchanged. Revoking either Qoder build removes
+    /// the shared `.qoder/settings.json` entry for both (one outcome per file, as in register).
     pub fn revoke_hooks(&self, project_path: &Path, targets: &[HookTarget]) -> Result<HookReport> {
         let mut outcomes = Vec::new();
-        for target in targets {
-            outcomes.push(revoke_hooks_file(
-                &target.config_path(project_path)?,
-                *target,
-            )?);
+        for (path, target) in hook_config_files(project_path, targets)? {
+            outcomes.push(revoke_hooks_file(&path, target)?);
         }
         Ok(HookReport {
             project_path: project_path.to_path_buf(),
@@ -1561,6 +1556,24 @@ fn atomic_write(path: &Path, contents: &str) -> Result<()> {
             Err(err).with_context(|| format!("replacing config {}", path.display()))
         }
     }
+}
+
+/// Resolve targets to the config files they write, dropping any target that shares a file with an
+/// earlier one. Qoder and Qoder CN both read `.qoder/settings.json` at project level, so the pair
+/// must be written (and revoked) once — the first target in request order owns the shared entry.
+fn hook_config_files(
+    project_path: &Path,
+    targets: &[HookTarget],
+) -> Result<Vec<(PathBuf, HookTarget)>> {
+    let mut files: Vec<(PathBuf, HookTarget)> = Vec::new();
+    for target in targets {
+        let path = target.config_path(project_path)?;
+        if files.iter().any(|(p, _)| *p == path) {
+            continue;
+        }
+        files.push((path, *target));
+    }
+    Ok(files)
 }
 
 /// Upsert our managed hook entries into `path` via the target's codec, preserving all other config.

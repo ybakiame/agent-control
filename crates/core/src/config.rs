@@ -243,10 +243,12 @@ impl DataLayout {
         project_path.join(".qoder").join("settings.json")
     }
 
-    /// Qoder CN (China build) keeps its own `.qoder-cn/` project settings, separate from the
-    /// international `.qoder/` build, so the two are independent hook targets.
+    /// Qoder CN (China build) shares the international build's project-level config: both read
+    /// `.qoder/settings.json` (verified against the Qoder CN SDK brand map — user home `.qoder-cn`,
+    /// project dir `.qoder`). The builds differ only at user level (`~/.qoder-cn` vs `~/.qoder`),
+    /// so the two hook targets resolve to the SAME project file; register/revoke write it once.
     pub fn project_qoder_cn_settings(project_path: &Path) -> PathBuf {
-        project_path.join(".qoder-cn").join("settings.json")
+        Self::project_qoder_settings(project_path)
     }
 
     /// Codex reads a dedicated `hooks.json` (same nested shape as Claude's settings.json).

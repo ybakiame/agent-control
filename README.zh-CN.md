@@ -234,7 +234,7 @@ Projects → Hooks 面板一键完成同样的事。
 | CodeBuddy | `.codebuddy/settings.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
 | WorkBuddy | `.workbuddy/settings.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
 | Qoder | `.qoder/settings.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
-| Qoder CN | `.qoder-cn/settings.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
+| Qoder CN | `.qoder/settings.json`（与 Qoder 共用） | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
 | Codex | `.codex/hooks.json` | 嵌套 JSON | 项目 | `SessionStart` / `PreToolUse` | 退出 2 + stderr |
 | Cursor | `.cursor/hooks.json` | 扁平 JSON（`version:1`） | 项目 | `sessionStart` / `preToolUse` | `{permission:"deny",…}` |
 | Antigravity | `~/.gemini/config/hooks.json` | 命名 bundle | 用户 | `PreInvocation` / `PreToolUse` | `{decision:"deny",reason}` |

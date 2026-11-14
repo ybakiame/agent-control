@@ -304,7 +304,7 @@ each through its own config schema (a `ConfigCodec`), event names and deny shape
 | CodeBuddy | `.codebuddy/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` | exit `2` + stderr |
 | WorkBuddy | `.workbuddy/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` | exit `2` + stderr |
 | Qoder | `.qoder/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` | exit `2` + stderr |
-| Qoder CN | `.qoder-cn/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` | exit `2` + stderr |
+| Qoder CN | `.qoder/settings.json` (shared with Qoder) | nested JSON | project | `SessionStart` / `PreToolUse` | exit `2` + stderr |
 | Codex | `.codex/hooks.json` | nested JSON | project | `SessionStart` / `PreToolUse` | exit `2` + stderr |
 | Cursor | `.cursor/hooks.json` | flat JSON (`version:1`) | project | `sessionStart` / `preToolUse` | `{permission:"deny",…}` |
 | Antigravity | `~/.gemini/config/hooks.json` | named bundle | user | `PreInvocation` / `PreToolUse` | `{decision:"deny",reason}` |

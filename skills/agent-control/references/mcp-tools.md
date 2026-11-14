@@ -334,7 +334,7 @@ event names and deny shape:
 | `codebuddy` | `.codebuddy/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
 | `workbuddy` | `.workbuddy/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
 | `qoder` | `.qoder/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
-| `qoder-cn` | `.qoder-cn/settings.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
+| `qoder-cn` | `.qoder/settings.json` (shared with `qoder`) | nested JSON | project | `SessionStart` / `PreToolUse` |
 | `codex` | `.codex/hooks.json` | nested JSON | project | `SessionStart` / `PreToolUse` |
 | `cursor` | `.cursor/hooks.json` | flat JSON (`version:1`) | project | `sessionStart` / `preToolUse` |
 | `antigravity` | `~/.gemini/config/hooks.json` | named bundle | user | `PreInvocation` / `PreToolUse` |
@@ -343,7 +343,9 @@ event names and deny shape:
 - `project_path` (string, required) — absolute project path.
 - `targets` (string[], optional) — any of the nine keys above. **Omitted → all nine.** Seven write a
   project-level config; **Kimi** and **Antigravity** write a user-global file but still gate per-project
-  by the call's `cwd`. Each harness reads only its own config, so there is no cross-harness conflict.
+  by the call's `cwd`. **Qoder and Qoder CN share one project file** (`.qoder/settings.json`; the China
+  build differs only at user level, `~/.qoder-cn`): selecting both writes that file once — the first
+  target in request order owns the shared entry, and the report carries one outcome per file.
 - `command` (string, optional) — full command line that runs the hook (e.g.
   `node "/abs/agent-control-hook.mjs"`). Omitted resolves the bundled script beside the executable
   (release) or in the repo `scripts/` dir (dev); errors if not found and no `command` given. The
@@ -358,7 +360,8 @@ The explicit undo of `register_hooks`: remove the managed hook group from the se
 own config. Other config and user-authored hooks are preserved; a config file that held
 only our hook is deleted (the Kimi TOML codec strips only its own `[[hooks]]` marker block, so user
 comments survive). After revoking, hard rules are no longer mediated and cap at Advisory/Verified.
-- `project_path` (string, required), `targets` (string[], optional, omitted → all nine).
+- `project_path` (string, required), `targets` (string[], optional, omitted → all nine). Revoking
+  either Qoder build removes the shared `.qoder/settings.json` entry for both (one outcome per file).
 - Returns: `report` (`HookReport`: `targets[]` each `{ path, action }` where action is `removed` |
   `deleted` | `unchanged`) and an `instruction`. A target with no managed hook is left `unchanged`, so
   re-running is safe.
@@ -367,7 +370,8 @@ comments survive). After revoking, hard rules are no longer mediated and cap at 
 ### detect_hooks
 Read-only: report which of the **nine** harnesses (Claude Code, CodeBuddy, WorkBuddy, Qoder, Qoder CN,
 Codex, Cursor, Antigravity, Kimi Code) are installed and whether the Agent Control hook is already
-registered in each one's own config. Drives the console's one-click register/restore UI; use before
+registered in each one's own config (the `qoder` and `qoder-cn` rows inspect the same shared
+`.qoder/settings.json`). Drives the console's one-click register/restore UI; use before
 `register_hooks` to choose targets.
 - `project_path` (string, required) — absolute project path to inspect.
 - Returns: `harnesses[]` (`HookStatus`: `target`, `label`, `scope` (`project` | `user`), `installed`

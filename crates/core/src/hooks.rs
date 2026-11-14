@@ -78,7 +78,8 @@ const CLAUDE_EVENTS: HookEvents = HookEvents {
 
 /// A harness whose hook config we can register into. CodeBuddy and WorkBuddy are separate products
 /// (WorkBuddy ships the same engine rebranded); Qoder and Qoder CN are the international and China
-/// builds with separate config homes.
+/// builds with separate user config homes but a SHARED project file (`.qoder/settings.json`), so
+/// registering both writes that file once (see `Store::register_hooks`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HookTarget {
@@ -1073,7 +1074,12 @@ mod tests {
         );
         assert_eq!(
             HookTarget::QoderCn.config_path(p).unwrap(),
-            p.join(".qoder-cn").join("settings.json")
+            p.join(".qoder").join("settings.json"),
+            "Qoder CN shares the international build's project file"
+        );
+        assert_eq!(
+            HookTarget::Qoder.config_path(p).unwrap(),
+            HookTarget::QoderCn.config_path(p).unwrap()
         );
         assert_eq!(
             HookTarget::Codex.config_path(p).unwrap(),

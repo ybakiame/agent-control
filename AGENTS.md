@@ -479,13 +479,16 @@ rules by the call's `cwd`.
 - **Targets** (`HookTarget`, serde lowercase; `HookTarget::ALL` is the nine-element list):
   `Claude` (`.claude/settings.json`), `CodeBuddy` (`.codebuddy/settings.json`), `WorkBuddy`
   (`.workbuddy/settings.json` — a separate product shipping the same engine rebranded), `Qoder`
-  (`.qoder/settings.json`), `QoderCn` (`.qoder-cn/settings.json` — the China build, separate config
-  home), `Codex` (`.codex/hooks.json`), `Cursor` (`.cursor/hooks.json`), `Antigravity`
+  (`.qoder/settings.json`), `QoderCn` (`.qoder/settings.json` — the China build **shares the
+  international build's project file**; only the user home differs, `~/.qoder-cn` vs `~/.qoder`),
+  `Codex` (`.codex/hooks.json`), `Cursor` (`.cursor/hooks.json`), `Antigravity`
   (`~/.gemini/config/hooks.json`, user), `Kimi` (`~/.kimi-code/config.toml`, user). Antigravity replaces
   the former Gemini CLI target. `register_hooks` / `revoke_hooks` / `detect_hooks` are thin `Store`
-  adapters over `hooks::{register, revoke, detect}`. **Assumption to verify:** Qoder CN's *project*
-  config dir `.qoder-cn/` is inferred from its confirmed user dir `~/.qoder-cn`; if the China build
-  reads a different project path, adjust `DataLayout::project_qoder_cn_settings`.
+  adapters over `hooks::{upsert, remove, registered}`. **Verified against the Qoder CN SDK** (brand
+  map `{user: ".qoder-cn", project: ".qoder"}`): the project config dir is `.qoder`, not `.qoder-cn`.
+  Because the two Qoder builds share one project file, `Store::register_hooks` / `revoke_hooks`
+  dedupe targets by config path (first target in request order owns the shared entry; one report
+  outcome per file), and `detect_hooks` reports both targets against that same file.
 - **Two events written together** (`HookTarget::events() -> HookEvents { start, gate }`, default
   `CLAUDE_EVENTS`): the **start** event (`SessionStart`, Cursor `sessionStart`, Antigravity
   `PreInvocation`; no matcher) injects the binding-rule briefing via `get_applicable_rules` (reach);

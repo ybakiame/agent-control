@@ -2106,11 +2106,91 @@ fn detect_hooks_reports_registration() {
         .unwrap();
     assert!(qoder.registered);
     assert!(qoder.installed, "project .qoder dir now exists");
+    // Qoder CN reads the same shared project file, so it reports registered too.
+    let qoder_cn = after
+        .iter()
+        .find(|s| s.target == HookTarget::QoderCn)
+        .unwrap();
+    assert!(qoder_cn.registered);
+    assert_eq!(qoder_cn.settings_path, qoder.settings_path);
     assert!(
         after
             .iter()
-            .filter(|s| s.target != HookTarget::Qoder)
+            .filter(|s| s.target != HookTarget::Qoder && s.target != HookTarget::QoderCn)
             .all(|s| !s.registered)
+    );
+}
+
+#[test]
+fn register_hooks_qoder_builds_share_one_project_file() {
+    use agent_control_core::HookTarget;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let cmd = "node \"C:/repo/scripts/agent-control-hook.mjs\"";
+    let shared = project.path().join(".qoder").join("settings.json");
+
+    // Registering both builds writes the shared file once; the first target owns the entry.
+    let report = store
+        .register_hooks(
+            project.path(),
+            &[HookTarget::Qoder, HookTarget::QoderCn],
+            cmd,
+        )
+        .unwrap();
+    assert_eq!(report.targets.len(), 1, "one outcome per config file");
+    assert_eq!(report.targets[0].path, shared);
+    assert_eq!(report.targets[0].action, "created");
+    assert!(
+        !project.path().join(".qoder-cn").exists(),
+        "no separate .qoder-cn project dir is ever written"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        format!("{cmd} qoder PreToolUse"),
+        "first requested target owns the shared entry"
+    );
+
+    // Re-registering the pair is a no-op on disk.
+    let again = store
+        .register_hooks(
+            project.path(),
+            &[HookTarget::Qoder, HookTarget::QoderCn],
+            cmd,
+        )
+        .unwrap();
+    assert_eq!(again.targets.len(), 1);
+    assert_eq!(again.targets[0].action, "unchanged");
+
+    // Revoking either build removes the shared entry for both.
+    let revoked = store
+        .revoke_hooks(project.path(), &[HookTarget::QoderCn])
+        .unwrap();
+    assert_eq!(revoked.targets.len(), 1);
+    assert_eq!(revoked.targets[0].action, "deleted");
+    assert!(!shared.exists());
+    let detected = store.detect_hooks(project.path()).unwrap();
+    assert!(
+        detected
+            .iter()
+            .filter(|s| s.target == HookTarget::Qoder || s.target == HookTarget::QoderCn)
+            .all(|s| !s.registered)
+    );
+
+    // A Qoder-CN-only registration still lands in .qoder/settings.json, with its own vendor id.
+    let report = store
+        .register_hooks(project.path(), &[HookTarget::QoderCn], cmd)
+        .unwrap();
+    assert_eq!(report.targets[0].path, shared);
+    assert_eq!(report.targets[0].action, "created");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        format!("{cmd} qoder-cn PreToolUse")
     );
 }
 
