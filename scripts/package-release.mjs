@@ -24,6 +24,7 @@ for (const exe of ["agent-control-app.exe", "agent-control-mcp.exe"]) {
   copyFileSync(src, join(stage, exe));
 }
 copyFileSync(join(root, "README.md"), join(stage, "README.md"));
+copyFileSync(join(root, "README.zh-CN.md"), join(stage, "README.zh-CN.md"));
 copyFileSync(join(root, "crates", "app", "assets", "icon.png"), join(stage, "icon.png"));
 // Ship the hook script beside the exes so register_hooks can resolve it without a repo checkout.
 copyFileSync(join(root, "scripts", "agent-control-hook.mjs"), join(stage, "agent-control-hook.mjs"));

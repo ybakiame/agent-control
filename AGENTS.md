@@ -527,7 +527,8 @@ be **flex containers** (`h_flex()`), not plain `div()` — a block `div` ignores
 `>` chevron, inverted-C canopy over an "A" on a baseline). `crates/app/build.rs` embeds the `.ico`
 + version info into the Windows exe via a windows-only `winresource` build-dependency.
 `mise run release` → `scripts/package-release.mjs` assembles `dist/agent-control-v<ver>-windows-x64.zip`
-(exes + README + icon + `portable.marker`, portable by default).
+(exes + both READMEs (EN `README.md` + zh-CN `README.zh-CN.md`) + icon + hook script +
+`portable.marker`, portable by default).
 
 **Self-rendered title bar (no native OS chrome):**
 

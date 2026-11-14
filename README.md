@@ -1,9 +1,9 @@
 # Agent Control
 
+**English** | [简体中文](README.zh-CN.md)
+
 **A developer-centric, engineering-protocol-based, local-first command console that connects
 different Agents over MCP and enforces contracts through their native hooks.**
-
-以开发者为中心、以工程协议为基础、通过 MCP 连接不同 Agent 并经其原生 hooks 强制契约的本地优先指挥台。
 
 It does not merely store what you like. It answers the questions that matter when multiple
 agents touch one codebase:
@@ -12,9 +12,6 @@ agents touch one codebase:
 - Does the rule come from the **user** (personal preference) or the **project** (contract)?
 - Does it **conflict** with the current code or with another rule?
 - After handing the task to **another harness**, are the same constraints still binding?
-
-它不只是存储用户喜欢什么，还能说明：这个 Agent 为什么使用了这条规则？规则来自用户还是项目？
-有没有与当前代码冲突？任务交给另一个 Harness 后，是否仍然遵守同样的约束？
 
 **Why not just AGENTS.md, Agent Skills, or per-agent memory?** Those are *delivery formats* — an
 agent reads them if it chooses. Agent Control is a *resolution layer* over one rule store that
@@ -29,24 +26,16 @@ start via a SessionStart hook, or **queried** over MCP. A PreToolUse hook then *
 rules by gating each tool call. The differentiator is **traceable provenance + conflict detection + a
 frozen cross-harness snapshot**, delivered into the tools agents already read.
 
-与 AGENTS.md / Agent Skills / 各家 memory 的区别：那些是**交付格式**——agent 愿意读才读。
-Agent Control 是同一规则库之上的**解析层**，会**编译进**这些格式并补足它们缺失的能力：按上下文判定
-哪些规则生效、记录每条规则为何胜出 / 被取代 / 被过滤 / 被禁用（溯源）、对照**真实仓库状态**与彼此
-检测冲突，并把生效集冻结成跨 harness 仍然绑定的快照。解析后的契约通过三种方式触达 agent：以**指针块导出**进
-项目的 `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `.cursor/rules`（引导 agent 去读活规则，保留手写内容）、在 harness 会话开始时
-经 SessionStart hook **主动推送**、或经 MCP **查询**；PreToolUse hook 再对每次工具调用把关，**强制** hard 规则。卖点是**可追溯溯源 + 冲突检测 +
-跨 harness 冻结快照**，并交付进 agent 本就会读取的工具。
-
 ---
 
-## The four layers / 四层架构
+## The four layers
 
-| # | Layer | 层 | Mechanism |
-|---|-------|----|-----------|
-| 1 | Personal preferences | 个人偏好 | User-scope rules that follow you across projects |
-| 2 | Project contracts | 项目契约 | Project-scope rules that bind every agent working in a repo |
-| 3 | Cross-harness continuity | 跨 harness 连续性 | Frozen constraint snapshots + resumable work state (goal/done/doing/todo) + hash-sealed handoff bundles |
-| 4 | Verifiable evidence | 可验证证据 | SHA-256 hash chain; tampering and gaps are detectable |
+| # | Layer | Mechanism |
+|---|-------|-----------|
+| 1 | Personal preferences | User-scope rules that follow you across projects |
+| 2 | Project contracts | Project-scope rules that bind every agent working in a repo |
+| 3 | Cross-harness continuity | Frozen constraint snapshots + resumable work state (goal/done/doing/todo) + hash-sealed handoff bundles |
+| 4 | Verifiable evidence | SHA-256 hash chain; tampering and gaps are detectable |
 
 > **Three rule scopes, not two.** Alongside **user** (personal preferences, portable across
 > projects) and **project** (contracts, committed and reviewed), there is an **environment** scope
@@ -90,7 +79,14 @@ Agent Control 是同一规则库之上的**解析层**，会**编译进**这些�
 - **Agent suggestions, human review.** Agents can propose rules with `suggest_rule` instead of
   writing them directly. Drafts land in a SQLite-backed review queue (the **Suggestions** view,
   with a pending-count badge in the sidebar). A user edits, **approves** (the draft becomes a
-  binding project rule) or **rejects** it — keeping humans in the loop for inferred contracts.
+  binding rule at its proposed scope) or **rejects** it — keeping humans in the loop for inferred
+  contracts.
+- **Session lifecycle.** `create_session` is get-or-create per (project, agent, task) — repeated
+  calls reuse the active session (`reused: true`) instead of piling up duplicates. `set_session_status`
+  closes (`completed`/`failed`) or reopens (`active`) a session, appending a `session_end` evidence
+  entry so finished work leaves the active list while staying auditable. The Sessions view shows the
+  resumable **work state** (goal + done/doing/todo), achieved assurance tiers, and a delete action
+  that cascades to the session's evidence + provenance.
 - **Bilingual UI (English / 简体中文)** with a runtime switcher in Settings; the choice is
   persisted to `<data root>/config.toml`.
 - **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 25 tools plus
@@ -107,7 +103,7 @@ Agent Control 是同一规则库之上的**解析层**，会**编译进**这些�
 - **Accessibility-first automation**: the GUI exposes a full UI Automation (AccessKit) tree, so
   tests drive it by element name / `InvokePattern` instead of synthetic mouse clicks.
 
-## Quick start / 快速开始
+## Quick start
 
 Project-level dependencies are managed by **mise** (Rust toolchain + cmake):
 
@@ -136,7 +132,7 @@ node scripts/hook-e2e.mjs       # SessionStart/PreToolUse hook behavior against 
 The hook check spawns `scripts/agent-control-hook.mjs` against a throwaway daemon and asserts the
 deny/allow exit codes (PreToolUse deny → exit 2, allow → exit 0, fail-open on a dead daemon).
 
-## Connecting an agent / 连接代理
+## Connecting an agent
 
 > A ready-to-copy integrator skill lives at [`skills/agent-control/`](skills/agent-control/SKILL.md)
 > (MCP workflow + enforcement hooks). Drop it into your agent's skill directory to get guided
@@ -150,7 +146,8 @@ Point any MCP-capable harness at the server:
 Recommended call order for a harness:
 
 1. `get_applicable_rules` — resolve binding rules + provenance + conflicts before working.
-2. `create_session` — freeze a constraint snapshot.
+2. `create_session` — freeze a constraint snapshot. Get-or-create per (project, agent, task): an
+   active session with the same triple is returned unchanged (`reused: true`).
 3. `acknowledge_rules` — confirm you received exactly the snapshot's rules.
 4. `record_evidence` — append tool calls / file changes / test results to the hash chain.
 5. `verify_constraints` — run the snapshot's `code_checks` against the repo, record achieved tiers.
@@ -158,6 +155,8 @@ Recommended call order for a harness:
    resumable progress (not just rules).
 7. `export_handoff` / `import_handoff` + `acknowledge_rules` — move between harnesses (re-verify tiers).
 8. `verify_evidence` — recompute the chain and detect tampering.
+9. `set_session_status` — close out (`completed`/`failed`) when the unit of work ends; reopen with
+   `active`. `handed_off` is set only by `export_handoff`.
 
 ### MCP tools
 
@@ -250,7 +249,7 @@ rules it is fail-open. `register_hooks` / `revoke_hooks` / `detect_hooks` manage
 each harness's `settings.json` (see **Native export & hooks** below); the Projects → Hooks panel does
 the same with one click.
 
-## Native export & hooks / 原生导出与 hooks
+## Native export & hooks
 
 Rule files in `.agent-control/rules/` are the source of truth, but most agents read their own
 entry points (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursor/rules`) rather than calling MCP. Agent
@@ -279,7 +278,7 @@ Control bridges that gap with two delivery mechanisms:
   config and hooks; `detect_hooks` inspects and `revoke_hooks` undoes it. Point `AGENT_CONTROL_MCP_URL`
   at your endpoint if it is not the default `http://127.0.0.1:9870/mcp`.
 
-### Assurance tiers / 保证分级
+### Assurance tiers
 
 **Reach is not verification, and verification is not enforcement.** Agent Control keeps two
 orthogonal axes apart so it never overclaims:
@@ -319,39 +318,7 @@ file. Re-running `export_handoff` refreshes `latest.md`; `import_handoff` refres
 *resumed* state (naming the new harness and carrying the re-verify warning), so the file-based reach
 path never goes stale after a resume.
 
-规则文件（`.agent-control/rules/`）是唯一事实来源，但多数 agent 读取自己的入口文件
-（`AGENTS.md`、`CLAUDE.md`、`GEMINI.md`、`.cursor/rules`）而非调用 MCP。Agent Control 用两种交付机制弥合：
-**原生导出**（`export_native` / 「导出到 harness」按钮）向你**勾选**的入口文件写入一段静态**指针托管块**
-（默认仅 `AGENTS.md`，`CLAUDE.md`/`GEMINI.md`/Cursor 可选）。该块以**发现为先**：引导 agent 先理解项目、
-**读取并总结** `.agent-control/rules/` 中的**启用**规则，而**不复制规则文本**，也**绝不提交**被 git 忽略的环境说明；
-块外内容与 Cursor frontmatter 均保留，重复导出幂等，改规则不会让块过期。一段静态 **`### Continuity (optional)`**
-置于**最后**，指向 `<project>/.agent-control/handoff/latest.md`（并可用 `export_handoff` 刷新它）。
-`revoke_native` / 「撤回」按钮可移除托管块（保留手写正文、删除仅含块的文件）。
-**SessionStart + PreToolUse hook**（`scripts/agent-control-hook.mjs`，无依赖 Node，支持 Claude Code / CodeBuddy / WorkBuddy / Qoder）
-在会话开始时经本地 MCP HTTP 调用 `get_applicable_rules`，把绑定规则、冲突与本机/项目**工作环境**摘要注入会话上下文；在每次工具调用前调用
-`check_tool_call` 把关，拒绝时以退出码 2 + stderr 原因**阻断**该调用——这是把 `hard` 规则提升到 **Enforced** 的卡点。
-只读、守护进程不可达时静默退出 0、绝不因基础设施阻塞会话或拒绝工具。用 `register_hooks`（或 Projects → **Hooks** 面板）
-一键写入各 harness 的 `settings.json`（保留其余配置与用户 hook），`detect_hooks` 检测、`revoke_hooks` 撤回。
-
-**触达 ≠ 校验 ≠ 强制。** 两条正交轴彼此分开，绝不夸大：
-- **声明意图 `Rule.enforcement`**（`advisory` | `verify` | `hard`）是*规则*的属性：`advisory` 为语义指引
-  （不可机械校验）、`verify` 携带可对照仓库评估的 `code_checks`、`hard` 声称须在可拒绝的卡点中介。
-  声明 `hard` 本身并不等于强制。
-- **已达级别 `AssuranceTier`**（`Advisory` < `Verified` < `Enforced`）是*会话*实际交付的结果，由证据计算，
-  记录在冻结快照旁（规则上的 `snapshot_hash` 不变）。**Advisory**＝已触达但无机械校验、无拦截
-  （导出 / hook / 查询；语义规则永远停在此级）；**Verified**＝`code_checks` 已对照真实仓库运行并通过、
-  结果入链（`verify_constraints`，事后）；**Enforced**＝动作在可拒绝的卡点被中介（PreToolUse hook → `check_tool_call`，事前）。
-  没有卡点时 `hard` 规则最高只到 **Advisory/Verified**（用 `register_hooks` 注册 hook 以启用强制）。`check_export_drift` 只检测**文件对存储**的格式漂移
-  （入口缺少当前格式指针块，或仍是旧版全文块），不判断已运行会话的上下文是否过期；指针是静态的，改规则不会触发漂移；只提示重新导出、绝不改写。
-  **交接携带基线而非保证**：`export_handoff` 带上源会话已达级别**与工作态**（经 `update_work_state` 记录的
-  `goal` 目标 + done/doing/todo `work_items`），`import_handoff` 展示并**警告**新 harness
-  须重新校验（警告而非阻断）——冻结的*规则*可转移，其背后的*保证*须在新运行时重新赢得，级别下降会被标记；
-  工作态则原样转移，让下一个 harness 继承可恢复的进度，而不依赖它自己的 todo 列。
-  `export_handoff` 还会在 JSON bundle 旁写出可读的连续性简报 `<project>/.agent-control/handoff/latest.md`
-  （任务、来源 harness、证据链头、冻结约束、级别，外加 **Goal** 与 **Work state** 两节）——这是导出 `AGENTS.md` 块所指向的**文件级触达**对应物，
-  从不调用 MCP 的 harness 也能靠读文件继承连续性；再次 `export_handoff` 会刷新 `latest.md`。
-
-## Projects & onboarding / 项目接入
+## Projects & onboarding
 
 Project-level rules are organized **per project**, not by a free-text path. The workflow:
 
@@ -372,13 +339,6 @@ last-opened, rule and session counts) and actions: **set current**, **reveal con
 GEMINI.md / Cursor opt-in), **revoke** (remove the exported block), **rename**, and **remove**.
 Removing a project only unregisters it — it never deletes repo files.
 
-项目级规则以**项目**为单位组织，而非手填路径。在 **Projects** 视图点击 **Add project**，浏览选择
-仓库目录并命名；接入时会注册项目并在 `<project>/.agent-control/` 生成 `rules/` 目录、`examples/`
-模板目录（可复制的规则示例，不生效，复制进 `rules/` 即启用）与中英双语 `README.md` 契约指南
-（幂等，保留已有文件）。该项目随即成为**当前项目**（顶栏芯片显示），会话、
-项目级规则编辑、冲突消解都自动绑定到它。左侧**树**展开每个项目的契约 / 会话 / 冲突，点击节点跳转
-到对应视图；右侧提供设为当前、打开契约目录、导出到 harness、重命名、移除（仅注销，不删除仓库文件）。
-
 **Scope separation.** The same Rules editor is scoped by the sidebar nav: **Preferences**
 (个人偏好) edits user-scope rules (stored in `~/.agent-control/rules/user/`, follow you everywhere),
 **Project Contracts** (项目契约) edits project-scope rules (stored in the current project's repo, meant
@@ -387,7 +347,7 @@ current project's git-ignored `.agent-control/local/`, injected only via the bri
 With no current project, Project Contracts and Work Environment show guidance and a shortcut to
 Projects instead of an editor.
 
-## Suggestions review / 建议审核
+## Suggestions review
 
 Agents propose rules with `suggest_rule`; humans decide. The **Suggestions** view (with a
 pending-count badge in the sidebar and a banner on the Dashboard) is the review queue:
@@ -406,32 +366,16 @@ pending-count badge in the sidebar and a banner on the Dashboard) is the review 
 Suggestions live in SQLite (`rule_suggestions`), so the queue survives restarts and is auditable:
 approved entries record the resulting `approved_rule_id`, rejected entries keep the review note.
 
-代理通过 `suggest_rule` 提议规则，由人审核。**Suggestions** 视图（侧栏带待审计数徽标、仪表盘有入口
-横幅）即审核队列：按 **Pending / Approved / Rejected / All** 过滤，选中后可见代理草稿、`rationale`、
-提议者与**作用域标签**（user / project / environment）；用户可**编辑**规则 id/标题/正文并补充审核备注，再**批准**
-（按提议作用域写入绑定规则，与 `save_rule` 同路径：**project** 写入当前项目 `.agent-control/rules/`，
-**user** 写入 `~/.agent-control/rules/user/` 成为跨项目生效的个人偏好，**environment** 写入当前项目被 git 忽略的
-`.agent-control/local/`、仅经简报注入）或**拒绝**（确认对话框，不写任何规则）。
-`scope: "environment"` 适合记录**本机/本项目的工作环境说明**（如「我在 WSL 中运行 CLI，编译验证时可调用 Windows
-原生工具」）——这类事实只对当前电脑/项目成立，既不该混入可移植的个人偏好，也不该提交进仓库共享契约；
-环境规则总会加载、冻结进每个会话快照，并通过 SessionStart hook 简报 / `get_applicable_rules` 主动注入，
-无需任务中途再提醒，但**绝不写入导出的 `AGENTS.md`**。建议存于 SQLite（`rule_suggestions`），重启后保留
-且可审计：批准记录生成的 `approved_rule_id`，拒绝保留审核备注。
-
-## Storage layout / 存储布局
+## Storage layout
 
 Default data root: `~/.agent-control` (override with `--data-dir`).
 
-**Portable mode / 便携模式.** Place a `portable.marker` file next to the executable (or set
+**Portable mode.** Place a `portable.marker` file next to the executable (or set
 `AGENT_CONTROL_PORTABLE=1`) and the whole store moves beside the binary instead of the global
 home directory: data root `<exe dir>/data`, database at `<exe dir>/data/db/control.db`, with
 rules / `config.toml` / bundles under `<exe dir>/data/`. Nothing reads or writes `~/.agent-control`,
 so a portable copy is fully isolated — ideal for testing. Delete the marker to return to the
 global store. Release zips ship the marker so they run portable out of the box.
-
-便携模式：在可执行文件旁放置 `portable.marker`（或设 `AGENT_CONTROL_PORTABLE=1`），全部数据改存
-于程序旁 `<exe目录>/data`（数据库在 `data/db/control.db`），不再读写全局 `~/.agent-control`，
-便于测试隔离；删除标记即恢复全局存储。Release 压缩包默认附带该标记。
 
 ```
 ~/.agent-control/
@@ -454,7 +398,7 @@ optional `code_checks`, filters, priority). User- and project-scope rules are me
 and reviewed; **environment-scope notes in `local/` are the exception** — git-ignored, machine/project
 specific, and delivered only through the MCP/hook briefing.
 
-## GUI automation (accessibility tree) / 无障碍树驱动
+## GUI automation (accessibility tree)
 
 Because the window renders its own title bar and exposes AccessKit nodes, prefer UI Automation
 over mouse synthesis (immune to user interference and DPI scaling):
@@ -465,19 +409,14 @@ scripts/uia-invoke.ps1 -Hwnd <hwnd> -Name "Settings"   # invoke by name
 scripts/uia-shot.ps1   -Hwnd <hwnd> -Out out.png       # capture the window rect
 ```
 
-## Release packaging / 打包发布
+## Release packaging
 
 `mise run release` builds optimized binaries (`cargo build --release`) and assembles
 `dist/agent-control-v<version>-windows-x64.zip` via `scripts/package-release.mjs`. The zip bundles
-the console + MCP executables, the README, the brand icon and a `portable.marker`, so an extracted
-copy runs fully portable (store beside the exe) out of the box. The Windows executable embeds
-`crates/app/assets/icon.ico` (multi-size) plus version info through `crates/app/build.rs`
-(winresource), so Explorer / the taskbar show the Agent Control icon.
-
-打包：`mise run release` 构建优化二进制并生成 `dist/agent-control-v<版本>-windows-x64.zip`
-（含控制台与 MCP 可执行文件、README、品牌图标与 `portable.marker`，解压即便携运行）。
-Windows 可执行文件通过 `crates/app/build.rs`（winresource）嵌入多尺寸 `icon.ico` 与版本信息，
-资源管理器 / 任务栏显示 Agent Control 图标。
+the console + MCP executables, both READMEs (English + 简体中文), the brand icon, the hook script and a
+`portable.marker`, so an extracted copy runs fully portable (store beside the exe) out of the box. The
+Windows executable embeds `crates/app/assets/icon.ico` (multi-size) plus version info through
+`crates/app/build.rs` (winresource), so Explorer / the taskbar show the Agent Control icon.
 
 ## License
 
