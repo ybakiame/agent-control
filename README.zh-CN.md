@@ -278,7 +278,8 @@ harness 经 stdin 传入的 session id 从不被使用（它并非 Agent Control
 简报 `<project>/.agent-control/handoff/latest.md`（任务、来源 harness、证据链头、冻结约束、级别，外加 **Goal** 与
 **Work state** 两节）——这是导出 `AGENTS.md` 块所指向的**文件级触达**对应物，从不调用 MCP 的 harness 也能靠读文件
 继承连续性。再次 `export_handoff` 会刷新 `latest.md`；`import_handoff` 再次把它刷新为*已恢复*状态（命名新 harness
-并携带重新校验警告），因此文件级触达路径在恢复后绝不过期。
+并携带重新校验警告），因此文件级触达路径在恢复后绝不过期。每次导出还会把此前所有*未确认*的交接记录标记为
+**已取代**（`superseded`）——只有最新一条交接仍是待确认事项；已确认的记录绝不会被取代。
 
 ## 项目接入
 

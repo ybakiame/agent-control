@@ -84,7 +84,9 @@ Follow this order for every unit of work. Tool parameters and JSON examples are 
    `new_agent`) then `acknowledge_rules` again, and **re-verifies** — a tier drop is warned, not
    blocked. Use `get_session_context` to resume work another harness started. A harness that never
    calls MCP can still inherit continuity by reading `latest.md` (the exported `AGENTS.md` block
-   points at it); re-running `export_handoff` refreshes that file.
+   points at it); re-running `export_handoff` refreshes that file. Each export marks every prior
+   *unacknowledged* handoff record `superseded`, so only the latest handoff is pending
+   acknowledgment; acknowledged records are never superseded.
 8. **Verify** — `verify_evidence` (`session_id`) recomputes the chain and reports tampering/gaps.
 9. **Close out** — `set_session_status` (`session_id`, `status: completed|failed`) when the unit of
    work ends, so finished sessions leave the active list (a `session_end` evidence entry keeps the

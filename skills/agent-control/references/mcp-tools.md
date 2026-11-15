@@ -45,7 +45,8 @@ Commit to the snapshot's rules; server compares against the frozen snapshot.
 - `session_id` (UUID string, required), `agent_id` (string, required), `rule_ids` (string[],
   required) — the exact ids from `create_session.rules`.
 - Returns an acknowledgment report listing `missing` / `unexpected` rules. Required after session
-  start and after every handoff.
+  start and after every handoff. Only the **latest** handoff record is marked acknowledged; earlier
+  unacknowledged records are `superseded` by newer exports.
 
 ### record_evidence
 Append a tamper-evident entry to the session hash chain.

@@ -365,7 +365,9 @@ frozen constraints, tiers, plus **Goal** and **Work state** sections) beside the
 `AGENTS.md` block points at, so a harness that never calls MCP can inherit continuity by reading a
 file. Re-running `export_handoff` refreshes `latest.md`; `import_handoff` refreshes it again into the
 *resumed* state (naming the new harness and carrying the re-verify warning), so the file-based reach
-path never goes stale after a resume.
+path never goes stale after a resume. Each export also marks every prior *unacknowledged* handoff
+record `superseded`, so only the latest handoff reads as pending action; acknowledged records are
+never superseded.
 
 ## Projects & onboarding
 
