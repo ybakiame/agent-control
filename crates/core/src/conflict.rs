@@ -111,7 +111,21 @@ fn read_config_value(path: &Path, key: &str) -> anyhow::Result<Option<String>> {
                 other => other.to_string(),
             }))
         }
-        "toml" | "yaml" | "yml" => {
+        "toml" => {
+            let value: toml::Value = toml::from_str(&raw)?;
+            let mut current = &value;
+            for part in key.split('.') {
+                current = match current.get(part) {
+                    Some(next) => next,
+                    None => return Ok(None),
+                };
+            }
+            Ok(Some(match current {
+                toml::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }))
+        }
+        "yaml" | "yml" => {
             let value: serde_yaml::Value = serde_yaml::from_str(&raw)?;
             Ok(yaml_path(&value, key).map(yaml_scalar_to_string))
         }

@@ -140,6 +140,48 @@ fn code_check_detects_editorconfig_conflict() {
 }
 
 #[test]
+fn code_check_reads_toml_tables() {
+    use agent_control_core::conflict::{CheckStatus, evaluate_code_checks};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("toolchain.toml"),
+        "[tools]\nrust = \"1.99.0\"\ncmake = \"latest\"\n\n[tasks.build]\nrun = \"cargo build --workspace\"\n",
+    )
+    .unwrap();
+    let mut rule = make_rule("toml", Scope::Project, 100, None);
+    rule.code_checks = vec![
+        CodeCheck {
+            file: "toolchain.toml".into(),
+            key: "tools.rust".into(),
+            expect: "1.99.0".into(),
+            description: None,
+        },
+        CodeCheck {
+            file: "toolchain.toml".into(),
+            key: "tasks.build.run".into(),
+            expect: "cargo test".into(),
+            description: None,
+        },
+        CodeCheck {
+            file: "toolchain.toml".into(),
+            key: "tools.missing".into(),
+            expect: "x".into(),
+            description: None,
+        },
+    ];
+    let results = evaluate_code_checks(&rule, dir.path());
+    assert_eq!(results[0].status, CheckStatus::Pass);
+    assert_eq!(results[0].actual.as_deref(), Some("1.99.0"));
+    assert_eq!(results[1].status, CheckStatus::Fail);
+    assert_eq!(
+        results[1].actual.as_deref(),
+        Some("cargo build --workspace")
+    );
+    assert_eq!(results[2].status, CheckStatus::Missing);
+}
+
+#[test]
 fn evidence_chain_verifies_and_detects_tampering() {
     let store = Store::open_with_root(tempfile::tempdir().unwrap().path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
