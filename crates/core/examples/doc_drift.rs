@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DocManifest {
     doc: String,
     #[serde(default)]
@@ -34,33 +35,52 @@ enum ClaimType {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Anchor {
     /// 1-based inclusive line range in the document.
     lines: [usize; 2],
     /// Snippet that must still appear inside the range (detects anchor drift / second-order rot).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "scalar_string")]
     contains: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DocClaim {
     id: String,
     #[serde(rename = "type")]
     kind: ClaimType,
     #[serde(default)]
     anchor: Option<Anchor>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "scalar_string")]
     path: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "scalar_string")]
     file: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "scalar_string")]
     key: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "scalar_string")]
     expect: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "scalar_string")]
     pattern: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "scalar_string")]
     command: Option<String>,
+}
+
+/// Manifest authors write unquoted scalars (`expect: 9870`, `expect: 1.95`); coerce numbers and
+/// bools to strings instead of failing the whole manifest.
+fn scalar_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<serde_yaml::Value>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(serde_yaml::Value::String(s)) => Ok(Some(s)),
+        Some(serde_yaml::Value::Number(n)) => Ok(Some(n.to_string())),
+        Some(serde_yaml::Value::Bool(b)) => Ok(Some(b.to_string())),
+        Some(_) => Err(serde::de::Error::custom(
+            "expected a scalar string/number/bool",
+        )),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -263,7 +283,13 @@ fn error_report(manifest: String, error: String) -> DocReport {
         manifest,
         doc_exists: false,
         rot_score: 1.0,
-        counts: Counts::default(),
+        // An unevaluated manifest is a detection-system failure, not "all fresh": count it as
+        // broken so it reaches totals, the exit code and the consumer.
+        counts: Counts {
+            fresh: 0,
+            stale: 0,
+            broken: 1,
+        },
         claims: Vec::new(),
         error: Some(error),
     }
@@ -440,5 +466,55 @@ fn eval_claim(project: &Path, claim: &DocClaim) -> ClaimResult {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unquoted_scalars_coerce_to_strings() {
+        let manifest: DocManifest = serde_yaml::from_str(
+            "doc: README.md\nclaims:\n  - id: port\n    type: config_value\n    file: c.toml\n    key: p\n    expect: 9870\n    anchor: { lines: [1, 2], contains: 9870 }\n  - id: msrv\n    type: version\n    file: Cargo.toml\n    key: v\n    expect: 1.95\n  - id: flag\n    type: config_value\n    file: c.toml\n    key: f\n    expect: true\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.claims[0].expect.as_deref(), Some("9870"));
+        assert_eq!(
+            manifest.claims[0]
+                .anchor
+                .as_ref()
+                .unwrap()
+                .contains
+                .as_deref(),
+            Some("9870")
+        );
+        assert_eq!(manifest.claims[1].expect.as_deref(), Some("1.95"));
+        assert_eq!(manifest.claims[2].expect.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        assert!(serde_yaml::from_str::<DocManifest>("doc: x\nbogus: 1").is_err());
+        assert!(
+            serde_yaml::from_str::<DocManifest>(
+                "doc: x\nclaims:\n  - id: a\n    type: path_exists\n    path: p\n    typo: 1\n"
+            )
+            .is_err()
+        );
+        assert!(
+            serde_yaml::from_str::<DocManifest>(
+                "doc: x\nclaims:\n  - id: a\n    type: path_exists\n    anchor: { lines: [1, 2], bogus: 1 }\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn manifest_error_counts_as_broken() {
+        let report = error_report("m.yaml".into(), "manifest invalid".into());
+        assert_eq!(report.counts.broken, 1);
+        assert_eq!(report.rot_score, 1.0);
+        assert!(report.error.is_some());
     }
 }

@@ -23,6 +23,19 @@ if (report.schema !== "doc-drift-report/1") {
 
 const plan = { source: reportPath, evaluated_at: report.evaluated_at, documents: [] };
 for (const doc of report.documents) {
+  if (doc.error) {
+    // A manifest that could not be evaluated is a detection-system failure, never "keep".
+    console.error(`warning: ${doc.manifest}: ${doc.error}`);
+    plan.documents.push({
+      doc: doc.doc || doc.manifest,
+      doc_exists: false,
+      rot_score: doc.rot_score,
+      action: "exclude",
+      chunks: [],
+      reasons: [`manifest_error: ${doc.error}`],
+    });
+    continue;
+  }
   const docAction = doc.rot_score > threshold ? "downweight" : "keep";
   const chunks = doc.claims.map((claim) => {
     const reasons = [];
@@ -52,4 +65,5 @@ for (const doc of report.documents) {
 console.log(JSON.stringify(plan, null, 2));
 const excluded = plan.documents.flatMap((d) => d.chunks).filter((c) => c.action === "exclude").length;
 const downweighted = plan.documents.flatMap((d) => d.chunks).filter((c) => c.action === "downweight").length;
-console.error(`gate: ${plan.documents.length} docs, ${excluded} chunks excluded, ${downweighted} downweighted`);
+const excludedDocs = plan.documents.filter((d) => d.action === "exclude").length;
+console.error(`gate: ${plan.documents.length} docs (${excludedDocs} excluded), ${excluded} chunks excluded, ${downweighted} downweighted`);

@@ -106,3 +106,26 @@ spike 的 `config_value` claim 全部 `broken` 暴露了它。已修复（改用
 **值得，附条件立项。** 模型与输出契约已验证、消费方解耦成立、首轮即捕获真实 bug。
 ACP 立项前置：brief N（契约文件格式）需吸收稳定锚点与 claim 清单格式；brief Q（证据与溯源）
 需决定 `DocCheck` 入链形态。阶段二（hooks/CI 门禁）启动前先完成 §8 的逐厂商警告渠道实测。
+
+PR #2 review 补充的硬条件：
+
+- `command_runs` 必须有**超时 + 廉价命令白名单**（挂起命令会无限阻塞求值；环境抖动类 stale
+  不得进入警告渠道）。
+- claim id 需 **`doc:id` 复合键**命名空间化（当前 `rust-pin` 在两份清单重复；全局入链的前置）。
+- anchor 求值需**按文档缓存**（当前逐 claim 重读文档；§8 的 mtime/hash 缓存要求覆盖此点）。
+- 清单 schema 的标量 coercion + `deny_unknown_fields` + 格式回归测试——**已在 spike 整改落地**（§11）。
+
+## 11. Review 整改记录（PR #2）
+
+**必须项（已修复）**：清单级求值错误（不可读 / YAML 非法）原先返回全零 counts，全局 drift=0 →
+退出码 0「all fresh」，消费方亦无感——检测系统自身故障被静默吞掉，违反 broken ≠ fresh 原则。
+整改：`error_report` 计入 `broken: 1`（随 totals 进入退出码 1 与全局 rot_score）；
+`doc-drift-gate.mjs` 对 `doc.error` 输出整文档 `exclude` + 显式 stderr 告警，不再静默跳过。
+
+**叠加风险（已修复）**：未加引号的标量（`expect: 9870` / `expect: 1.95`）原会使整份清单
+反序列化失败并静默退出 0。整改：`scalar_string` coercion（数字/布尔→字符串，覆盖
+expect/path/file/key/pattern/command/contains）；`DocManifest`/`DocClaim`/`Anchor` 均
+`deny_unknown_fields`；example 内新增回归测试（`cargo test -p agent-control-core --example doc_drift`：
+标量 coercion、未知字段拒绝、清单错误计 broken）。
+
+**琐碎项（已修复）**：新增文件补齐末尾换行。
