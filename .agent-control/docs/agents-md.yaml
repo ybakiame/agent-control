@@ -1,0 +1,16 @@
+# Issue #1 spike: falsifiable claims made by AGENTS.md (version-consistency sample).
+doc: AGENTS.md
+claims:
+  - id: msrv
+    type: version
+    anchor: { lines: [38, 38], contains: MSRV 1.95 }
+    file: Cargo.toml
+    key: workspace.package.rust-version
+    expect: "1.95"
+
+  - id: rust-pin
+    type: config_value
+    anchor: { lines: [37, 37], contains: rust 1.99.0 }
+    file: mise.toml
+    key: tools.rust
+    expect: 1.99.0

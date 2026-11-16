@@ -1,0 +1,94 @@
+# Issue #1 spike: falsifiable claims made by README.md, anchored to line ranges.
+# Evaluated by: cargo run -p agent-control-core --example doc_drift -- --project .
+doc: README.md
+claims:
+  - id: mise-config-exists
+    type: path_exists
+    anchor: { lines: [112, 112], contains: mise }
+    path: mise.toml
+
+  - id: rust-pin
+    type: config_value
+    anchor: { lines: [115, 115], contains: 1.99.0 }
+    file: mise.toml
+    key: tools.rust
+    expect: 1.99.0
+
+  - id: mise-task-build
+    type: config_value
+    anchor: { lines: [116, 116], contains: "cargo build --workspace" }
+    file: mise.toml
+    key: tasks.build.run
+    expect: cargo build --workspace
+
+  - id: mise-task-check
+    type: config_value
+    anchor: { lines: [117, 117], contains: "cargo clippy --workspace --all-targets -- -D warnings" }
+    file: mise.toml
+    key: tasks.check.run
+    expect: cargo clippy --workspace --all-targets -- -D warnings
+
+  - id: mise-task-test
+    type: config_value
+    anchor: { lines: [118, 118], contains: "cargo test --workspace" }
+    file: mise.toml
+    key: tasks.test.run
+    expect: cargo test --workspace
+
+  - id: mise-task-fmt
+    type: config_value
+    anchor: { lines: [121, 121], contains: "cargo fmt --all" }
+    file: mise.toml
+    key: tasks.fmt.run
+    expect: cargo fmt --all
+
+  - id: mise-available
+    type: command_runs
+    anchor: { lines: [112, 112], contains: mise }
+    command: mise --version
+
+  - id: default-mcp-port
+    type: regex_in_file
+    anchor: { lines: [124, 125], contains: "9870" }
+    file: crates/core/src/config.rs
+    pattern: "DEFAULT_MCP_PORT: u16 = 9870"
+
+  - id: script-mcp-e2e
+    type: path_exists
+    anchor: { lines: [131, 131], contains: scripts/mcp-e2e.mjs }
+    path: scripts/mcp-e2e.mjs
+
+  - id: script-http-e2e
+    type: path_exists
+    anchor: { lines: [132, 132], contains: scripts/mcp-http-e2e.mjs }
+    path: scripts/mcp-http-e2e.mjs
+
+  - id: script-hook-e2e
+    type: path_exists
+    anchor: { lines: [133, 133], contains: scripts/hook-e2e.mjs }
+    path: scripts/hook-e2e.mjs
+
+  - id: script-hook
+    type: path_exists
+    anchor: { lines: [136, 136], contains: agent-control-hook.mjs }
+    path: scripts/agent-control-hook.mjs
+
+  - id: integrator-skill
+    type: path_exists
+    anchor: { lines: [142, 142], contains: skills/agent-control/SKILL.md }
+    path: skills/agent-control/SKILL.md
+
+  - id: crate-core
+    type: path_exists
+    anchor: { lines: [60, 60], contains: core }
+    path: crates/core
+
+  - id: crate-mcp
+    type: path_exists
+    anchor: { lines: [60, 60], contains: mcp }
+    path: crates/mcp
+
+  - id: crate-app
+    type: path_exists
+    anchor: { lines: [60, 60], contains: app }
+    path: crates/app
