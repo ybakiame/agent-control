@@ -1,6 +1,7 @@
 use agent_control_core::model::Scope;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -126,6 +127,43 @@ impl Console {
                 .into_any_element()
         });
 
+        let search_rows: Vec<AnyElement> = match &self.search_hits {
+            None => Vec::new(),
+            Some(hits) if hits.is_empty() => vec![
+                div()
+                    .pt_2()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(self.t("search.empty"))
+                    .into_any_element(),
+            ],
+            Some(hits) => hits
+                .iter()
+                .map(|h| {
+                    let kind = match h.kind {
+                        agent_control_core::SearchKind::Rules => self.t("search.kind.rules"),
+                        agent_control_core::SearchKind::Sessions => self.t("search.kind.sessions"),
+                        agent_control_core::SearchKind::Evidence => self.t("search.kind.evidence"),
+                    };
+                    v_flex()
+                        .gap_0p5()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(Tag::info().child(kind))
+                                .child(div().text_sm().font_medium().child(h.title.clone()))
+                                .child(ui::mono(cx, h.id.clone())),
+                        )
+                        .child(div().text_xs().text_color(muted).child(h.snippet.clone()))
+                        .into_any_element()
+                })
+                .collect(),
+        };
+
         v_flex()
             .flex_1()
             .min_h_0()
@@ -198,6 +236,36 @@ impl Console {
                                 cx.notify();
                             })),
                     ),
+            )
+            .child(
+                ui::card(cx)
+                    .child(ui::section_label(cx, self.t("search.title")))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(Input::new(&self.search_input).id("search-input")),
+                            )
+                            .child(
+                                Button::new("search-run")
+                                    .label(self.t("search.run"))
+                                    .primary()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.run_search(cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(self.t("search.desc")),
+                    )
+                    .children(search_rows),
             )
             .child(suggestions_banner)
             .when(!self.conflicts.is_empty(), |this| {

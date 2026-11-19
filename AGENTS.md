@@ -64,7 +64,7 @@ Three crates under `crates/`. Dependency direction: `app → {mcp, core}`, `mcp 
 | Crate | Package | Kind | Responsibility | Key files |
 |-------|---------|------|----------------|-----------|
 | core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native pointer export + drift + revoke, assurance tiers, tool-call gate, hooks config | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Enforcement`, `AssuranceTier`, `ConstraintAssurance`, `ToolGuard`, `ToolGateReport`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs` (`evaluate_code_checks`), `gate.rs` (`check_tool_call`, repo gate + tool guards), `hooks.rs` (`HookTarget`, `ConfigCodec`, `HookScope`, `HookEvents`, `register`/`revoke`/`detect`), `export.rs` (`PROJECT_GUIDANCE`, `render_constraint_briefing`, `handoff_tier_warning`, `render_handoff_brief`, `wrap_block`, `upsert_managed_block`, `remove_managed_block`, `ExportTarget`, `ExportReport`, `RevokeReport`, `DriftReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
-| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 26 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
+| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 27 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
 | app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review, native export + hooks registration | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
 
 Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`, `Store`,
@@ -343,12 +343,12 @@ cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 **Single-instance:** the TCP bind is the lock — a second HTTP launch on a busy address logs
 "already serving" and exits cleanly (`AddrInUse` guard), so daemon spawns are idempotent.
 
-**26 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
+**27 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
 `record_evidence`, `acknowledge_rules`, `get_session_context`, `update_work_state`,
 `set_session_status`, `export_handoff`,
 `import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`,
 `list_suggestions`, `export_native`, `check_export_drift`, `revoke_native`, `verify_constraints`,
-`check_tool_call`, `register_hooks`, `revoke_hooks`, `detect_hooks`, `doctor` (plus resources & prompts).
+`check_tool_call`, `register_hooks`, `revoke_hooks`, `detect_hooks`, `doctor`, `search` (plus resources & prompts).
 `save_rule` is the active rule-authoring path: an agent records a discovered project contract
 (`scope=project`, `kind=contract`, `project_path`), a personal preference (`scope=user`), or a
 machine/project environment note (`scope=environment`, `project_path`, written to git-ignored
@@ -435,6 +435,16 @@ a loopback TCP probe of the daemon. `DoctorReport.healthy` is false when any cha
 export target is stale or any conflict exists; it performs no writes. Backs the MCP `doctor` tool,
 the mcp-bin `--doctor` flag (JSON to stdout, exit 1 when unhealthy) and the Settings-view
 **Diagnostics** card (`Console::run_doctor`, `doctor_report`).
+`search` (`query`, optional `kind` = `rules|sessions|evidence`, optional `project_path`, optional
+`limit`) is full-text search over three FTS5 shadow tables (`search_rules`, `search_sessions`,
+`search_evidence`, `core/src/search.rs` + `store/db.rs`). unicode61 treats a CJK run as one token,
+so text is pre-segmented by a hybrid segmenter: CJK runs → character bigrams (zero dictionary),
+other scripts → lowercased words; queries use the same transform, making two-character Chinese
+queries match. Index rows store space-joined tokens; ranking is bm25 with `snippet()` excerpts.
+Shadow rows sync at the write chokepoints (`save_rule`/`delete_rule`, `db.upsert_session`,
+`db.append_evidence`, `db.delete_session`) and rebuild from source on every `Store::open` (rules
+from disk via the project registry, sessions/evidence from the DB). Backs the MCP `search` tool
+and the Dashboard search card (`Console::run_search`, `search_input`/`search_hits`).
 
 Recommended harness call order:
 

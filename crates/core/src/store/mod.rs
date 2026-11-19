@@ -55,7 +55,9 @@ impl Store {
     pub fn open(layout: DataLayout) -> Result<Self> {
         layout.ensure_dirs()?;
         let db = Db::open(&layout.db_path())?;
-        Ok(Self { layout, db })
+        let store = Self { layout, db };
+        store.rebuild_search_index()?;
+        Ok(store)
     }
 
     pub fn open_default() -> Result<Self> {
@@ -100,7 +102,20 @@ impl Store {
         };
         let mut rule = rule.clone().with_checksum();
         rule.source.file_path = None;
-        files::write_rule_file(&dir, &rule)
+        let path = files::write_rule_file(&dir, &rule)?;
+        let index_path = match rule.scope {
+            Scope::User => String::new(),
+            _ => project_path
+                .map(|p| {
+                    p.canonicalize()
+                        .unwrap_or_else(|_| p.to_path_buf())
+                        .display()
+                        .to_string()
+                })
+                .unwrap_or_default(),
+        };
+        self.db.search_sync_rule(&rule, &index_path)?;
+        Ok(path)
     }
 
     /// Create or update a rule by id. When the id already exists, bump its version and preserve the
@@ -170,7 +185,11 @@ impl Store {
             }
             Scope::Session => bail!("session rules cannot be deleted as files"),
         };
-        files::delete_rule_file(&dir, rule_id)
+        let deleted = files::delete_rule_file(&dir, rule_id)?;
+        if deleted {
+            self.db.search_remove_rule(rule_id)?;
+        }
+        Ok(deleted)
     }
 
     pub fn get_rule(&self, rule_id: &str, project_path: Option<&Path>) -> Result<Option<Rule>> {
@@ -343,6 +362,62 @@ impl Store {
 
     pub fn get_evidence(&self, session_id: Uuid) -> Result<Vec<EvidenceEntry>> {
         self.db.get_evidence(session_id)
+    }
+
+    /// Full-text search over rules, sessions and evidence. The query goes through the same
+    /// hybrid segmenter as the index (CJK bigrams), so Chinese queries of two characters or
+    /// more match. `kind` and `project_path` narrow the result; an empty query returns nothing.
+    pub fn search(
+        &self,
+        query: &str,
+        kind: Option<crate::search::SearchKind>,
+        project_path: Option<&Path>,
+        limit: usize,
+    ) -> Result<Vec<crate::search::SearchHit>> {
+        let tokens = crate::search::tokenize(query);
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let expr = crate::search::match_expression(&tokens);
+        let project = project_path.map(|p| {
+            p.canonicalize()
+                .unwrap_or_else(|_| p.to_path_buf())
+                .display()
+                .to_string()
+        });
+        let mut hits = self
+            .db
+            .search_query(&expr, kind, project.as_deref(), limit.max(1))?;
+        for hit in &mut hits {
+            hit.snippet = crate::search::display_snippet(&hit.snippet);
+        }
+        Ok(hits)
+    }
+
+    /// Rules live in git-friendly files, so their shadow rows are rebuilt from disk on open;
+    /// sessions and evidence are rebuilt from the DB so older stores gain a populated index.
+    fn rebuild_search_index(&self) -> Result<()> {
+        self.db.search_clear()?;
+        for rule in self.load_rules(None)? {
+            self.db.search_sync_rule(&rule, "")?;
+        }
+        for project in self.db.list_projects()? {
+            for rule in self.load_rules(Some(&project.path))? {
+                if rule.scope == Scope::User {
+                    continue;
+                }
+                self.db
+                    .search_sync_rule(&rule, &project.path.display().to_string())?;
+            }
+        }
+        for session in self.db.list_sessions()? {
+            self.db.search_sync_session(&session)?;
+            for entry in self.db.get_evidence(session.id)? {
+                self.db
+                    .search_sync_evidence(&entry, &session.project_path.display().to_string())?;
+            }
+        }
+        Ok(())
     }
 
     pub fn verify_chain(&self, session_id: Uuid) -> Result<VerificationReport> {

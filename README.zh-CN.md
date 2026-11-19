@@ -65,7 +65,7 @@ Agent Control 是同一规则库之上的**解析层**，会**编译进**这些�
   并追加 `session_end` 证据条目，让已完成的工作离开活动列表却仍可审计。会话视图显示可恢复的**工作态**
   （goal + done/doing/todo）、已达保证分级，以及级联删除会话证据 + 溯源的删除动作。
 - **双语 UI（English / 简体中文）**，设置内有运行时切换器；选择持久化到 `<数据根>/config.toml`。
-- **MCP 服务端**（rmcp），支持 **stdio** 与 **Streamable HTTP** 两种模式，暴露 26 个工具及资源与提示。
+- **MCP 服务端**（rmcp），支持 **stdio** 与 **Streamable HTTP** 两种模式，暴露 27 个工具及资源与提示。
   守护进程的回环**端口可在设置中配置**（默认 `9870`）并存于 `config.toml`，因此便携/dev 实例可绑定不同端口、
   与生产隔离；侧栏图标按钮可一眼启停守护进程。
 - **Hooks 强制**，支持**九家编码 agent**——Claude Code、CodeBuddy、WorkBuddy、Qoder、Qoder CN、Codex、
@@ -138,7 +138,7 @@ harness 推荐调用顺序（**MCP 协作路径**，即 agent 自行调用 MCP�
 `acknowledge_rules`、`get_session_context`、`update_work_state`、`set_session_status`、`export_handoff`、`import_handoff`、
 `verify_evidence`、`list_rules`、`save_rule`、`set_rule_enabled`、`suggest_rule`、`list_suggestions`、
 `export_native`、`check_export_drift`、`revoke_native`、`verify_constraints`、`check_tool_call`、
-`register_hooks`、`revoke_hooks`、`detect_hooks`、`doctor`。
+`register_hooks`、`revoke_hooks`、`detect_hooks`、`doctor`、`search`。
 
 `save_rule` 让 agent **主动记录**发现的项目契约、个人偏好或机器/项目环境说明为规则文件：传入 `id`、`title`、
 `content`、`agent_id`，项目契约再加 `scope: "project"` + `project_path`（或 `scope: "environment"` + `project_path`

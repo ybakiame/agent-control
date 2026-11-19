@@ -6,6 +6,7 @@ pub mod export;
 pub mod gate;
 pub mod hooks;
 pub mod model;
+pub mod search;
 pub mod store;
 
 pub use config::{AppConfig, DEFAULT_MCP_PORT, DataLayout};
@@ -17,4 +18,5 @@ pub use export::{
 };
 pub use hooks::{HookReport, HookScope, HookStatus, HookTarget};
 pub use model::*;
+pub use search::{SearchHit, SearchKind};
 pub use store::{AcknowledgmentReport, ConstraintVerificationReport, RuleExplanation, Store};

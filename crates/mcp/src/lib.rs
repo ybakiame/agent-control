@@ -502,6 +502,21 @@ pub struct DoctorRequest {
     pub daemon_bind: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchRequest {
+    /// Search text. Chinese queries of two or more characters work (CJK bigram segmentation).
+    pub query: String,
+    /// Restrict to one corpus: rules | sessions | evidence. Omitted searches all three.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Restrict to one project's rows (user-scope rules carry an empty path and are excluded).
+    #[serde(default)]
+    pub project_path: Option<String>,
+    /// Maximum hits across corpora (default 20).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 #[tool_router]
 impl ControlServer {
     #[tool(
@@ -1297,6 +1312,44 @@ impl ControlServer {
         let project = PathBuf::from(req.project_path.trim());
         match self.store.doctor(&project, req.daemon_bind.as_deref()) {
             Ok(report) => json_result(&serde_json::to_value(report).unwrap()),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Full-text search over rules, sessions and evidence with bm25 ranking and snippets. Chinese queries of two or more characters match (the index and the query share a CJK-bigram segmenter). Optional kind (rules|sessions|evidence) and project_path narrow the corpus; limit defaults to 20. Read-only."
+    )]
+    async fn search(
+        &self,
+        Parameters(req): Parameters<SearchRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let kind = match req.kind.as_deref() {
+            None => None,
+            Some(k) => Some(
+                serde_json::from_str::<agent_control_core::SearchKind>(&format!("\"{k}\""))
+                    .map_err(|_| {
+                        ErrorData::invalid_params(
+                            format!("unknown kind '{k}'; use rules|sessions|evidence"),
+                            None,
+                        )
+                    })?,
+            ),
+        };
+        let project = req
+            .project_path
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+            .map(PathBuf::from);
+        match self.store.search(
+            &req.query,
+            kind,
+            project.as_deref(),
+            req.limit.unwrap_or(20),
+        ) {
+            Ok(hits) => {
+                let count = hits.len();
+                json_result(&serde_json::json!({ "hits": hits, "count": count }))
+            }
             Err(e) => tool_err(e),
         }
     }

@@ -395,6 +395,19 @@ Read-only aggregate diagnostics for a project in one report; performs **no write
   when unhealthy) and the console's Settings → Diagnostics card.
 - Errors (`isError`): empty `project_path`.
 
+### search
+Full-text search over rules, sessions and evidence; read-only. Chinese queries of **two or more
+characters** match: the index and the query share a hybrid segmenter (CJK runs → character
+bigrams, other scripts → lowercased words), stored as space-joined tokens in FTS5 shadow tables.
+- `query` (string, required), `kind` (string, optional: `rules` | `sessions` | `evidence`; omitted
+  searches all three), `project_path` (string, optional — narrows to one project; user-scope rules
+  carry an empty path and are excluded), `limit` (number, default 20).
+- Returns: `hits[]` (`SearchHit`: `kind`, `id`, `title`, `snippet` with `[match]` markers,
+  `project_path`, `score` = bm25, lower is better) sorted by score, plus `count`.
+- An empty/whitespace query returns zero hits. Index rows stay in sync with rule/session/evidence
+  writes and rebuild on console start.
+- Errors (`isError`): unknown `kind`.
+
 ## Resources
 
 - `control://overview` — JSON: `user_rules`, `sessions`, `active_sessions` counts.

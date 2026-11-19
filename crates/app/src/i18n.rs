@@ -424,6 +424,22 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "Diagnostics failed: {}",
         "诊断失败：{}",
     ),
+    (
+        "ph.search",
+        "Search rules, sessions, evidence (中文 OK)",
+        "搜索规则、会话、证据（支持中文）",
+    ),
+    ("search.title", "Search", "搜索"),
+    (
+        "search.desc",
+        "Full-text search with bm25 ranking; Chinese queries of two or more characters match.",
+        "全文搜索，bm25 排序；两个及以上中文字符即可匹配。",
+    ),
+    ("search.run", "Search", "搜索"),
+    ("search.empty", "No matches", "无匹配结果"),
+    ("search.kind.rules", "rule", "规则"),
+    ("search.kind.sessions", "session", "会话"),
+    ("search.kind.evidence", "evidence", "证据"),
     ("set.agents", "Registered agents", "已注册代理"),
     (
         "set.agents.desc",

@@ -8,9 +8,10 @@ use uuid::Uuid;
 
 use crate::model::{
     Conflict, EvidenceEntry, EvidenceKind, GENESIS_HASH, HandoffRecord, Project, ProvenanceRecord,
-    QueryContext, RuleMatch, RuleSuggestion, Session, SessionStatus, SuggestionStatus,
+    QueryContext, Rule, RuleMatch, RuleSuggestion, Session, SessionStatus, SuggestionStatus,
     VerificationReport,
 };
+use crate::search::{SearchHit, SearchKind};
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -149,7 +150,191 @@ impl Db {
                  ALTER TABLE sessions ADD COLUMN work_items_json TEXT NOT NULL DEFAULT '[]';",
             )?;
         }
+        // Full-text shadow tables (P1). Rows store app-segmented tokens (CJK bigrams), so
+        // unicode61 only splits on spaces; original titles stay in UNINDEXED display columns.
+        // Rebuilt from source on every Store::open.
+        let has_display_titles = conn
+            .prepare("SELECT title_tokens FROM search_rules LIMIT 0")
+            .is_ok();
+        if !has_display_titles {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS search_rules;
+                 DROP TABLE IF EXISTS search_sessions;
+                 DROP TABLE IF EXISTS search_evidence;",
+            )?;
+        }
+        conn.execute_batch(
+            "
+            CREATE VIRTUAL TABLE IF NOT EXISTS search_rules USING fts5(
+                rule_id UNINDEXED, scope UNINDEXED, project_path UNINDEXED,
+                title UNINDEXED, title_tokens, content,
+                tokenize='unicode61'
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS search_sessions USING fts5(
+                session_id UNINDEXED, project_path UNINDEXED, task UNINDEXED,
+                task_tokens, goal_tokens, work_tokens,
+                tokenize='unicode61'
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS search_evidence USING fts5(
+                entry_id UNINDEXED, session_id UNINDEXED, project_path UNINDEXED,
+                kind UNINDEXED, title UNINDEXED, payload_tokens,
+                tokenize='unicode61'
+            );
+            ",
+        )?;
         Ok(())
+    }
+
+    pub fn search_clear(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "DELETE FROM search_rules; DELETE FROM search_sessions; DELETE FROM search_evidence;",
+        )?;
+        Ok(())
+    }
+
+    pub fn search_sync_rule(&self, rule: &Rule, project_path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM search_rules WHERE rule_id = ?1", [&rule.id])?;
+        conn.execute(
+            "INSERT INTO search_rules (rule_id, scope, project_path, title, title_tokens, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                rule.id,
+                serde_json::to_value(rule.scope)?
+                    .as_str()
+                    .unwrap_or_default(),
+                project_path,
+                rule.title,
+                crate::search::index_text(&rule.title),
+                crate::search::index_text(&rule.content),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn search_remove_rule(&self, rule_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM search_rules WHERE rule_id = ?1", [rule_id])?;
+        Ok(())
+    }
+
+    pub fn search_sync_session(&self, session: &Session) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        Self::search_sync_session_conn(&conn, session)
+    }
+
+    fn search_sync_session_conn(conn: &Connection, session: &Session) -> Result<()> {
+        let id = session.id.to_string();
+        conn.execute("DELETE FROM search_sessions WHERE session_id = ?1", [&id])?;
+        let work = session
+            .work_items
+            .iter()
+            .map(|w| w.title.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        conn.execute(
+            "INSERT INTO search_sessions (session_id, project_path, task, task_tokens, goal_tokens, work_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                id,
+                session.project_path.display().to_string(),
+                session.task,
+                crate::search::index_text(&session.task),
+                crate::search::index_text(&session.goal),
+                crate::search::index_text(&work),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn search_sync_evidence(&self, entry: &EvidenceEntry, project_path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        Self::search_sync_evidence_conn(&conn, entry, project_path)
+    }
+
+    fn search_sync_evidence_conn(
+        conn: &Connection,
+        entry: &EvidenceEntry,
+        project_path: &str,
+    ) -> Result<()> {
+        let id = entry.id.to_string();
+        conn.execute("DELETE FROM search_evidence WHERE entry_id = ?1", [&id])?;
+        let kind = serde_json::to_value(entry.kind)?
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        conn.execute(
+            "INSERT INTO search_evidence (entry_id, session_id, project_path, kind, title, payload_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                id,
+                entry.session_id.to_string(),
+                project_path,
+                kind,
+                format!("{kind} #{}", entry.seq),
+                crate::search::index_text(&serde_json::to_string(&entry.payload)?),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn search_query(
+        &self,
+        expr: &str,
+        kind: Option<SearchKind>,
+        project: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let conn = self.conn.lock().unwrap();
+        let kinds = match kind {
+            Some(k) => vec![k],
+            None => vec![
+                SearchKind::Rules,
+                SearchKind::Sessions,
+                SearchKind::Evidence,
+            ],
+        };
+        let mut hits = Vec::new();
+        for k in kinds {
+            let (table, id_col, title_col, snip_col) = match k {
+                SearchKind::Rules => ("search_rules", "rule_id", "title", 5),
+                SearchKind::Sessions => ("search_sessions", "session_id", "task", 3),
+                SearchKind::Evidence => ("search_evidence", "entry_id", "title", 5),
+            };
+            let mut sql = format!(
+                "SELECT {id_col}, {title_col}, snippet({table}, {snip_col}, '[', ']', '…', 10),
+                        project_path, bm25({table})
+                 FROM {table} WHERE {table} MATCH ?1"
+            );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(expr.to_string())];
+            if let Some(p) = project {
+                params.push(Box::new(p.to_string()));
+                sql.push_str(&format!(" AND project_path = ?{}", params.len()));
+            }
+            params.push(Box::new(limit as i64));
+            sql.push_str(&format!(" ORDER BY bm25({table}) LIMIT ?{}", params.len()));
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                |row| {
+                    Ok(SearchHit {
+                        kind: k,
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        snippet: row.get(2)?,
+                        project_path: row.get(3)?,
+                        score: row.get(4)?,
+                    })
+                },
+            )?;
+            for row in rows {
+                hits.push(row?);
+            }
+        }
+        hits.sort_by(|a, b| a.score.total_cmp(&b.score));
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
@@ -183,6 +368,7 @@ impl Db {
                 serde_json::to_string(&session.work_items)?,
             ],
         )?;
+        Self::search_sync_session_conn(&conn, session)?;
         Ok(())
     }
 
@@ -238,6 +424,14 @@ impl Db {
             conn.execute("DELETE FROM provenance WHERE id = ?1", [pid])?;
         }
         conn.execute("DELETE FROM sessions WHERE id = ?1", [id.to_string()])?;
+        conn.execute(
+            "DELETE FROM search_sessions WHERE session_id = ?1",
+            [id.to_string()],
+        )?;
+        conn.execute(
+            "DELETE FROM search_evidence WHERE session_id = ?1",
+            [id.to_string()],
+        )?;
         Ok(())
     }
 
@@ -275,6 +469,15 @@ impl Db {
                 entry.entry_hash,
             ],
         )?;
+        let project_path: String = conn
+            .query_row(
+                "SELECT project_path FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        Self::search_sync_evidence_conn(&conn, &entry, &project_path)?;
         Ok(entry)
     }
 

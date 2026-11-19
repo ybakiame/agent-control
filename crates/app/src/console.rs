@@ -6,7 +6,9 @@ use agent_control_core::model::{
     RuleSuggestion, Scope, Session, SessionStatus, SuggestionEdits, SuggestionStatus,
     VerificationReport, WorkItem, WorkItemStatus,
 };
-use agent_control_core::{AppConfig, DoctorReport, ExportTarget, HookStatus, HookTarget, Store};
+use agent_control_core::{
+    AppConfig, DoctorReport, ExportTarget, HookStatus, HookTarget, SearchHit, Store,
+};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::badge::Badge;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants, DropdownButton};
@@ -94,6 +96,8 @@ pub struct Console {
     pub mcp_bind: String,
     pub mcp_port_input: Entity<InputState>,
     pub doctor_report: Option<DoctorReport>,
+    pub search_input: Entity<InputState>,
+    pub search_hits: Option<Vec<SearchHit>>,
 
     pub rule_id_input: Entity<InputState>,
     pub rule_title_input: Entity<InputState>,
@@ -155,6 +159,8 @@ impl Console {
                 .placeholder(i18n::t(locale, "ph.mcp_port"))
                 .default_value(config.mcp_port.to_string())
         });
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.search")));
 
         let mut console = Self {
             store,
@@ -199,6 +205,8 @@ impl Console {
             mcp_bind,
             mcp_port_input,
             doctor_report: None,
+            search_input,
+            search_hits: None,
             rule_id_input,
             rule_title_input,
             rule_topic_input,
@@ -274,6 +282,9 @@ impl Console {
         });
         self.mcp_port_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.mcp_port"), window, cx)
+        });
+        self.search_input.update(cx, |s, cx| {
+            s.set_placeholder(i18n::t(locale, "ph.search"), window, cx)
         });
         self.rebuild_project_tree(cx);
         cx.notify();
@@ -504,6 +515,16 @@ impl Console {
     }
 
     /// Start/stop the MCP daemon from the sidebar icon button.
+    pub fn run_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().to_string();
+        self.search_hits = Some(
+            self.store
+                .search(&query, None, None, 20)
+                .unwrap_or_default(),
+        );
+        cx.notify();
+    }
+
     pub fn run_doctor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.current_project_path() else {
             let msg = self.t("set.doctor.no_project");

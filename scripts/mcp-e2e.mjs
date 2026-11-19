@@ -119,7 +119,7 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  check("tools/list has 26 tools", names.length === 26, names);
+  check("tools/list has 27 tools", names.length === 27, names);
   check("save_rule registered", names.includes("save_rule"), names);
   check("set_rule_enabled registered", names.includes("set_rule_enabled"), names);
   check("suggest_rule registered", names.includes("suggest_rule"), names);
@@ -134,6 +134,7 @@ try {
   check("revoke_hooks registered", names.includes("revoke_hooks"), names);
   check("detect_hooks registered", names.includes("detect_hooks"), names);
   check("doctor registered", names.includes("doctor"), names);
+  check("search registered", names.includes("search"), names);
 
   const rules = await tool("list_rules", { project_path: projectDir });
   check("list_rules returns user + project rule", rules.rules?.length === 2, rules);
@@ -1082,6 +1083,60 @@ try {
     "doctor counts the seven registered project-scope hooks and reports healthy",
     docHooks.hooks_registered === 7 && docHooks.stale_exports === 0 && docHooks.healthy === true,
     docHooks,
+  );
+
+  // ---- P1: full-text search with CJK bigram segmentation ----
+  await tool("save_rule", {
+    id: "zh-search-rule",
+    title: "文档腐化检测",
+    content: "登记文档声明并求值",
+    scope: "project",
+    kind: "contract",
+    project_path: projectDir,
+    agent_id: "harness-a",
+  });
+  const zhSession = await tool("create_session", {
+    task: "中文搜索任务",
+    project_path: projectDir,
+    agent_id: "harness-a",
+  });
+  await tool("update_work_state", {
+    session_id: zhSession.session_id,
+    goal: "实现全文搜索",
+    work_items: [{ title: "分词器", status: "done" }],
+  });
+  await tool("record_evidence", {
+    session_id: zhSession.session_id,
+    agent_id: "harness-a",
+    kind: "tool_call",
+    payload: { note: "中文证据" },
+  });
+  const zhHits = await tool("search", { query: "腐化" });
+  check(
+    "search matches a two-char Chinese query on rule titles",
+    zhHits.hits?.some((h) => h.kind === "rules" && h.id === "zh-search-rule"),
+    zhHits,
+  );
+  const sessHits = await tool("search", { query: "分词", kind: "sessions" });
+  check(
+    "search matches Chinese work items in sessions",
+    sessHits.hits?.some((h) => h.id === zhSession.session_id),
+    sessHits,
+  );
+  const evHits = await tool("search", { query: "证据", kind: "evidence" });
+  check("search matches Chinese evidence payloads", evHits.count >= 1, evHits);
+  const filtered = await tool("search", { query: "腐化", kind: "rules", project_path: projectDir });
+  check(
+    "search project filter keeps the project's rule",
+    filtered.count === 1 && filtered.hits[0].id === "zh-search-rule",
+    filtered,
+  );
+  const elsewhere = await tool("search", { query: "腐化", kind: "rules", project_path: hooksDir });
+  check("search project filter excludes other projects", elsewhere.count === 0, elsewhere);
+  check("search empty query returns nothing", (await tool("search", { query: "  " })).count === 0);
+  check(
+    "search rejects an unknown kind",
+    await toolRejects("search", { query: "x", kind: "bogus" }),
   );
 
   const reregistered = await tool("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });

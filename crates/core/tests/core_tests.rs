@@ -223,6 +223,82 @@ fn doctor_aggregates_read_only_diagnostics() {
 }
 
 #[test]
+fn search_finds_chinese_rules_sessions_and_evidence() {
+    use agent_control_core::SearchKind;
+
+    let store = Store::open_with_root(tempfile::tempdir().unwrap().path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let mut rule = make_rule("zh-contract", Scope::Project, 100, None);
+    rule.title = "文档腐化检测".into();
+    rule.content = "登记文档声明并求值".into();
+    store.save_rule(&rule, Some(project.path())).unwrap();
+    let (session, _) = store
+        .create_session("中文搜索任务", project.path(), "tester", vec![])
+        .unwrap();
+    store
+        .set_session_work_state(
+            session.id,
+            "实现全文搜索".into(),
+            vec![WorkItem {
+                title: "分词器".into(),
+                status: WorkItemStatus::Done,
+            }],
+        )
+        .unwrap();
+    store
+        .record_evidence(
+            session.id,
+            EvidenceKind::ToolCall,
+            "tester",
+            serde_json::json!({"note": "中文证据"}),
+        )
+        .unwrap();
+
+    let hits = store.search("腐化", None, None, 10).unwrap();
+    assert!(
+        hits.iter()
+            .any(|h| h.kind == SearchKind::Rules && h.id == "zh-contract"),
+        "{hits:?}"
+    );
+    assert!(
+        hits.iter()
+            .any(|h| h.id == "zh-contract" && h.title == "文档腐化检测"),
+        "display title must be the original, not tokens: {hits:?}"
+    );
+    let hits = store.search("搜索", None, None, 10).unwrap();
+    assert!(
+        hits.iter().any(|h| h.kind == SearchKind::Sessions),
+        "{hits:?}"
+    );
+    let hits = store.search("分词", None, None, 10).unwrap();
+    assert!(
+        hits.iter().any(|h| h.kind == SearchKind::Sessions),
+        "{hits:?}"
+    );
+    let hits = store.search("证据", None, None, 10).unwrap();
+    assert!(
+        hits.iter().any(|h| h.kind == SearchKind::Evidence),
+        "{hits:?}"
+    );
+
+    let hits = store
+        .search("腐化", Some(SearchKind::Rules), Some(project.path()), 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    let hits = store
+        .search("腐化", Some(SearchKind::Rules), Some(other.path()), 10)
+        .unwrap();
+    assert!(hits.is_empty());
+    assert!(store.search("", None, None, 10).unwrap().is_empty());
+
+    store
+        .delete_rule("zh-contract", Scope::Project, Some(project.path()))
+        .unwrap();
+    assert!(store.search("腐化", None, None, 10).unwrap().is_empty());
+}
+
+#[test]
 fn doctor_flags_stale_export_as_unhealthy() {
     use agent_control_core::ExportTarget;
 

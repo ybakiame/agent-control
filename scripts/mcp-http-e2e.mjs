@@ -83,7 +83,7 @@ try {
   await rpc("notifications/initialized", {}, true);
 
   const tools = await rpc("tools/list", {});
-  check("tools/list over HTTP", tools.result?.tools?.length === 26, tools);
+  check("tools/list over HTTP", tools.result?.tools?.length === 27, tools);
   check(
     "update_work_state available over HTTP",
     tools.result?.tools?.some((t) => t.name === "update_work_state"),
