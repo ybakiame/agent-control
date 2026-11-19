@@ -6,7 +6,7 @@ use agent_control_core::model::{
     RuleSuggestion, Scope, Session, SessionStatus, SuggestionEdits, SuggestionStatus,
     VerificationReport, WorkItem, WorkItemStatus,
 };
-use agent_control_core::{AppConfig, ExportTarget, HookStatus, HookTarget, Store};
+use agent_control_core::{AppConfig, DoctorReport, ExportTarget, HookStatus, HookTarget, Store};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::badge::Badge;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants, DropdownButton};
@@ -93,6 +93,7 @@ pub struct Console {
     pub mcp_shutdown: Option<CancellationToken>,
     pub mcp_bind: String,
     pub mcp_port_input: Entity<InputState>,
+    pub doctor_report: Option<DoctorReport>,
 
     pub rule_id_input: Entity<InputState>,
     pub rule_title_input: Entity<InputState>,
@@ -197,6 +198,7 @@ impl Console {
             mcp_shutdown: None,
             mcp_bind,
             mcp_port_input,
+            doctor_report: None,
             rule_id_input,
             rule_title_input,
             rule_topic_input,
@@ -287,6 +289,7 @@ impl Console {
     }
 
     pub fn refresh_data(&mut self, cx: &mut App) {
+        self.doctor_report = None;
         self.projects = self.store.list_projects().unwrap_or_default();
         let current_valid = self
             .current_project
@@ -501,6 +504,31 @@ impl Console {
     }
 
     /// Start/stop the MCP daemon from the sidebar icon button.
+    pub fn run_doctor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.current_project_path() else {
+            let msg = self.t("set.doctor.no_project");
+            self.notify(window, cx, msg);
+            return;
+        };
+        match self.store.doctor(&project, Some(&self.mcp_bind)) {
+            Ok(report) => {
+                let key = if report.healthy {
+                    "set.doctor.toast_ok"
+                } else {
+                    "set.doctor.toast_issues"
+                };
+                let msg = self.t(key);
+                self.doctor_report = Some(report);
+                self.notify(window, cx, msg);
+            }
+            Err(err) => {
+                let msg = self.tr("set.doctor.toast_failed", &[&err.to_string()]);
+                self.notify(window, cx, &msg);
+            }
+        }
+        cx.notify();
+    }
+
     pub fn toggle_mcp_http(&mut self, cx: &mut Context<Self>) {
         if self.mcp_running {
             self.stop_mcp_http();

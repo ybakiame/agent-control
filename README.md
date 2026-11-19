@@ -90,7 +90,7 @@ delivered into the tools agents already read.
   that cascades to the session's evidence + provenance.
 - **Bilingual UI (English / 简体中文)** with a runtime switcher in Settings; the choice is
   persisted to `<data root>/config.toml`.
-- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 25 tools plus
+- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 26 tools plus
   resources and prompts. The daemon's loopback **port is configurable** in Settings (default
   `9870`) and stored in `config.toml`, so a portable/dev instance can bind a different port and
   stay isolated from production; a sidebar icon button starts/stops the daemon at a glance.
@@ -170,7 +170,7 @@ agents that never call MCP are reached via export + hooks instead):
 `acknowledge_rules`, `get_session_context`, `update_work_state`, `set_session_status`, `export_handoff`, `import_handoff`,
 `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`, `list_suggestions`,
 `export_native`, `check_export_drift`, `revoke_native`, `verify_constraints`, `check_tool_call`,
-`register_hooks`, `revoke_hooks`, `detect_hooks`.
+`register_hooks`, `revoke_hooks`, `detect_hooks`, `doctor`.
 
 `save_rule` lets an agent **actively record** a discovered project contract, personal preference, or
 machine/project environment note as a rule file: pass `id`, `title`, `content`, `agent_id`, and for

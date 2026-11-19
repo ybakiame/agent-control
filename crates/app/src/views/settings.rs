@@ -207,6 +207,84 @@ impl Console {
                 ui::card(cx)
                     .child(
                         h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(ui::section_label(cx, self.t("set.doctor")))
+                            .child(match &self.doctor_report {
+                                Some(r) if r.healthy => {
+                                    Tag::success().child(self.t("set.doctor.healthy"))
+                                }
+                                Some(_) => Tag::warning().child(self.t("set.doctor.issues")),
+                                None => Tag::secondary().child(self.t("set.doctor.not_run")),
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(self.t("set.doctor.desc")),
+                    )
+                    .child(
+                        Button::new("doctor-run")
+                            .label(self.t("set.doctor.run"))
+                            .primary()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run_doctor(window, cx);
+                            })),
+                    )
+                    .children(self.doctor_report.as_ref().map(|r| {
+                        v_flex()
+                            .gap_1()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(border)
+                            .child(ui::kv(
+                                cx,
+                                self.t("set.doctor.rules"),
+                                r.rules_applied.to_string(),
+                            ))
+                            .child(ui::kv(
+                                cx,
+                                self.t("set.doctor.conflicts"),
+                                r.conflicts.to_string(),
+                            ))
+                            .child(ui::kv(
+                                cx,
+                                self.t("set.doctor.hooks"),
+                                format!("{}/{}", r.hooks_registered, r.harnesses.len()),
+                            ))
+                            .child(ui::kv(
+                                cx,
+                                self.t("set.doctor.exports"),
+                                r.stale_exports.to_string(),
+                            ))
+                            .child(ui::kv(
+                                cx,
+                                self.t("set.doctor.chains"),
+                                self.tr(
+                                    "set.doctor.chains_value",
+                                    &[
+                                        &r.sessions_checked.to_string(),
+                                        &r.broken_chains.to_string(),
+                                    ],
+                                ),
+                            ))
+                            .child(ui::kv(
+                                cx,
+                                self.t("set.doctor.daemon"),
+                                self.t(if r.daemon.reachable {
+                                    "set.doctor.daemon.up"
+                                } else {
+                                    "set.doctor.daemon.down"
+                                }),
+                            ))
+                    })),
+            )
+            .child(
+                ui::card(cx)
+                    .child(
+                        h_flex()
                             .items_center()
                             .justify_between()
                             .child(ui::section_label(cx, self.t("set.agents")))

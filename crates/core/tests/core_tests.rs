@@ -182,6 +182,66 @@ fn code_check_reads_toml_tables() {
 }
 
 #[test]
+fn doctor_aggregates_read_only_diagnostics() {
+    use agent_control_core::{ExportTarget, HookTarget};
+
+    let store = Store::open_with_root(tempfile::tempdir().unwrap().path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store.init_project_contracts(project.path()).unwrap();
+    let (session, _) = store
+        .create_session("diag task", project.path(), "tester", vec![])
+        .unwrap();
+    store
+        .record_evidence(
+            session.id,
+            EvidenceKind::ToolCall,
+            "tester",
+            serde_json::json!({"tool": "edit"}),
+        )
+        .unwrap();
+    store
+        .export_native(project.path(), &[ExportTarget::Agents], false)
+        .unwrap();
+    store
+        .register_hooks(
+            project.path(),
+            &[HookTarget::Claude],
+            "node scripts/agent-control-hook.mjs claude start",
+        )
+        .unwrap();
+    let report = store.doctor(project.path(), Some("127.0.0.1:1")).unwrap();
+    assert!(report.healthy);
+    assert_eq!(report.sessions_checked, 1);
+    assert_eq!(report.broken_chains, 0);
+    assert!(report.chains[0].valid);
+    assert!(report.chains[0].entries_checked >= 1);
+    assert_eq!(report.hooks_registered, 1);
+    assert_eq!(report.stale_exports, 0);
+    assert_eq!(report.harnesses.len(), 9);
+    assert!(!report.daemon.reachable);
+    assert_eq!(report.daemon.bind, "127.0.0.1:1");
+}
+
+#[test]
+fn doctor_flags_stale_export_as_unhealthy() {
+    use agent_control_core::ExportTarget;
+
+    let store = Store::open_with_root(tempfile::tempdir().unwrap().path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store
+        .export_native(project.path(), &[ExportTarget::Agents], false)
+        .unwrap();
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "<!-- agent-control:begin -->\nlegacy full-text block\n<!-- agent-control:end -->\n",
+    )
+    .unwrap();
+    let report = store.doctor(project.path(), Some("127.0.0.1:1")).unwrap();
+    assert!(!report.healthy);
+    assert_eq!(report.stale_exports, 1);
+}
+
+#[test]
 fn evidence_chain_verifies_and_detects_tampering() {
     let store = Store::open_with_root(tempfile::tempdir().unwrap().path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();

@@ -119,7 +119,7 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  check("tools/list has 25 tools", names.length === 25, names);
+  check("tools/list has 26 tools", names.length === 26, names);
   check("save_rule registered", names.includes("save_rule"), names);
   check("set_rule_enabled registered", names.includes("set_rule_enabled"), names);
   check("suggest_rule registered", names.includes("suggest_rule"), names);
@@ -133,6 +133,7 @@ try {
   check("register_hooks registered", names.includes("register_hooks"), names);
   check("revoke_hooks registered", names.includes("revoke_hooks"), names);
   check("detect_hooks registered", names.includes("detect_hooks"), names);
+  check("doctor registered", names.includes("doctor"), names);
 
   const rules = await tool("list_rules", { project_path: projectDir });
   check("list_rules returns user + project rule", rules.rules?.length === 2, rules);
@@ -1060,6 +1061,27 @@ try {
     "detect_hooks marks kimi + antigravity as user-scope",
     detectedUser.map((h) => h.target).sort().join(",") === "antigravity,kimi",
     detectedUser,
+  );
+
+  // ---- doctor: read-only aggregated diagnostics ----
+  const doc = await tool("doctor", { project_path: projectDir, daemon_bind: "127.0.0.1:1" });
+  check(
+    "doctor aggregates chains, harnesses and daemon probe",
+    doc.sessions_checked >= 1 &&
+      doc.chains?.length === doc.sessions_checked &&
+      doc.chains.every((c) => c.valid) &&
+      doc.harnesses?.length === 9 &&
+      doc.daemon?.bind === "127.0.0.1:1" &&
+      doc.daemon.reachable === false &&
+      typeof doc.healthy === "boolean" &&
+      typeof doc.generated_at === "string",
+    doc,
+  );
+  const docHooks = await tool("doctor", { project_path: hooksDir, daemon_bind: "127.0.0.1:1" });
+  check(
+    "doctor counts the seven registered project-scope hooks and reports healthy",
+    docHooks.hooks_registered === 7 && docHooks.stale_exports === 0 && docHooks.healthy === true,
+    docHooks,
   );
 
   const reregistered = await tool("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });

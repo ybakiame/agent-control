@@ -64,7 +64,7 @@ Three crates under `crates/`. Dependency direction: `app → {mcp, core}`, `mcp 
 | Crate | Package | Kind | Responsibility | Key files |
 |-------|---------|------|----------------|-----------|
 | core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native pointer export + drift + revoke, assurance tiers, tool-call gate, hooks config | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Enforcement`, `AssuranceTier`, `ConstraintAssurance`, `ToolGuard`, `ToolGateReport`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs` (`evaluate_code_checks`), `gate.rs` (`check_tool_call`, repo gate + tool guards), `hooks.rs` (`HookTarget`, `ConfigCodec`, `HookScope`, `HookEvents`, `register`/`revoke`/`detect`), `export.rs` (`PROJECT_GUIDANCE`, `render_constraint_briefing`, `handoff_tier_warning`, `render_handoff_brief`, `wrap_block`, `upsert_managed_block`, `remove_managed_block`, `ExportTarget`, `ExportReport`, `RevokeReport`, `DriftReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
-| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 25 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
+| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 26 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
 | app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review, native export + hooks registration | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
 
 Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`, `Store`,
@@ -336,18 +336,19 @@ MCP bin CLI (`crates/mcp/src/main.rs`):
 cargo run -p agent-control-mcp -- --stdio                 # stdio (harness spawns this)
 cargo run -p agent-control-mcp -- --bind 127.0.0.1:9870   # HTTP (default bind)
 cargo run -p agent-control-mcp -- --daemon                # detached background daemon, then exit
+cargo run -p agent-control-mcp -- --doctor                # read-only diagnostics JSON for cwd, then exit
 cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 ```
 
 **Single-instance:** the TCP bind is the lock — a second HTTP launch on a busy address logs
 "already serving" and exits cleanly (`AddrInUse` guard), so daemon spawns are idempotent.
 
-**25 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
+**26 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
 `record_evidence`, `acknowledge_rules`, `get_session_context`, `update_work_state`,
 `set_session_status`, `export_handoff`,
 `import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`,
 `list_suggestions`, `export_native`, `check_export_drift`, `revoke_native`, `verify_constraints`,
-`check_tool_call`, `register_hooks`, `revoke_hooks`, `detect_hooks` (plus resources & prompts).
+`check_tool_call`, `register_hooks`, `revoke_hooks`, `detect_hooks`, `doctor` (plus resources & prompts).
 `save_rule` is the active rule-authoring path: an agent records a discovered project contract
 (`scope=project`, `kind=contract`, `project_path`), a personal preference (`scope=user`), or a
 machine/project environment note (`scope=environment`, `project_path`, written to git-ignored
@@ -427,6 +428,13 @@ Kimi TOML codec strips only its own `[[hooks]]` block so user comments survive.
 `detect_hooks` (`project_path`) reports per-target `HookStatus` (`target`, `label`, `scope`, installed
 harness, `settings_path`, whether the managed group is present) for all nine without writing — the
 read-only counterpart that backs the Projects-view Hooks UI.
+`doctor` (`project_path`, optional `daemon_bind`) is the read-only aggregate diagnostic
+(`core/src/doctor.rs`, `Store::doctor`): hook registration across the nine harnesses + export drift
+(all four targets) + evidence-chain integrity for **every** session + applied-rule/conflict counts +
+a loopback TCP probe of the daemon. `DoctorReport.healthy` is false when any chain is broken, any
+export target is stale or any conflict exists; it performs no writes. Backs the MCP `doctor` tool,
+the mcp-bin `--doctor` flag (JSON to stdout, exit 1 when unhealthy) and the Settings-view
+**Diagnostics** card (`Console::run_doctor`, `doctor_report`).
 
 Recommended harness call order:
 

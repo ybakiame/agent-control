@@ -493,6 +493,15 @@ pub struct DetectHooksRequest {
     pub project_path: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DoctorRequest {
+    /// Absolute project path to diagnose.
+    pub project_path: String,
+    /// Daemon bind address to probe (defaults to the configured MCP port on 127.0.0.1).
+    #[serde(default)]
+    pub daemon_bind: Option<String>,
+}
+
 #[tool_router]
 impl ControlServer {
     #[tool(
@@ -1268,6 +1277,26 @@ impl ControlServer {
         let project = PathBuf::from(req.project_path.trim());
         match self.store.detect_hooks(&project) {
             Ok(statuses) => json_result(&serde_json::json!({ "harnesses": statuses })),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "Read-only project diagnostics in one report: hook registration across the nine harnesses, native-export drift, evidence-chain integrity for every session, rule-conflict count and MCP daemon reachability. `healthy` is false when any chain is broken, any export target is stale or any conflict exists. Performs no writes."
+    )]
+    async fn doctor(
+        &self,
+        Parameters(req): Parameters<DoctorRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if req.project_path.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "project_path is required and cannot be empty",
+                None,
+            ));
+        }
+        let project = PathBuf::from(req.project_path.trim());
+        match self.store.doctor(&project, req.daemon_bind.as_deref()) {
+            Ok(report) => json_result(&serde_json::to_value(report).unwrap()),
             Err(e) => tool_err(e),
         }
     }

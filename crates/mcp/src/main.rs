@@ -33,6 +33,11 @@ struct Cli {
     /// Ignored in stdio mode. Single-instance: a second launch on a busy address exits cleanly.
     #[arg(long)]
     daemon: bool,
+
+    /// Print a read-only diagnostics report for the current directory (hooks, export drift,
+    /// evidence chains, conflicts, daemon health) as JSON and exit. Exit code 1 when unhealthy.
+    #[arg(long)]
+    doctor: bool,
 }
 
 #[tokio::main]
@@ -46,6 +51,12 @@ async fn main() -> anyhow::Result<()> {
         Some(dir) => Arc::new(Store::open_with_root(dir)?),
         None => Arc::new(Store::open_default()?),
     };
+    if cli.doctor {
+        let project = std::env::current_dir().context("resolving current directory")?;
+        let report = store.doctor(&project, Some(&cli.bind))?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        std::process::exit(if report.healthy { 0 } else { 1 });
+    }
     let _log_guard = init_logging(&store.layout, "mcp.log");
 
     if cli.stdio {

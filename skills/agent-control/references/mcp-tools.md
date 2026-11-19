@@ -382,6 +382,19 @@ registered in each one's own config (the `qoder` and `qoder-cn` rows inspect the
   bool, `settings_path`, `registered` bool).
 - Errors (`isError`): empty `project_path`.
 
+### doctor
+Read-only aggregate diagnostics for a project in one report; performs **no writes**.
+- `project_path` (string, required), `daemon_bind` (string, optional — defaults to the configured
+  MCP port on `127.0.0.1`).
+- Returns a `DoctorReport`: `healthy` (false when any evidence chain is broken, any export target
+  is stale or any rule conflict exists), `rules_applied`, `conflicts`, `hooks_registered` /
+  `hooks_installed` + `harnesses[]` (all nine), `stale_exports` + `drift` (all four export targets),
+  `sessions_checked` / `broken_chains` + `chains[]` (per-session `valid`, `entries_checked`,
+  `broken_at`), `daemon` (`bind`, `reachable` via a short loopback TCP probe), `generated_at`.
+- Also available as `agent-control-mcp --doctor` (JSON to stdout for the current directory, exit 1
+  when unhealthy) and the console's Settings → Diagnostics card.
+- Errors (`isError`): empty `project_path`.
+
 ## Resources
 
 - `control://overview` — JSON: `user_rules`, `sessions`, `active_sessions` counts.
