@@ -18,7 +18,9 @@ Agent Control 是同一规则库之上的**解析层**，会**编译进**这些�
 绑定的快照。以 MCP 为解析主干；解析后的契约再经 agent 本就在用的渠道触达——以**指针块对齐**进项目的
 `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `.cursor/rules`（引导 agent 去读活规则，保留手写内容）、在 harness
 会话开始时经 SessionStart hook **主动推送**、或经 MCP **查询**；PreToolUse hook 再对每次工具调用把关，
-**强制** hard 规则。卖点是**可追溯溯源 + 冲突检测 + 跨 harness 冻结快照**，并交付进 agent 本就会读取的工具。
+**强制** hard 规则。当 harness 在上下文压缩后重新进入会话（`SessionStart` 且 `source: "compact"`）时，
+同一 hook 会重新注入连续性简报（`.agent-control/handoff/latest.md`）与实时目标/工作态；简报先从磁盘读取，
+因此即使守护进程不可达也能恢复连续性。卖点是**可追溯溯源 + 冲突检测 + 跨 harness 冻结快照**，并交付进 agent 本就会读取的工具。
 
 ---
 

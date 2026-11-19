@@ -176,7 +176,10 @@ export + all nine hook targets; undo with `revoke_native` / `revoke_hooks`):
   the registered command bakes in the vendor id + event name so the script picks the right stdin/output
   shape. At the **start** event it freezes a session and calls `get_applicable_rules` over the MCP HTTP
   endpoint, injecting the briefing (binding rules + conflicts + the machine/project **work environment**)
-  where the vendor supports it (read-only; fail-open if the daemon is down). At the **pre-tool** event it
+  where the vendor supports it (read-only; fail-open if the daemon is down). When the start stdin reports
+  `source: "compact"` (post-compaction re-entry), it instead re-injects the briefing plus the on-disk
+  `.agent-control/handoff/latest.md` continuity brief and the live goal/work state, reading the brief
+  from disk first so continuity survives an unreachable daemon. At the **pre-tool** event it
   resolves the same session and calls `check_tool_call` with the pending `tool_name`/`tool_input` **and
   that `session_id`**; if the gate denies it **blocks the call** in the vendor's deny shape — exit `2` +
   stderr for the claude-shaped vendors, `{permission:"deny"}` for Cursor, `{decision:"deny"}` for

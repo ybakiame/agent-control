@@ -541,7 +541,14 @@ rules by the call's `cwd`.
   The **start** event resolves a session (get-or-create, task `hook`) to freeze the snapshot, then
   injects the `get_applicable_rules` briefing + a best-effort `check_export_drift` warning where the
   vendor supports injection (Antigravity's `PreInvocation` has no channel → reach is via the exported
-  `GEMINI.md` pointer). The **gate** event resolves the same session and calls `check_tool_call` with
+  `GEMINI.md` pointer). When the start stdin reports `source: "compact"` (the vendor re-entering the
+  session after context compaction), the hook instead runs the **compact continuity** path: it
+  re-injects the briefing PLUS the on-disk `.agent-control/handoff/latest.md` brief and the session's
+  live goal/work state (`get_session_context`), reading the brief from disk *before* any daemon call so
+  continuity survives an unreachable daemon (and the guard timer). No extra hook group is registered:
+  `PreCompact` is observe-only on most vendors (Cursor `preCompact` exposes only `user_message`;
+  Antigravity has no compaction event), so the compact session-start is the documented injection
+  channel. The **gate** event resolves the same session and calls `check_tool_call` with
   the pending tool name/input **and that `session_id`**, so a mediated hard rule earns `Enforced` and
   the verdict lands in the evidence chain; on `allowed: false` it blocks in the vendor's deny shape.
   **Fail-open by default** (unreachable/slow daemon → the vendor's allow output, never a spurious

@@ -33,6 +33,15 @@
 //     mediated hard rule the Enforced tier — so a hook-only deployment still produces verifiable
 //     enforcement.
 //
+//   compact continuity (SessionStart source=compact) — when a vendor re-enters the session after
+//     context compaction (Claude family, Qoder/Qoder CN, Codex, Kimi), the start invocation re-injects
+//     the binding-rule briefing PLUS the on-disk continuity brief (.agent-control/handoff/latest.md)
+//     and the session's live goal/work state, so the post-compaction agent recovers continuity. The
+//     brief is read from disk before any daemon call, so it survives an unreachable daemon (and the
+//     guard timer). PreCompact itself is observe-only on most vendors (Cursor preCompact exposes only
+//     user_message; Antigravity has no compaction event), so no separate hook group is registered —
+//     the compact session-start is the documented injection channel.
+//
 // Fail-open by default: if the daemon is unreachable, times out, or errors, the hook emits the
 // vendor's allow output (silent exit 0 for claude-shaped, {"permission":"allow"} for Cursor,
 // {"decision":"ask"} for Antigravity) so a session is never blocked by infrastructure. Set
@@ -62,6 +71,9 @@
 //   AGENT_CONTROL_HOOK_DEBUG       if set, log diagnostics to stderr (never blocks the session)
 //   AGENT_CONTROL_HOOK_FAIL_CLOSED if set, a gate that cannot reach the daemon denies (default: allow)
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 const URL = process.env.AGENT_CONTROL_MCP_URL ?? "http://127.0.0.1:9870/mcp";
 const TIMEOUT = Number(process.env.AGENT_CONTROL_HOOK_TIMEOUT_MS ?? 4000);
 const DEBUG = !!process.env.AGENT_CONTROL_HOOK_DEBUG;
@@ -69,6 +81,9 @@ const DEBUG = !!process.env.AGENT_CONTROL_HOOK_DEBUG;
 // instead of allowing. Default (unset) keeps the uniform fail-open behavior. Only the gate event fails
 // closed; the start/briefing event always stays fail-open so a session can still initialize.
 const FAIL_CLOSED = !!process.env.AGENT_CONTROL_HOOK_FAIL_CLOSED;
+// On-disk continuity brief for a compaction start; also the guard-timer fallback so a slow daemon
+// cannot drop continuity. Empty for every non-compaction invocation.
+let compactBrief = "";
 
 // Vendor + event are baked into the registered command (argv). They are authoritative even when a
 // harness omits hook_event_name in stdin; the event falls back to stdin only for legacy registrations.
@@ -309,6 +324,73 @@ async function handleGate(headers, parsed, cwd) {
   return allowResult();
 }
 
+// Read the project-local continuity brief written by export_handoff. Dependency-free and synchronous
+// so compaction continuity survives even when the MCP daemon is unreachable.
+function readBrief(cwd) {
+  try {
+    return readFileSync(join(cwd, ".agent-control", "handoff", "latest.md"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+// Render the session's live goal + done/doing/todo work state (from get_session_context) so a
+// post-compaction agent inherits current progress, not just the last exported brief.
+function renderWorkState(ctx) {
+  const s = ctx?.session ?? ctx;
+  const goal = typeof s?.goal === "string" ? s.goal.trim() : "";
+  const items = Array.isArray(s?.work_items) ? s.work_items : [];
+  if (!goal && items.length === 0) return "";
+  const lines = ["## Agent Control — live work state", ""];
+  if (goal) lines.push(`Goal: ${goal}`, "");
+  for (const status of ["doing", "todo", "done"]) {
+    for (const it of items.filter((i) => i?.status === status)) {
+      lines.push(`- [${status}] ${it?.title ?? ""}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+// Compaction continuity (P2). Vendors that re-enter a session after compaction report
+// SessionStart source=compact (Claude family, Qoder/Qoder CN, Codex, Kimi). PreCompact itself is
+// observe-only on most of them (Cursor preCompact exposes only user_message; Antigravity has no
+// compaction event), so the documented injection channel is the compact session-start. Re-inject the
+// binding-rule briefing + the on-disk continuity brief + live work state. The brief is read from disk
+// first, so continuity is preserved even when the daemon is down.
+async function handleCompact(cwd, brief) {
+  let briefing = "";
+  let workState = "";
+  try {
+    const headers = await mcpInit();
+    let sessionId = null;
+    try {
+      sessionId = await resolveSession(headers, cwd);
+    } catch (e) {
+      debug(`compact session resolution skipped: ${e?.message ?? String(e)}`);
+    }
+    const data = await mcpCall(headers, "get_applicable_rules", {
+      project_path: cwd,
+      agent_id: AGENT_ID,
+      file_paths: [],
+      languages: [],
+      task_tags: [],
+    });
+    briefing = typeof data?.briefing === "string" ? data.briefing : "";
+    if (sessionId) {
+      const ctx = await mcpCall(headers, "get_session_context", {
+        session_id: sessionId,
+        agent_id: AGENT_ID,
+      });
+      workState = renderWorkState(ctx);
+    }
+  } catch (e) {
+    debug(`compact daemon lookup skipped: ${e?.message ?? String(e)}`);
+  }
+  const text = [briefing, brief, workState].filter(Boolean).join("\n\n");
+  if (!text) return allowResult();
+  return briefingResult(text);
+}
+
 async function main() {
   const input = await readStdin();
   let parsed = null;
@@ -324,6 +406,12 @@ async function main() {
     parsed?.workspace ||
     (Array.isArray(parsed?.workspace_roots) ? parsed.workspace_roots[0] : null) ||
     process.cwd();
+
+  // Compaction continuity: react to the compact session-start source before any daemon dependency.
+  if (parsed?.source === "compact" && SHAPE !== "antigravity") {
+    compactBrief = readBrief(cwd);
+    return handleCompact(cwd, compactBrief);
+  }
 
   const headers = await mcpInit();
 
@@ -389,8 +477,9 @@ function finish(code, stdout, stderr) {
 // Hard deadline: a missing/slow daemon must never hang the hook. Emit the vendor's verdict-shaped
 // output (not a bare exit 0) so Cursor/Antigravity still receive a valid permission decision on
 // timeout — allow by default, or deny when fail-closed is enabled and this is a gate invocation.
+// A compaction start still injects the on-disk brief on timeout so continuity is not lost.
 const guard = setTimeout(() => {
-  const r = unreachableResult();
+  const r = compactBrief ? briefingResult(compactBrief) : unreachableResult();
   finish(r.code, r.stdout, r.stderr);
 }, TIMEOUT);
 

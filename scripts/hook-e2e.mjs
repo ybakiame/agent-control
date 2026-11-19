@@ -186,6 +186,65 @@ try {
     start.stdout.slice(0, 300),
   );
 
+  // P2 — compaction continuity: SessionStart source=compact re-injects the briefing PLUS the on-disk
+  // continuity brief and the session's live work state, so a post-compaction agent recovers context.
+  const briefDir = join(proj, ".agent-control", "handoff");
+  mkdirSync(briefDir, { recursive: true });
+  writeFileSync(
+    join(briefDir, "latest.md"),
+    "# Continuity brief\n\nCOMPACT-MARKER-42\n\n## Goal\nShip the spike.\n",
+  );
+  const compactSession = await tool("create_session", {
+    task: "hook", project_path: proj, agent_id: "claude-code", task_tags: [],
+  });
+  await tool("update_work_state", {
+    session_id: compactSession.session_id,
+    goal: "Ship the spike",
+    work_items: [{ title: "LIVE-ITEM-7", status: "doing" }],
+  });
+  const compact = runHook(
+    { hook_event_name: "SessionStart", source: "compact", cwd: proj },
+    url,
+    ["claude", "SessionStart"],
+  );
+  const compactJson = parseOut(compact);
+  const compactCtx = compactJson?.hookSpecificOutput?.additionalContext ?? "";
+  check("compact start exits 0", compact.code === 0, compact);
+  check(
+    "compact start injects brief + rules + live work state",
+    compactCtx.includes("COMPACT-MARKER-42") &&
+      compactCtx.includes("no-rm-rf") &&
+      compactCtx.includes("LIVE-ITEM-7"),
+    compact.stdout.slice(0, 400),
+  );
+
+  // Continuity survives an unreachable daemon: the brief is read from disk before any MCP call.
+  const compactDown = runHook(
+    { hook_event_name: "SessionStart", source: "compact", cwd: proj },
+    "http://127.0.0.1:1/mcp",
+    ["claude", "SessionStart"],
+  );
+  const downCtx = parseOut(compactDown)?.hookSpecificOutput?.additionalContext ?? "";
+  check(
+    "compact start injects the on-disk brief even when the daemon is down",
+    compactDown.code === 0 && downCtx.includes("COMPACT-MARKER-42"),
+    compactDown,
+  );
+
+  // A project without a brief still gets the rule briefing on compact (no crash, no empty inject).
+  const projNoBrief = join(root, "project-no-brief");
+  mkdirSync(join(projNoBrief, ".agent-control", "rules"), { recursive: true });
+  const compactNoBrief = runHook(
+    { hook_event_name: "SessionStart", source: "compact", cwd: projNoBrief },
+    url,
+    ["qoder-cn", "SessionStart"],
+  );
+  check(
+    "compact start without a brief stays fail-open exit 0",
+    compactNoBrief.code === 0,
+    compactNoBrief,
+  );
+
   // Item 1 — hook-only enforcement is recorded. PreToolUse resolved a session (get-or-create, task
   // "hook") and passed its id to check_tool_call, so the mediated hard rule earned Enforced and the
   // verdicts landed in the evidence chain — without any explicit MCP session from the harness.

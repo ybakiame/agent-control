@@ -23,7 +23,10 @@ binding **across harnesses**. MCP is the resolution backbone; the resolved contr
 agents through the channels they already use — **aligned** into the project's `AGENTS.md` /
 `CLAUDE.md` / `GEMINI.md` / `.cursor/rules` as a pointer block (directing agents to the live rules, so
 hand-written prose is preserved), **pushed** into a harness session at start via a SessionStart hook,
-or **queried** over MCP. A PreToolUse hook **enforces** the hard rules by gating each tool call. The
+or **queried** over MCP. A PreToolUse hook **enforces** the hard rules by gating each tool call. When a
+harness re-enters a session after context compaction (`SessionStart` with `source: "compact"`), the same
+hook re-injects the continuity brief (`.agent-control/handoff/latest.md`) plus the live goal/work state,
+read from disk first so continuity survives even an unreachable daemon. The
 differentiator is **traceable provenance + conflict detection + a frozen cross-harness snapshot**,
 delivered into the tools agents already read.
 

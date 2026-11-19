@@ -328,7 +328,10 @@ matching `tool_guards` glob + input regex denies the call). With no `hard` rules
 Register the Agent Control hook into the selected harnesses' **own config** so the harness itself drives
 enforcement. Writes a managed group with a **start** hook (injects the briefing: binding rules +
 conflicts + work environment) and a **pre-tool** hook (runs `check_tool_call`) — this is what turns a
-`hard` rule into a recorded `Enforced` one. Every other config key and user-authored hook is preserved;
+`hard` rule into a recorded `Enforced` one. On a post-compaction session re-entry (`SessionStart` with
+`source: "compact"`) the start hook also re-injects the `.agent-control/handoff/latest.md` continuity
+brief + live work state (read from disk first, so it survives an unreachable daemon); no extra hook
+group is registered for this. Every other config key and user-authored hook is preserved;
 writes are atomic and re-registering is idempotent. Each target uses its own schema (`ConfigCodec`),
 event names and deny shape:
 
