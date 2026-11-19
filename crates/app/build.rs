@@ -4,6 +4,9 @@ fn main() {
 
     #[cfg(windows)]
     {
+        // The deepest view (Projects) overflows the default 1MB main-thread stack
+        // during gpui layout/paint; reserve 8MB in the exe PE header.
+        println!("cargo:rustc-link-arg=/STACK:8388608");
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico");
         res.set("ProductName", "Agent Control");

@@ -271,6 +271,15 @@ impl Console {
                                     .gap_2()
                                     .flex_wrap()
                                     .child(
+                                        Button::new("project-setup")
+                                            .label(self.t("proj.setup"))
+                                            .primary()
+                                            .small()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.setup_for_selected_project(cx);
+                                            })),
+                                    )
+                                    .child(
                                         Button::new("project-export")
                                             .label(self.t("proj.export"))
                                             .primary()

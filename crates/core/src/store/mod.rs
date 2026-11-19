@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::config::DataLayout;
 use crate::engine::RuleEngine;
 use crate::export;
-use crate::hooks::{self, HookReport, HookStatus, HookTarget};
+use crate::hooks::{self, HookReport, HookStatus, HookTarget, SetupReport};
 use crate::model::{
     AgentRegistration, AssuranceTier, ConstraintAssurance, ConstraintSnapshot, Enforcement,
     EvidenceEntry, EvidenceKind, HandoffBundle, HandoffRecord, Project, ProvenanceRecord,
@@ -1130,6 +1130,29 @@ impl Store {
 
     /// Detect which harnesses are installed and whether our hook is already registered in each one's
     /// config (project or user level). Read-only: drives the console's one-click register/restore UI.
+    /// One-command harness onboarding: a thin, idempotent adapter composing `export_native`
+    /// (pointer block reach) and `register_hooks` (start briefing + pre-tool gate). No new
+    /// business logic — both halves keep their own managed-block / managed-group semantics.
+    pub fn setup(
+        &self,
+        project_path: &Path,
+        hook_targets: &[HookTarget],
+        export_targets: &[export::ExportTarget],
+        include_user: bool,
+    ) -> Result<SetupReport> {
+        let command = hooks::default_hook_command().context(
+            "hook script not found beside the executable; run setup from a release or dev build",
+        )?;
+        let export = self.export_native(project_path, export_targets, include_user)?;
+        let hooks = self.register_hooks(project_path, hook_targets, &command)?;
+        Ok(SetupReport {
+            project_path: project_path.to_path_buf(),
+            command,
+            export,
+            hooks,
+        })
+    }
+
     pub fn detect_hooks(&self, project_path: &Path) -> Result<Vec<HookStatus>> {
         let mut statuses = Vec::new();
         for target in HookTarget::ALL {

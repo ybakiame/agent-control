@@ -236,6 +236,16 @@ pub struct HookReport {
     pub targets: Vec<TargetOutcome>,
 }
 
+/// Result of the one-command `setup` adapter: the native export report plus the hook registration
+/// report, with the command that was wired. Pure composition — no business logic of its own.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SetupReport {
+    pub project_path: PathBuf,
+    pub command: String,
+    pub export: crate::export::ExportReport,
+    pub hooks: HookReport,
+}
+
 /// Detection state of one harness: whether it appears installed, where its config lives, its write
 /// scope, and whether our managed hook is already registered there.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

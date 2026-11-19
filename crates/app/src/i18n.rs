@@ -689,6 +689,7 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("proj.rename", "Rename…", "重命名…"),
     ("proj.reveal", "Open contracts folder", "打开契约目录"),
     ("proj.export", "Export to harnesses", "导出到 harness"),
+    ("proj.setup", "Setup", "一键接入"),
     (
         "proj.export_hint",
         "Writes a static pointer block into the selected harness entry points, directing agents to read the live rules in .agent-control/rules/ (no rule text is copied). Content outside the block is preserved; re-export is idempotent.",
@@ -887,6 +888,12 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "已写入指针块（{} 条项目契约）→ {}",
     ),
     ("log.export_failed", "export failed: {}", "导出失败：{}"),
+    (
+        "log.setup_done",
+        "setup complete: {} export target(s), {} hook target(s) written",
+        "接入完成：写入 {} 个导出目标、{} 个 hook 目标",
+    ),
+    ("log.setup_failed", "setup failed: {}", "接入失败：{}"),
     (
         "log.revoke_done",
         "revoked managed block → {}",

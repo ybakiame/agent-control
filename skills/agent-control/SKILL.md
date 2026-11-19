@@ -23,7 +23,7 @@ work). It is not the guide for editing the console's Rust source — that lives 
 
 ## Connect
 
-The console exposes an **MCP server** (27 tools + resources + prompts). Pick one transport:
+The console exposes an **MCP server** (28 tools + resources + prompts). Pick one transport:
 
 - **Streamable HTTP** — the desktop app runs a **background daemon** at `http://127.0.0.1:9870/mcp`
   by default (`mcp-session-id` header). It reuses an already-running daemon or spawns the sibling
@@ -42,7 +42,7 @@ next to the binary switches to `<exe dir>/data`). Both binaries run with **no co
 Windows and log to `<root>/logs/{app,mcp}.log`. Build the binary
 with `mise run build` (→ `target/debug/agent-control-mcp`), or run via `mise run mcp` (stdio).
 
-Verify the connection by listing tools (expect 27) or reading resource `control://overview`.
+Verify the connection by listing tools (expect 28) or reading resource `control://overview`.
 If your client cannot reach the server, confirm the desktop app is running (HTTP) or that your
 harness spawned the stdio binary correctly.
 
@@ -150,7 +150,9 @@ non-competitive (never supersede a contract) and always `advisory`.
 ## Reaching agents that don't call MCP (native export + hook)
 
 Most agents read their own entry points (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursor/rules`)
-instead of calling MCP. Two mechanisms deliver the binding set to them:
+instead of calling MCP. Two mechanisms deliver the binding set to them (the **`setup`** tool — or
+the Projects-view **Setup** button — composes both in one idempotent call: default `AGENTS.md`
+export + all nine hook targets; undo with `revoke_native` / `revoke_hooks`):
 
 - **`export_native`** (`project_path`, optional `targets`, optional `include_user: true`) writes a
   static *pointer block* (`<!-- agent-control:begin --> … <!-- agent-control:end -->`) into the
@@ -240,7 +242,7 @@ Projects → Hooks panel does the same with one click.
 
 ## Resources
 
-- [references/mcp-tools.md](references/mcp-tools.md) — all 27 tools (parameters + returns), the 3
+- [references/mcp-tools.md](references/mcp-tools.md) — all 28 tools (parameters + returns), the 3
   resources, the `constraint-briefing` prompt, and concrete call examples.
 - In the source repo: `scripts/mcp-e2e.mjs` and `scripts/mcp-http-e2e.mjs` are runnable lifecycle
   examples; `scripts/hook-e2e.mjs` exercises the SessionStart/PreToolUse hook against a live daemon;

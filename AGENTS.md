@@ -64,7 +64,7 @@ Three crates under `crates/`. Dependency direction: `app → {mcp, core}`, `mcp 
 | Crate | Package | Kind | Responsibility | Key files |
 |-------|---------|------|----------------|-----------|
 | core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native pointer export + drift + revoke, assurance tiers, tool-call gate, hooks config | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Enforcement`, `AssuranceTier`, `ConstraintAssurance`, `ToolGuard`, `ToolGateReport`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs` (`evaluate_code_checks`), `gate.rs` (`check_tool_call`, repo gate + tool guards), `hooks.rs` (`HookTarget`, `ConfigCodec`, `HookScope`, `HookEvents`, `register`/`revoke`/`detect`), `export.rs` (`PROJECT_GUIDANCE`, `render_constraint_briefing`, `handoff_tier_warning`, `render_handoff_brief`, `wrap_block`, `upsert_managed_block`, `remove_managed_block`, `ExportTarget`, `ExportReport`, `RevokeReport`, `DriftReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
-| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 27 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
+| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 28 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
 | app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review, native export + hooks registration | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
 
 Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`, `Store`,
@@ -343,12 +343,12 @@ cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 **Single-instance:** the TCP bind is the lock — a second HTTP launch on a busy address logs
 "already serving" and exits cleanly (`AddrInUse` guard), so daemon spawns are idempotent.
 
-**27 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
+**28 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
 `record_evidence`, `acknowledge_rules`, `get_session_context`, `update_work_state`,
 `set_session_status`, `export_handoff`,
 `import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`,
 `list_suggestions`, `export_native`, `check_export_drift`, `revoke_native`, `verify_constraints`,
-`check_tool_call`, `register_hooks`, `revoke_hooks`, `detect_hooks`, `doctor`, `search` (plus resources & prompts).
+`check_tool_call`, `register_hooks`, `revoke_hooks`, `detect_hooks`, `doctor`, `search`, `setup` (plus resources & prompts).
 `save_rule` is the active rule-authoring path: an agent records a discovered project contract
 (`scope=project`, `kind=contract`, `project_path`), a personal preference (`scope=user`), or a
 machine/project environment note (`scope=environment`, `project_path`, written to git-ignored
@@ -445,6 +445,14 @@ Shadow rows sync at the write chokepoints (`save_rule`/`delete_rule`, `db.upsert
 `db.append_evidence`, `db.delete_session`) and rebuild from source on every `Store::open` (rules
 from disk via the project registry, sessions/evidence from the DB). Backs the MCP `search` tool
 and the Dashboard search card (`Console::run_search`, `search_input`/`search_hits`).
+`setup` (`project_path`, optional `targets`, optional `export_targets`, optional `include_user`) is
+the one-command harness onboarding: a thin `Store::setup` composition of `export_native` +
+`register_hooks` with `hooks::default_hook_command()` — no new business logic. Defaults: all nine
+hook targets, `AGENTS.md` export only. Returns a `SetupReport { project_path, command, export,
+hooks }`; re-running is idempotent (`unchanged` outcomes). Because `register_hooks` dedupes the two
+Qoder builds by config path, seven project-scope targets yield six hook outcomes. Undo with
+`revoke_native` / `revoke_hooks`. Backs the MCP `setup` tool and the Projects-view **Setup** button
+(`Console::setup_for_selected_project`, all nine hook targets + default export, project-only).
 
 Recommended harness call order:
 
@@ -707,6 +715,9 @@ actions / export cluster / hooks cluster) separated by dividers, and tucks verbo
 (`proj.hooks_summary`, registered/total) plus per-target registered/installed tags from `detect_hooks`;
 **Register** / **Revoke** emit success **and** failure toasts (`proj.hooks_register_toast` /
 `hooks_revoke_toast` / `hooks_failed_toast` / `hooks_no_script_toast`) so the outcome is always visible.
+The export cluster leads with a primary **Setup** button (`project-setup`,
+`Console::setup_for_selected_project` → `Store::setup`): one click wires the default export + all
+nine hook targets, with `log.setup_done` / `log.setup_failed` toasts.
 
 ---
 
@@ -741,6 +752,10 @@ names changed → `uia-shot` for pixels. Verify locale persistence by reading `c
 - **Stop the GUI before rebuilding.** A running `agent-control-app.exe` locks the binary;
   `cargo build` then fails with `failed to remove … (os error 5 / 拒绝访问)`. Find and kill it:
   `tasklist | grep agent-control-app` then `taskkill //PID <pid> //F` (Git Bash needs `//`).
+- **The exe reserves an 8MB main-thread stack** (`crates/app/build.rs`, Windows
+  `/STACK:8388608` link arg). The Projects view's element tree overflows the default 1MB stack
+  during gpui layout/paint (silent `thread 'main' has overflowed its stack` exit when opening the
+  view); keep the reserve when touching the link args.
 - **Locked session ⇒ screenshots show the lock screen / black.** That is not an app bug. The
   UIA tree still returns correct elements, so verify functionally (names, geometry, `config.toml`)
   and note that pixel confirmation is blocked until the session is unlocked.

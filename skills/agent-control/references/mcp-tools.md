@@ -408,6 +408,19 @@ bigrams, other scripts → lowercased words), stored as space-joined tokens in F
   writes and rebuild on console start.
 - Errors (`isError`): unknown `kind`.
 
+### setup
+One-command harness onboarding: composes `export_native` + `register_hooks` in one idempotent call
+(thin adapter, no new business logic). Undo with `revoke_native` / `revoke_hooks`.
+- `project_path` (string, required), `targets` (string[], optional — hook targets, defaults to all
+  nine), `export_targets` (string[], optional — `agents|claude|gemini|cursor`, defaults to
+  `["agents"]`), `include_user` (bool, default false — also write `~/.claude/CLAUDE.md`).
+- Returns a `SetupReport`: `project_path`, `command` (the wired hook command), `export`
+  (`ExportReport`) and `hooks` (`HookReport`). Re-running reports `unchanged`. The two Qoder builds
+  share one project config file, so seven project-scope hook targets yield six hook outcomes.
+- Also available as the console's Projects-view **Setup** button (all nine hook targets + default
+  export, project-only).
+- Errors (`isError`): empty `project_path`, unknown target names, missing hook script.
+
 ## Resources
 
 - `control://overview` — JSON: `user_rules`, `sessions`, `active_sessions` counts.

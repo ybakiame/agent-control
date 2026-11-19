@@ -503,6 +503,22 @@ pub struct DoctorRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetupRequest {
+    /// Absolute project path to onboard.
+    pub project_path: String,
+    /// Hook targets (claude|codebuddy|workbuddy|qoder|qoder-cn|codex|cursor|antigravity|kimi).
+    /// Defaults to all nine.
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
+    /// Native export targets (agents|claude|gemini|cursor). Defaults to ["agents"].
+    #[serde(default)]
+    pub export_targets: Option<Vec<String>>,
+    /// Also write the user-global ~/.claude/CLAUDE.md pointer. Defaults to false.
+    #[serde(default)]
+    pub include_user: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchRequest {
     /// Search text. Chinese queries of two or more characters work (CJK bigram segmentation).
     pub query: String,
@@ -1311,6 +1327,31 @@ impl ControlServer {
         }
         let project = PathBuf::from(req.project_path.trim());
         match self.store.doctor(&project, req.daemon_bind.as_deref()) {
+            Ok(report) => json_result(&serde_json::to_value(report).unwrap()),
+            Err(e) => tool_err(e),
+        }
+    }
+
+    #[tool(
+        description = "One-command harness onboarding: composes export_native (pointer block into the selected native entry points) and register_hooks (start briefing + pre-tool gate) in one idempotent call. Defaults: all nine hook targets, AGENTS.md export only. Re-running reports unchanged. Returns the export and hook reports plus the wired command; use revoke_native / revoke_hooks to undo."
+    )]
+    async fn setup(
+        &self,
+        Parameters(req): Parameters<SetupRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if req.project_path.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "project_path is required and cannot be empty",
+                None,
+            ));
+        }
+        let hook_targets = parse_hook_targets(req.targets)?;
+        let export_targets = parse_targets(req.export_targets)?;
+        let project = PathBuf::from(req.project_path.trim());
+        match self
+            .store
+            .setup(&project, &hook_targets, &export_targets, req.include_user)
+        {
             Ok(report) => json_result(&serde_json::to_value(report).unwrap()),
             Err(e) => tool_err(e),
         }

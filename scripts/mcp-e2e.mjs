@@ -119,7 +119,7 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  check("tools/list has 27 tools", names.length === 27, names);
+  check("tools/list has 28 tools", names.length === 28, names);
   check("save_rule registered", names.includes("save_rule"), names);
   check("set_rule_enabled registered", names.includes("set_rule_enabled"), names);
   check("suggest_rule registered", names.includes("suggest_rule"), names);
@@ -135,6 +135,7 @@ try {
   check("detect_hooks registered", names.includes("detect_hooks"), names);
   check("doctor registered", names.includes("doctor"), names);
   check("search registered", names.includes("search"), names);
+  check("setup registered", names.includes("setup"), names);
 
   const rules = await tool("list_rules", { project_path: projectDir });
   check("list_rules returns user + project rule", rules.rules?.length === 2, rules);
@@ -1138,6 +1139,28 @@ try {
     "search rejects an unknown kind",
     await toolRejects("search", { query: "x", kind: "bogus" }),
   );
+
+  // ---- P3: one-command setup (export_native + register_hooks composition) ----
+  const setupDir = mkdtempSync(join(tmpdir(), "ac-setup-"));
+  const setup1 = await tool("setup", { project_path: setupDir, targets: hookTargets });
+  check(
+    "setup writes the pointer block and registers the project-scope hooks",
+    setup1.export?.targets?.some((t) => t.action === "created") &&
+      setup1.hooks?.targets?.length === 6 &&
+      setup1.hooks.targets.every((t) => t.action === "created") &&
+      typeof setup1.command === "string" &&
+      setup1.command.includes("agent-control-hook.mjs"),
+    setup1,
+  );
+  const setup2 = await tool("setup", { project_path: setupDir, targets: hookTargets });
+  check(
+    "setup re-run is idempotent (all unchanged)",
+    setup2.export?.targets?.every((t) => t.action === "unchanged") &&
+      setup2.hooks?.targets?.every((t) => t.action === "unchanged"),
+    setup2,
+  );
+  await tool("revoke_hooks", { project_path: setupDir, targets: hookTargets });
+  await tool("revoke_native", { project_path: setupDir });
 
   const reregistered = await tool("register_hooks", { project_path: hooksDir, targets: hookTargets, command: hookCmd });
   check(

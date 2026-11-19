@@ -1514,6 +1514,46 @@ impl Console {
     /// Write the static pointer block into the selected project's chosen harness entry points. The
     /// block points at the live rules in `.agent-control/rules/`; it does not copy rule text.
     /// Project-only: personal preferences are not written to the user-global Claude memory here.
+    pub fn setup_for_selected_project(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .selected_project
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .map(|p| p.path.clone())
+        else {
+            self.log(self.t("log.no_project"));
+            return;
+        };
+        match self.store.setup(
+            &path,
+            &HookTarget::ALL,
+            &ExportTarget::default_targets(),
+            false,
+        ) {
+            Ok(report) => {
+                let exports = report
+                    .export
+                    .targets
+                    .iter()
+                    .filter(|t| t.action != "unchanged")
+                    .count();
+                let hooks = report
+                    .hooks
+                    .targets
+                    .iter()
+                    .filter(|t| t.action != "unchanged")
+                    .count();
+                self.log(self.tr(
+                    "log.setup_done",
+                    &[&exports.to_string(), &hooks.to_string()],
+                ));
+            }
+            Err(err) => {
+                self.log(self.tr("log.setup_failed", &[&err.to_string()]));
+            }
+        }
+        cx.notify();
+    }
+
     pub fn export_native_for_selected_project(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self
             .selected_project
