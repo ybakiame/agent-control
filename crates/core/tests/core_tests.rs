@@ -1461,6 +1461,58 @@ fn environment_rule_load_save_toggle_delete_and_gitignore() {
 }
 
 #[test]
+fn handoff_mirror_is_git_ignored_and_scaffolded() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store.init_project_contracts(project.path()).unwrap();
+    let ignore = project.path().join(".agent-control/handoff/.gitignore");
+    assert_eq!(
+        std::fs::read_to_string(&ignore).unwrap(),
+        "*\n!.gitignore\n"
+    );
+
+    // In a real git repo the runtime mirror is ignored while the .gitignore itself stays trackable.
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(project.path())
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    let latest = project.path().join(".agent-control/handoff/latest.md");
+    std::fs::write(&latest, "runtime mirror").unwrap();
+    assert!(
+        git(&["check-ignore", "-q", ".agent-control/handoff/latest.md"])
+            .status
+            .success(),
+        "latest.md must be git-ignored"
+    );
+    assert!(
+        !git(&["check-ignore", "-q", ".agent-control/handoff/.gitignore"])
+            .status
+            .success(),
+        ".gitignore must stay trackable"
+    );
+
+    // export_handoff creates the mirror dir + ignore file even without a scaffold.
+    let fresh = tempfile::tempdir().unwrap();
+    let (session, _) = store
+        .create_session("t", fresh.path(), "a", vec![], None)
+        .unwrap();
+    store
+        .export_handoff(session.id, None, serde_json::Value::Null)
+        .unwrap();
+    assert!(
+        fresh
+            .path()
+            .join(".agent-control/handoff/.gitignore")
+            .exists()
+    );
+}
+
+#[test]
 fn environment_excluded_from_native_export() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();

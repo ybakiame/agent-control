@@ -380,7 +380,9 @@ continuity brief to `<project>/.agent-control/handoff/latest.md` (task, from-har
 frozen constraints, tiers, plus **Goal** and **Work state** sections) beside the JSON bundle — the
 **file-based reach** counterpart the exported
 `AGENTS.md` block points at, so a harness that never calls MCP can inherit continuity by reading a
-file. Re-running `export_handoff` refreshes `latest.md`; `import_handoff` refreshes it again into the
+file. The brief is a **local, git-ignored runtime mirror**: it may be absent on a fresh clone and is
+never committed; cross-machine continuity rides MCP (`get_session_context` / `import_handoff`) or the
+integrity-verified bundle. Re-running `export_handoff` refreshes `latest.md`; `import_handoff` refreshes it again into the
 *resumed* state (naming the new harness and carrying the re-verify warning), so the file-based reach
 path never goes stale after a resume. Each export also marks every prior *unacknowledged* handoff
 record `superseded`, so only the latest handoff reads as pending action; acknowledged records are
@@ -456,7 +458,8 @@ global store. Release zips ship the marker so they run portable out of the box.
 ├── rules/              # project-scope contract rules (binding)
 ├── local/              # environment-scope notes (git-ignored via local/.gitignore; briefing-only, never committed)
 ├── examples/           # copy-ready rule templates (NOT binding; copy into rules/ to activate)
-├── handoff/latest.md   # continuity brief written by export_handoff (the AGENTS.md block points here)
+├── handoff/            # git-ignored runtime mirror (self-ignoring .gitignore, like local/)
+│   └── latest.md       # continuity brief written by export_handoff; local-only, never committed
 ├── README.md           # bilingual contract guide (scaffolded on onboarding)
 └── .scaffold.json      # template version + per-file sha256, drives edit-safe scaffold migration
 ```

@@ -289,7 +289,9 @@ harness 经 stdin 传入的 session id 从不被使用（它并非 Agent Control
 让下一个 harness 继承可恢复进度，而非依赖它自己的 todo 列。`export_handoff` 还在 JSON bundle 旁写出可读的连续性
 简报 `<project>/.agent-control/handoff/latest.md`（任务、来源 harness、证据链头、冻结约束、级别，外加 **Goal** 与
 **Work state** 两节）——这是导出 `AGENTS.md` 块所指向的**文件级触达**对应物，从不调用 MCP 的 harness 也能靠读文件
-继承连续性。再次 `export_handoff` 会刷新 `latest.md`；`import_handoff` 再次把它刷新为*已恢复*状态（命名新 harness
+继承连续性。该简报是**仅本地、被 git 忽略的运行时镜像**：新克隆可能没有它，也绝不入库；跨机器连续性经
+MCP（`get_session_context` / `import_handoff`）或经完整性校验的 bundle，而非 git。再次 `export_handoff` 会刷新
+`latest.md`；`import_handoff` 再次把它刷新为*已恢复*状态（命名新 harness
 并携带重新校验警告），因此文件级触达路径在恢复后绝不过期。每次导出还会把此前所有*未确认*的交接记录标记为
 **已取代**（`superseded`）——只有最新一条交接仍是待确认事项；已确认的记录绝不会被取代。
 
@@ -349,7 +351,8 @@ Release 压缩包默认附带该标记，解压即便携运行。
 ├── rules/              # 项目级契约规则（绑定）
 ├── local/              # 环境级说明（经 local/.gitignore 被 git 忽略；仅简报，绝不提交）
 ├── examples/           # 可复制规则模板（不生效；复制进 rules/ 即激活）
-├── handoff/latest.md   # export_handoff 写出的连续性简报（AGENTS.md 块指向这里）
+├── handoff/            # 被 git 忽略的运行时镜像（自忽略 .gitignore，同 local/）
+│   └── latest.md       # export_handoff 写出的连续性简报；仅本地、绝不入库
 ├── README.md           # 双语契约指南（接入时生成）
 └── .scaffold.json      # 模板版本 + 各文件 sha256，驱动编辑安全的脚手架迁移
 ```

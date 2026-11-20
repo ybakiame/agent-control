@@ -99,7 +99,8 @@ Code reads only `CLAUDE.md` when both it and `AGENTS.md` exist. `include_user` a
 the markers, append when absent, and error on a lone marker. The project guidance ends with a static
 `### Continuity (optional)` section (deliberately last, after the read-and-summarize steps and
 `### Assurance`) telling the agent to read `DataLayout::project_handoff_latest`
-(`.agent-control/handoff/latest.md`) if it exists and that it may refresh it via `export_handoff`. The block carries
+(`.agent-control/handoff/latest.md`) if it exists — a **local git-ignored mirror**, absent on a fresh
+clone — and that it may refresh it via `export_handoff`. The block carries
 **no trailing newline**; the file's terminating newline is added on append so it survives as the suffix
 after the end marker — this keeps re-export **byte-idempotent** (`TargetOutcome.action` = `created` |
 `updated` | `unchanged`; unchanged files are not rewritten). Backs the MCP `export_native` tool and the
@@ -198,7 +199,9 @@ existing files).
    `create_session`, the session's resumable **work state** (`goal` + `work_items` done/doing/todo,
    written by `update_work_state`), `HandoffBundle` export/import (carries rules + tiers + work state),
    `acknowledge_rules` compliance report, and the
-   project-local `.agent-control/handoff/latest.md` continuity brief (file-based reach).
+   project-local `.agent-control/handoff/latest.md` continuity brief (file-based reach on this
+   machine; a git-ignored runtime mirror that may be absent on a fresh clone — cross-machine
+   continuity rides MCP or the integrity-verified bundle, not git).
 4. **Verifiable evidence / 可验证证据** — SHA-256 hash chain (`canonical_hash`, `EvidenceEntry`),
    `verify_evidence` recomputes and flags tampering/gaps.
 
@@ -257,7 +260,8 @@ isolate test runs; `open_with_root` / `--data-dir` still override everything.
 ├── rules/              # project-scope contract rules (binding)
 ├── local/              # environment-scope notes (git-ignored via local/.gitignore; briefing-only, never committed)
 ├── examples/           # copy-ready rule templates (NOT binding; copy into rules/ to activate)
-├── handoff/latest.md   # continuity brief written by export_handoff (the AGENTS.md managed block points here)
+├── handoff/            # git-ignored runtime mirror (self-ignoring .gitignore, like local/)
+│   └── latest.md       # continuity brief written by export_handoff; local-only, never committed
 ├── README.md           # bilingual contract guide (scaffolded by init_project_contracts)
 └── .scaffold.json      # template version + per-file sha256, drives edit-safe scaffold migration
 ```

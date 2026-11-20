@@ -292,6 +292,11 @@ try {
   // Layer 1: export_handoff also writes a project-local continuity brief the managed block points at.
   const latestPath = join(projectDir, ".agent-control", "handoff", "latest.md");
   check("export_handoff writes latest.md", existsSync(latestPath), latestPath);
+  check(
+    "export_handoff self-ignores the handoff runtime mirror",
+    readFileSync(join(projectDir, ".agent-control", "handoff", ".gitignore"), "utf8") ===
+      "*\n!.gitignore\n",
+  );
   const latestText = existsSync(latestPath) ? readFileSync(latestPath, "utf8") : "";
   check("latest.md carries task", latestText.includes("e2e: refactor module"), latestText);
   check("latest.md carries from-agent", latestText.includes("harness-a"), latestText);
@@ -708,7 +713,7 @@ try {
   check(
     "check_export_drift embeds a matching format version per target",
     driftSync.report?.targets?.every(
-      (t) => t.exists && t.exported_format === t.current_format && t.current_format === 2,
+      (t) => t.exists && t.exported_format === t.current_format && t.current_format === 3,
     ),
     driftSync,
   );

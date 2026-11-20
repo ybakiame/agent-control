@@ -24,7 +24,7 @@ pub const BLOCK_END: &str = "<!-- agent-control:end -->";
 /// Version of the managed-block format. v1 inlined the full rule text plus a ruleset hash; v2 is a
 /// static pointer at the live rule files plus this version marker. Bump when the block layout changes
 /// so `export_drift` can flag older blocks for migration.
-pub const BLOCK_FORMAT: u32 = 2;
+pub const BLOCK_FORMAT: u32 = 3;
 
 /// Prefix of the in-block format-version line. `read_exported_format` parses the number after it.
 pub const FORMAT_PREFIX: &str = "<!-- agent-control:block-format:";
@@ -66,9 +66,13 @@ here forces compliance — only a hook chokepoint can **enforce**.
 
 ### Continuity (optional)
 
-If `.agent-control/handoff/latest.md` exists it carries a previous harness's task and frozen
-constraints; read it to inherit continuity without an MCP call. Refresh it with `export_handoff`;
-resume a handed-off session with `import_handoff`, then `acknowledge_rules` and `verify_constraints`.
+If `.agent-control/handoff/latest.md` exists it carries a previous harness's task, work state and
+frozen constraints; read it to inherit continuity without an MCP call. It is a **local, git-ignored
+runtime mirror** (like `.agent-control/local/`): it may be absent on a fresh clone, and it is never
+committed. The committed contracts in `.agent-control/rules/` remain the shared source of truth;
+cross-machine continuity rides MCP (`get_session_context` / `import_handoff`) or the
+integrity-verified handoff bundle, not git. Refresh the mirror with `export_handoff`; resume a
+handed-off session with `import_handoff`, then `acknowledge_rules` and `verify_constraints`.
 ";
 
 /// Static pointer body for the user-global preferences entry point (`~/.claude/CLAUDE.md`).

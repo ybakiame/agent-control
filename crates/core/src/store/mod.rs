@@ -913,12 +913,10 @@ impl Store {
             .join(format!("{}.json", session.id));
         std::fs::write(&bundle_path, serde_json::to_vec_pretty(&bundle)?)?;
 
-        // Project-local continuity brief: any harness reads this file to inherit the handoff without
-        // an MCP call (the AGENTS.md managed block points here).
+        // Project-local continuity brief: a git-ignored runtime mirror any harness on this machine
+        // can read to inherit the handoff without an MCP call (the managed block points here).
+        ensure_handoff_dir(&bundle.project_path)?;
         let latest_path = DataLayout::project_handoff_latest(&bundle.project_path);
-        if let Some(parent) = latest_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         std::fs::write(&latest_path, export::render_handoff_brief(&bundle, None))?;
         Ok(bundle)
     }
@@ -995,10 +993,8 @@ impl Store {
         // Refresh the project-local continuity brief so a harness reading latest.md inherits the
         // RESUMED state (new agent + carried tiers + re-verify warning), not the stale pre-handoff
         // export. This keeps the file-based reach path consistent with the JSON bundle after resume.
+        ensure_handoff_dir(&session.project_path)?;
         let latest_path = DataLayout::project_handoff_latest(&session.project_path);
-        if let Some(parent) = latest_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         std::fs::write(
             &latest_path,
             export::render_handoff_brief(bundle, Some(new_agent)),
@@ -1124,6 +1120,7 @@ impl Store {
         std::fs::create_dir_all(&examples_dir)
             .with_context(|| format!("creating project examples dir {}", examples_dir.display()))?;
         ensure_environment_dir(path)?;
+        ensure_handoff_dir(path)?;
 
         let marker_path = DataLayout::project_scaffold_marker(path);
         let mut marker = read_scaffold_marker(&marker_path);
@@ -1133,6 +1130,7 @@ impl Store {
             ("examples/contract-example.md", EXAMPLE_CONTRACT),
             ("examples/constraint-example.md", EXAMPLE_CONSTRAINT),
             ("examples/environment-example.md", EXAMPLE_ENVIRONMENT),
+            ("handoff/.gitignore", HANDOFF_IGNORE),
         ] {
             let file = config_dir.join(rel);
             let new_hash = sha256_hex(template.as_bytes());
@@ -1685,6 +1683,21 @@ fn ensure_environment_dir(project: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Create the project-local handoff dir and its `.gitignore` (ignore everything but itself) so the
+/// per-session continuity mirror is never committed alongside the shared contracts. Idempotent;
+/// returns the dir path. Called when writing `handoff/latest.md` and by the project scaffold.
+fn ensure_handoff_dir(project: &Path) -> Result<PathBuf> {
+    let dir = DataLayout::project_handoff_dir(project);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating handoff dir {}", dir.display()))?;
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        std::fs::write(&gitignore, HANDOFF_IGNORE)
+            .with_context(|| format!("writing {}", gitignore.display()))?;
+    }
+    Ok(dir)
+}
+
 /// Resolve a project path to a stable, display-friendly absolute key. The path must exist and be
 /// a directory. On Windows the `\\?\` verbatim prefix added by `canonicalize` is stripped so the
 /// stored path matches what users type and what sessions record.
@@ -1719,7 +1732,12 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
 }
 
 /// Bump when the scaffold templates below change so untouched projects migrate on next init.
-const TEMPLATE_VERSION: u32 = 2;
+const TEMPLATE_VERSION: u32 = 3;
+
+/// Self-ignore pattern for the git-ignored handoff runtime mirror (same shape as `local/`).
+const HANDOFF_IGNORE: &str = "*
+!.gitignore
+";
 
 /// Records the template version and the sha256 of each generated file's content at the time we
 /// wrote it. A file is only auto-refreshed while its on-disk hash still equals the recorded one.

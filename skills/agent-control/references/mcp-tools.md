@@ -108,7 +108,9 @@ Produce a bundle to transfer the session to another harness.
   session id, evidence-chain head, bundle hash, frozen constraints, assurance tiers, plus a **Goal**
   and a **Work state** section listing done/doing/todo items). This is the
   **file-based reach** counterpart of the bundle: the `AGENTS.md` managed block points agents at
-  `latest.md`, so a harness that never calls MCP still inherits continuity by reading a file. Calling
+  `latest.md` — a **local, git-ignored runtime mirror** (absent on a fresh clone; cross-machine
+  continuity rides MCP or the verified bundle, not git) — so a harness on this machine that never
+  calls MCP still inherits continuity by reading a file. Calling
   `export_handoff` again refreshes `latest.md` in place.
 - **Supersedes pending history.** Each export marks every prior *unacknowledged* handoff record
   `superseded: true` (only the latest record can be acknowledged via `acknowledge_rules`), so older

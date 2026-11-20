@@ -173,7 +173,7 @@ Recommended harness call order:
    and before handing off, so continuity carries resumable state (not just rules).
 7. `export_handoff` → `import_handoff` + `acknowledge_rules` — move between harnesses (re-verify tiers).
    `export_handoff` carries the goal + work items and also writes
-   `<project>/.agent-control/handoff/latest.md` (a readable continuity brief with **Goal** / **Work
+   `<project>/.agent-control/handoff/latest.md` (a readable, **git-ignored local** continuity brief with **Goal** / **Work
    state** sections) beside the JSON bundle, so a harness that never calls MCP can inherit the handoff
    by reading that file (the exported `AGENTS.md` block points at it).
 8. `verify_evidence` — recompute the chain, detect tampering.
