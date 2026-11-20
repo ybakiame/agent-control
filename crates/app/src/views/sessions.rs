@@ -1,17 +1,16 @@
-use agent_control_core::model::{AssuranceTier, Scope, SessionStatus};
+use agent_control_core::model::SessionStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::console::Console;
-use crate::ui;
+use crate::ui::{self, SessionKind};
 
 impl Console {
     pub fn render_sessions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -27,8 +26,10 @@ impl Console {
             .sessions
             .iter()
             .filter(|s| {
-                self.session_show_completed
-                    || !matches!(s.status, SessionStatus::Completed | SessionStatus::Failed)
+                (self.session_show_completed
+                    || !matches!(s.status, SessionStatus::Completed | SessionStatus::Failed))
+                    && (self.session_kind_filter == SessionKind::All
+                        || ui::session_kind(s) == self.session_kind_filter)
             })
             .collect();
         let mut groups: Vec<(std::path::PathBuf, Vec<&agent_control_core::model::Session>)> =
@@ -42,23 +43,14 @@ impl Console {
         let grouped_rows: Vec<AnyElement> = groups
             .iter()
             .map(|(path, rows)| {
-                let name = self
-                    .projects
-                    .iter()
-                    .find(|p| &p.path == path)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| {
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| path.to_string_lossy().to_string())
-                    });
+                let name = self.project_display_name(path);
                 v_flex()
                     .gap_1()
                     .child(
                         h_flex()
                             .gap_1()
                             .items_center()
-                            .child(div().text_xs().text_color(muted).child(name))
+                            .child(div().text_xs().text_color(muted).child(name.clone()))
                             .child(Tag::secondary().child(rows.len().to_string())),
                     )
                     .children(rows.iter().map(|s| {
@@ -68,26 +60,34 @@ impl Console {
                         let delete_label = self.t("sess.delete").to_string();
                         let rename_label = self.t("sess.rename").to_string();
                         let display_title = ui::display_title(s);
-                        let kind_tag = if s.task == "hook" {
-                            Tag::secondary().child(self.t("sess.kind_telemetry"))
-                        } else if !s.handoffs.is_empty()
-                            || s.predecessor.is_some()
-                            || s.status == SessionStatus::HandedOff
-                        {
-                            Tag::info().child(self.t("sess.kind_continuity"))
-                        } else {
-                            Tag::primary().child(self.t("sess.kind_work"))
+                        let kind = ui::session_kind(s);
+                        let kind_tag = match kind {
+                            SessionKind::Telemetry => {
+                                Tag::secondary().child(self.t("sess.kind_telemetry"))
+                            }
+                            SessionKind::Continuity => {
+                                Tag::info().child(self.t("sess.kind_continuity"))
+                            }
+                            SessionKind::Work | SessionKind::All => {
+                                Tag::primary().child(self.t("sess.kind_work"))
+                            }
                         };
                         let owners = self
                             .session_owners
                             .get(&id)
                             .filter(|o| o.len() > 1)
-                            .map(|o| o.join(" → "));
+                            .map(|o| o.join(" → "))
+                            .unwrap_or_else(|| s.agent_id.clone());
+                        let updated = s
+                            .updated_at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string();
                         v_flex()
                             .id(format!("session-row-{id}"))
                             .role(Role::Button)
                             .aria_label(display_title.clone())
-                            .p_3()
+                            .p_2()
                             .gap_1()
                             .border_1()
                             .border_color(if selected { primary } else { border })
@@ -102,6 +102,7 @@ impl Console {
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.select_session(id, window, cx);
+                                this.open_session_sheet(id, window, cx);
                             }))
                             .context_menu(move |menu, _window, _cx| {
                                 session_row_menu(
@@ -112,32 +113,30 @@ impl Console {
                                     rename_label.clone(),
                                 )
                             })
-                            .child(div().font_medium().text_sm().child(display_title))
                             .child(
                                 h_flex()
                                     .gap_1()
                                     .items_center()
-                                    .child(ui::status_tag(s.status, self.locale))
-                                    .child(kind_tag)
-                                    .child(Tag::secondary().child(s.agent_id.clone()))
                                     .child(
-                                        Button::new(format!("sess-sheet-{id}"))
-                                            .label(self.t("sess.sheet"))
-                                            .ghost()
-                                            .xsmall()
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.open_session_sheet(id, window, cx);
-                                            })),
-                                    ),
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .font_medium()
+                                            .text_sm()
+                                            .child(display_title),
+                                    )
+                                    .child(ui::status_tag(s.status, self.locale))
+                                    .child(kind_tag),
                             )
                             .child(div().text_xs().text_color(muted).child(self.tr(
-                                "sess.binding",
+                                "sess.card_meta",
                                 &[
+                                    &owners,
+                                    &name,
                                     &s.constraint_snapshot.rules.len().to_string(),
-                                    &id.to_string()[..8],
+                                    &updated,
                                 ],
                             )))
-                            .children(owners.map(|o| div().text_xs().text_color(muted).child(o)))
                             .children(s.predecessor.map(|p| {
                                 div()
                                     .text_xs()
@@ -150,360 +149,82 @@ impl Console {
             })
             .collect();
 
-        let detail = if let Some(session) = self
-            .selected_session
-            .and_then(|id| self.sessions.iter().find(|s| s.id == id))
-        {
-            let snapshot_short = session.constraint_snapshot.snapshot_hash
-                [..16.min(session.constraint_snapshot.snapshot_hash.len())]
-                .to_string();
-            let binding_rules = session.constraint_snapshot.rules.iter().map(|rule| {
-                let scope_tag = match rule.scope {
-                    Scope::User => Tag::primary().child(self.t("scope.user.tag")),
-                    Scope::Project => Tag::warning().child(self.t("scope.project.tag")),
-                    Scope::Session => Tag::info().child(self.t("scope.session.tag")),
-                    Scope::Environment => Tag::secondary().child(self.t("scope.environment.tag")),
-                };
+        let kind_filters = [
+            (SessionKind::All, "sess.filter_all"),
+            (SessionKind::Work, "sess.kind_work"),
+            (SessionKind::Continuity, "sess.kind_continuity"),
+            (SessionKind::Telemetry, "sess.kind_telemetry"),
+        ]
+        .into_iter()
+        .map(|(kind, key)| {
+            Button::new(format!("sess-filter-{key}"))
+                .label(self.t(key))
+                .ghost()
+                .xsmall()
+                .selected(self.session_kind_filter == kind)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.session_kind_filter = kind;
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .p_4()
+            .gap_2()
+            .child(
                 h_flex()
-                    .gap_2()
                     .items_center()
-                    .child(scope_tag)
-                    .child(div().text_sm().child(rule.title.clone()))
-                    .into_any_element()
-            });
-            let work_rows = session.work_items.iter().map(|item| {
-                h_flex()
                     .gap_2()
-                    .items_center()
-                    .child(ui::work_status_tag(item.status, self.locale))
-                    .child(div().text_sm().child(item.title.clone()))
-                    .into_any_element()
-            });
-            let assurance_rows = session.assurance.iter().map(|a| {
-                let tier_tag = match a.achieved {
-                    AssuranceTier::Advisory => Tag::secondary().child(self.t("tier.advisory")),
-                    AssuranceTier::Verified => Tag::success().child(self.t("tier.verified")),
-                    AssuranceTier::Enforced => Tag::primary().child(self.t("tier.enforced")),
-                };
-                v_flex()
-                    .p_2()
-                    .gap_1()
-                    .border_1()
-                    .border_color(border)
-                    .rounded_sm()
+                    .child(ui::section_label(cx, self.t("sess.title")))
+                    .child(h_flex().gap_1().items_center().children(kind_filters))
+                    .child(div().flex_1())
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap_1()
                             .items_center()
-                            .child(tier_tag)
-                            .child(div().text_sm().child(a.rule_id.clone())),
-                    )
-                    .child(div().text_xs().text_color(muted).child(a.basis.clone()))
-                    .into_any_element()
-            });
-
-            let work_editor = v_flex()
-                .w_full()
-                .gap_2()
-                .child(
-                    Textarea::new(&self.session_goal_input)
-                        .w_full()
-                        .h(px(56.))
-                        .aria_label(self.t("sess.goal_label")),
-                )
-                .child(
-                    Textarea::new(&self.session_work_input)
-                        .w_full()
-                        .h(px(120.))
-                        .aria_label(self.t("sess.work_title")),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(self.t("sess.work_hint")),
-                )
-                .child(
-                    Button::new("session-work-save")
-                        .label(self.t("sess.work_save"))
-                        .primary()
-                        .small()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.save_session_work_state(window, cx) {
-                                let msg = this.t("sess.work_saved_toast").to_string();
-                                this.notify(window, cx, &msg);
-                            }
-                            cx.notify();
-                        })),
-                );
-
-            let verification = v_flex()
-                .gap_1()
-                .child(ui::mono(
-                    cx,
-                    self.tr(
-                        "sess.snapshot",
-                        &[
-                            &snapshot_short,
-                            &session.constraint_snapshot.provenance_id.to_string(),
-                        ],
-                    ),
-                ))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(self.t("sess.verification_hint")),
-                );
-
-            v_flex()
-                .gap_3()
-                .child(ui::section_label(cx, self.t("sess.selected")))
-                .child(
-                    ui::card(cx)
-                        .gap_1()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(ui::status_tag(session.status, self.locale))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .font_medium()
-                                        .text_sm()
-                                        .child(session.task.clone()),
-                                )
-                                .child(
-                                    if matches!(
-                                        session.status,
-                                        SessionStatus::Completed | SessionStatus::Failed
-                                    ) {
-                                        Button::new("session-reopen")
-                                            .label(self.t("sess.reopen"))
-                                            .small()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if this.set_selected_session_status(
-                                                    SessionStatus::Active,
-                                                    cx,
-                                                ) {
-                                                    let msg =
-                                                        this.t("sess.reopened_toast").to_string();
-                                                    this.notify(window, cx, &msg);
-                                                }
-                                                cx.notify();
-                                            }))
-                                    } else {
-                                        Button::new("session-complete")
-                                            .label(self.t("sess.complete"))
-                                            .small()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if this.set_selected_session_status(
-                                                    SessionStatus::Completed,
-                                                    cx,
-                                                ) {
-                                                    let msg =
-                                                        this.t("sess.completed_toast").to_string();
-                                                    this.notify(window, cx, &msg);
-                                                }
-                                                cx.notify();
-                                            }))
-                                    },
-                                )
-                                .child(
-                                    Button::new("session-delete")
-                                        .label(self.t("sess.delete"))
-                                        .danger()
-                                        .small()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.confirm_delete_session(window, cx);
-                                        })),
-                                ),
-                        )
-                        .child(div().text_sm().text_color(muted).child(self.tr(
-                            "sess.agent_project",
-                            &[
-                                &session.agent_id,
-                                &session.project_path.display().to_string(),
-                            ],
-                        ))),
-                )
-                .child(ui::section_label(cx, self.t("sess.binding_title")))
-                .child(v_flex().gap_1().children(binding_rules))
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child(ui::section_label(cx, self.t("sess.work_title")))
-                        .child(
-                            div().text_xs().text_color(muted).child(
-                                self.tr(
-                                    "sess.work_updated",
-                                    &[&session
-                                        .updated_at
-                                        .with_timezone(&chrono::Local)
-                                        .format("%Y-%m-%d %H:%M")
-                                        .to_string()],
-                                ),
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(self.t("sess.show_completed")),
+                            )
+                            .child(
+                                Switch::new("sessions-show-completed")
+                                    .checked(self.session_show_completed)
+                                    .accessibility_label(self.t("sess.show_completed"))
+                                    .on_click(cx.listener(|this, next, _, cx| {
+                                        this.session_show_completed = *next;
+                                        cx.notify();
+                                    })),
                             ),
-                        )
-                        .child(if session.goal.is_empty() {
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(self.t("sess.goal_empty"))
-                                .into_any_element()
-                        } else {
-                            v_flex()
-                                .gap_0p5()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(self.t("sess.goal_label")),
-                                )
-                                .child(div().text_sm().child(session.goal.clone()))
-                                .into_any_element()
-                        })
-                        .child(if session.work_items.is_empty() {
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(self.t("sess.work_empty"))
-                                .into_any_element()
-                        } else {
-                            v_flex().gap_1().children(work_rows).into_any_element()
-                        })
-                        .child(ui::disclosure(
-                            "sess-work-edit",
-                            self.t("sess.work_edit"),
-                            self.open_sections.contains("sess-work-edit"),
-                            work_editor,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_section("sess-work-edit", cx);
-                            }),
-                        )),
-                )
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(ui::section_label(cx, self.t("sess.assurance_title")))
-                                .child(div().flex_1())
-                                .child(
-                                    Button::new("session-verify-constraints")
-                                        .label(self.t("sess.verify_constraints"))
-                                        .small()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            if let Some((verified, advisory)) =
-                                                this.verify_selected_session_constraints(cx)
-                                            {
-                                                let msg = this.tr(
-                                                    "sess.verified_toast",
-                                                    &[&verified.to_string(), &advisory.to_string()],
-                                                );
-                                                this.notify(window, cx, &msg);
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(if session.assurance.is_empty() {
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(self.t("sess.assurance_empty"))
-                                .into_any_element()
-                        } else {
-                            v_flex().gap_1().children(assurance_rows).into_any_element()
-                        }),
-                )
-                .child(ui::disclosure(
-                    "sess-verification",
-                    self.t("sess.verification_title"),
-                    self.open_sections.contains("sess-verification"),
-                    verification,
-                    cx.listener(|this, _, _, cx| {
-                        this.toggle_section("sess-verification", cx);
-                    }),
-                ))
-                .into_any_element()
-        } else {
-            ui::empty_state(
-                cx,
-                IconName::SquareTerminal,
-                self.t("sess.title"),
-                self.t("sess.empty"),
+                    )
+                    .child(Tag::secondary().child(visible_sessions.len().to_string())),
             )
-            .into_any_element()
-        };
-
-        v_flex().flex_1().min_h_0().w_full().p_4().gap_3().child(
-            h_flex()
-                .flex_1()
-                .min_h_0()
-                .gap_3()
-                .child(
-                    v_flex()
-                        .w(px(340.))
-                        .h_full()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(ui::section_label(cx, self.t("sess.title")))
-                                .child(div().flex_1())
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .child(self.t("sess.show_completed")),
-                                        )
-                                        .child(
-                                            Switch::new("sessions-show-completed")
-                                                .checked(self.session_show_completed)
-                                                .accessibility_label(self.t("sess.show_completed"))
-                                                .on_click(cx.listener(|this, next, _, cx| {
-                                                    this.session_show_completed = *next;
-                                                    cx.notify();
-                                                })),
-                                        ),
-                                )
-                                .child(Tag::secondary().child(visible_sessions.len().to_string())),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_h_0()
-                                .gap_2()
-                                .id("sessions-list")
-                                .overflow_y_scroll()
-                                .children(grouped_rows),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .gap_3()
-                        .id("sessions-detail")
-                        .overflow_y_scroll()
-                        .child(detail),
-                ),
-        )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_2()
+                    .id("sessions-list")
+                    .overflow_y_scroll()
+                    .children(grouped_rows)
+                    .when(visible_sessions.is_empty(), |this| {
+                        this.child(ui::empty_state(
+                            cx,
+                            IconName::SquareTerminal,
+                            self.t("sess.title"),
+                            self.t("sess.empty"),
+                        ))
+                    }),
+            )
     }
 }
 
-/// Right-click menu for a session row: delete (cascade) the session it belongs to.
+/// Right-click menu for a session card: rename (title only) or delete (cascade).
 fn session_row_menu(
     menu: PopupMenu,
     weak: WeakEntity<Console>,

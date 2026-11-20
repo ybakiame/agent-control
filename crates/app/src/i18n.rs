@@ -201,17 +201,6 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("sess.status.completed", "completed", "已完成"),
     ("sess.status.failed", "failed", "失败"),
     (
-        "sess.binding",
-        "{} binding rules · {}",
-        "{} 条绑定规则 · {}",
-    ),
-    ("sess.selected", "Selected session", "当前会话"),
-    (
-        "sess.agent_project",
-        "agent: {} · project: {}",
-        "代理: {} · 项目: {}",
-    ),
-    (
         "sess.snapshot",
         "constraint snapshot: {}… · provenance {}",
         "约束快照: {}… · 溯源 {}",
@@ -229,6 +218,12 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("sess.kind_telemetry", "telemetry", "遥测"),
     ("sess.kind_continuity", "continuity", "连续性"),
     ("sess.kind_work", "work", "工作"),
+    ("sess.filter_all", "All", "全部"),
+    (
+        "sess.card_meta",
+        "{} · {} · {} rules · {}",
+        "{} · {} · {} 条规则 · {}",
+    ),
     ("sess.continues", "continues {}", "接续 {}"),
     (
         "sess.handoff_history",

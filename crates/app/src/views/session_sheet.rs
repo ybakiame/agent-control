@@ -1,8 +1,10 @@
 use agent_control_core::DataLayout;
 use agent_control_core::model::{
-    EvidenceEntry, EvidenceKind, OwnershipSpan, ProvenanceRecord, Session, VerificationReport,
+    AssuranceTier, EvidenceEntry, EvidenceKind, OwnershipSpan, ProvenanceRecord, Scope, Session,
+    SessionStatus, VerificationReport,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::Textarea;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
@@ -61,8 +63,10 @@ impl Console {
 
     pub fn open_session_sheet(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         self.sheet_session = Some(id);
+        self.selected_session = Some(id);
         self.sheet_payload = None;
         self.load_sheet_data();
+        self.load_session_work_inputs(window, cx);
         let weak = cx.weak_entity();
         let close_weak = weak.clone();
         window.open_sheet(cx, move |sheet, _window, cx| {
@@ -177,26 +181,250 @@ impl Console {
                 cx,
                 self.t("sess.snapshot"),
                 session.constraint_snapshot.snapshot_hash.clone(),
-            ))
-            .child(ui::kv(
-                cx,
-                self.t("sess.goal_label"),
-                if session.goal.is_empty() {
-                    self.t("sess.goal_empty").to_string()
+            ));
+
+        let border = cx.theme().border;
+        let actions = h_flex()
+            .gap_1()
+            .flex_wrap()
+            .items_center()
+            .child(
+                if matches!(
+                    session.status,
+                    SessionStatus::Completed | SessionStatus::Failed
+                ) {
+                    Button::new("session-reopen")
+                        .label(self.t("sess.reopen"))
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.set_selected_session_status(SessionStatus::Active, cx) {
+                                let msg = this.t("sess.reopened_toast").to_string();
+                                this.notify(window, cx, &msg);
+                            }
+                            cx.notify();
+                        }))
                 } else {
-                    session.goal.clone()
+                    Button::new("session-complete")
+                        .label(self.t("sess.complete"))
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.set_selected_session_status(SessionStatus::Completed, cx) {
+                                let msg = this.t("sess.completed_toast").to_string();
+                                this.notify(window, cx, &msg);
+                            }
+                            cx.notify();
+                        }))
                 },
-            ))
-            .children(session.work_items.iter().map(|w| {
+            )
+            .child(
+                Button::new("session-verify-constraints")
+                    .label(self.t("sess.verify_constraints"))
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some((verified, advisory)) =
+                            this.verify_selected_session_constraints(cx)
+                        {
+                            let msg = this.tr(
+                                "sess.verified_toast",
+                                &[&verified.to_string(), &advisory.to_string()],
+                            );
+                            this.notify(window, cx, &msg);
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("session-delete")
+                    .label(self.t("sess.delete"))
+                    .danger()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.confirm_delete_session(window, cx);
+                    })),
+            );
+
+        let binding = v_flex()
+            .gap_1()
+            .child(ui::section_label(cx, self.t("sess.binding_title")))
+            .children(session.constraint_snapshot.rules.iter().map(|rule| {
+                let scope_tag = match rule.scope {
+                    Scope::User => Tag::primary().child(self.t("scope.user.tag")),
+                    Scope::Project => Tag::warning().child(self.t("scope.project.tag")),
+                    Scope::Session => Tag::info().child(self.t("scope.session.tag")),
+                    Scope::Environment => Tag::secondary().child(self.t("scope.environment.tag")),
+                };
                 h_flex()
-                    .gap_1()
+                    .gap_2()
                     .items_center()
-                    .child(ui::work_status_tag(w.status, self.locale))
-                    .child(div().text_sm().child(w.title.clone()))
+                    .child(scope_tag)
+                    .child(div().text_sm().child(rule.title.clone()))
                     .into_any_element()
             }));
 
-        let border = cx.theme().border;
+        let work_editor = v_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                Textarea::new(&self.session_goal_input)
+                    .w_full()
+                    .h(px(56.))
+                    .aria_label(self.t("sess.goal_label")),
+            )
+            .child(
+                Textarea::new(&self.session_work_input)
+                    .w_full()
+                    .h(px(120.))
+                    .aria_label(self.t("sess.work_title")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(self.t("sess.work_hint")),
+            )
+            .child(
+                Button::new("session-work-save")
+                    .label(self.t("sess.work_save"))
+                    .primary()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.save_session_work_state(window, cx) {
+                            let msg = this.t("sess.work_saved_toast").to_string();
+                            this.notify(window, cx, &msg);
+                        }
+                        cx.notify();
+                    })),
+            );
+        let work = v_flex()
+            .gap_2()
+            .child(ui::section_label(cx, self.t("sess.work_title")))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(self.tr("sess.work_updated", &[&local_time(session.updated_at)])),
+            )
+            .child(if session.goal.is_empty() {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(self.t("sess.goal_empty"))
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(self.t("sess.goal_label")),
+                    )
+                    .child(div().text_sm().child(session.goal.clone()))
+                    .into_any_element()
+            })
+            .child(if session.work_items.is_empty() {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(self.t("sess.work_empty"))
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .gap_1()
+                    .children(session.work_items.iter().map(|item| {
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(ui::work_status_tag(item.status, self.locale))
+                            .child(div().text_sm().child(item.title.clone()))
+                            .into_any_element()
+                    }))
+                    .into_any_element()
+            })
+            .child(ui::disclosure(
+                "sess-work-edit",
+                self.t("sess.work_edit"),
+                self.open_sections.contains("sess-work-edit"),
+                work_editor,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_section("sess-work-edit", cx);
+                }),
+            ));
+
+        let assurance = v_flex()
+            .gap_2()
+            .child(ui::section_label(cx, self.t("sess.assurance_title")))
+            .child(if session.assurance.is_empty() {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(self.t("sess.assurance_empty"))
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .gap_1()
+                    .children(session.assurance.iter().map(|a| {
+                        let tier_tag = match a.achieved {
+                            AssuranceTier::Advisory => {
+                                Tag::secondary().child(self.t("tier.advisory"))
+                            }
+                            AssuranceTier::Verified => {
+                                Tag::success().child(self.t("tier.verified"))
+                            }
+                            AssuranceTier::Enforced => {
+                                Tag::primary().child(self.t("tier.enforced"))
+                            }
+                        };
+                        v_flex()
+                            .p_2()
+                            .gap_1()
+                            .border_1()
+                            .border_color(border)
+                            .rounded_sm()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(tier_tag)
+                                    .child(div().text_sm().child(a.rule_id.clone())),
+                            )
+                            .child(div().text_xs().text_color(muted).child(a.basis.clone()))
+                            .into_any_element()
+                    }))
+                    .into_any_element()
+            });
+
+        let snapshot_short = session.constraint_snapshot.snapshot_hash
+            [..16.min(session.constraint_snapshot.snapshot_hash.len())]
+            .to_string();
+        let verification = ui::disclosure(
+            "sess-verification",
+            self.t("sess.verification_title"),
+            self.open_sections.contains("sess-verification"),
+            v_flex()
+                .gap_1()
+                .child(ui::mono(
+                    cx,
+                    self.tr(
+                        "sess.snapshot",
+                        &[
+                            &snapshot_short,
+                            &session.constraint_snapshot.provenance_id.to_string(),
+                        ],
+                    ),
+                ))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(self.t("sess.verification_hint")),
+                ),
+            cx.listener(|this, _, _, cx| {
+                this.toggle_section("sess-verification", cx);
+            }),
+        );
+
         let chain_badge = || {
             if data.chain.valid {
                 Tag::success().child(self.t("ev.valid"))
@@ -546,9 +774,14 @@ impl Console {
             .gap_4()
             .p_4()
             .child(overview)
+            .child(actions)
+            .child(binding)
+            .child(work)
+            .child(assurance)
             .child(timeline)
             .child(handoffs)
             .child(provenance)
             .child(evidence)
+            .child(verification)
     }
 }

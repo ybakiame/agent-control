@@ -228,6 +228,29 @@ pub fn display_title(session: &agent_control_core::model::Session) -> String {
     }
 }
 
+/// Session list kind (UX1/UX8): hook telemetry vs continuity threads vs plain work.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    All,
+    Work,
+    Continuity,
+    Telemetry,
+}
+
+pub fn session_kind(session: &agent_control_core::model::Session) -> SessionKind {
+    use agent_control_core::model::SessionStatus;
+    if session.task == "hook" {
+        SessionKind::Telemetry
+    } else if !session.handoffs.is_empty()
+        || session.predecessor.is_some()
+        || session.status == SessionStatus::HandedOff
+    {
+        SessionKind::Continuity
+    } else {
+        SessionKind::Work
+    }
+}
+
 /// Timeline icon + tint per evidence kind (session Sheet spine).
 pub fn kind_visual(cx: &App, kind: agent_control_core::model::EvidenceKind) -> (IconName, Hsla) {
     use agent_control_core::model::EvidenceKind;

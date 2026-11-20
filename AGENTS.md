@@ -619,15 +619,20 @@ and owns the `Store`. Nav groups (UX4): **Workspace** = Dashboard, Projects, Ses
 (the core destination, kept primary-tinted even when unselected), Suggestions; **Contracts** =
 Project Contracts, Personal Preferences, Work Environment; **System** = Settings.
 
-**Per-session Sheet (UX2)** (`views/session_sheet.rs`): the session row's **Details** button opens a
-gpui-kit `Sheet` (`window.open_sheet`, 620px) with five sections — overview (task, status + agent,
-derived ownership chain, project, timestamps, snapshot, goal + work items), **timeline** (UX3:
+**Per-session Sheet (UX2/UX8)** (`views/session_sheet.rs`): clicking a session card (or its row menu)
+opens a gpui-kit `Sheet` (`window.open_sheet`, 620px) carrying **all** session detail and actions —
+overview (task, status + agent, derived ownership chain, project, timestamps, snapshot), an action
+row (**Mark completed** / **Reopen**, **Verify constraints**, danger **Delete session**; rename sits
+in the Sheet header), binding constraints, work state (goal + done/doing/todo + editor disclosure),
+achieved assurance, **timeline** (UX3:
 day-grouped vertical spine over the evidence chain, per-kind icon + tint via `ui::kind_visual`,
 ownership-flip markers on `ownership_change`/`handoff_in`, click a node to expand its payload JSON;
-default milestone-only, the **Show telemetry** Switch admits `tool_gate` noise), handoffs (ack /
-superseded / pending-ack tags), provenance (`Store::provenance_for_session`: linked rows plus legacy
-NULL-session rows matched by agent + time window, tagged `legacy`) and the evidence chain
-(integrity tag + entry count + rows). `SheetData` is loaded once on open and on `refresh_data`, never
+default milestone-only, the **Show telemetry** Switch admits `tool_gate` noise), handoffs (export
+button + bundle/brief paths, latest highlighted, superseded collapsed), provenance
+(`Store::provenance_for_session`: linked rows plus legacy
+NULL-session rows matched by agent + time window, tagged `legacy`), the evidence chain
+(integrity tag + entry count + rows) and a verification-details disclosure. `SheetData` is loaded
+once on open and on `refresh_data`, never
 at render time; the former Provenance/Evidence views and the Verify nav group are gone —
 cross-session chain integrity lives in the Dashboard **Chain integrity** stat card
 (`Console::chain_stats`) and `doctor`.
@@ -725,15 +730,15 @@ status + kind tags; the approve button label, edit hint and success toast are sc
 read-only with status, review note and `approved_rule_id`. `refresh_data` reloads the queue + pending
 count and repairs a dangling selection.
 
-**Sessions lifecycle, work state & deletion** (`views/sessions.rs`): the list is **grouped by
-project** (UX1) with a per-group count; each row carries a kind tag — `telemetry` (task `hook`),
-`continuity` (has handoffs / a predecessor / handed off) or `work` — plus the derived agent-ownership
-chain (`Console::session_owners`, from `ownership_timeline`, precomputed in `refresh_data`) and a
-`continues <id>` line when `predecessor` links a chain split. The selected-session detail keeps the
-snapshot summary, binding constraints, achieved assurance and handoffs in the open, and collapses the rest.
-The header carries a **Mark completed** / **Reopen** button (`set_selected_session_status` →
-`Store::set_session_status`, toast feedback) beside the danger **Delete session** button; the list
-header has a **Show completed** Switch (`Console.session_show_completed`, default off) that hides
+**Sessions lifecycle, work state & deletion** (`views/sessions.rs`): the list is a **full-width
+compact card list** (UX8) **grouped by project** (UX1) with a per-group count; each card shows only
+key info — title (UX7), status tag, kind tag (`telemetry` for task `hook`, `continuity` for handoffs /
+predecessor / handed off, else `work`), and a meta line (ownership chain or current owner · project ·
+rule count · updated-at) plus a `continues <id>` line when `predecessor` links a chain split.
+Clicking a card opens the per-session Sheet, which carries **all** detail and actions; there is no
+persistent right detail pane. The list header keeps the **Show completed** Switch
+(`Console.session_show_completed`, default off) and a **kind filter**
+(`Console.session_kind_filter`, `ui::SessionKind` All/Work/Continuity/Telemetry) that hides
 Completed/Failed rows so finished work leaves the active list. There is **no manual create panel**
 (UX6): sessions arrive from agent activity via MCP/hooks, and humans label them with rename (UX7).
 The handoff cluster lives in the per-session **Sheet** (UX6): an **Export bundle** button

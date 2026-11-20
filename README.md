@@ -65,7 +65,9 @@ delivered into the tools agents already read.
   system (violet accent, card surfaces, grouped icon sidebar, status bar). Self-rendered title bar
   (no OS chrome), eight nav destinations: Dashboard, **Projects**, Personal Preferences,
   Project Contracts, Work Environment, **Suggestions**, Sessions & Continuity, Settings.
-  Each session row opens a **detail Sheet** (overview, timeline, handoffs, provenance, evidence chain).
+  Each session appears as a compact card (title, status, kind, owner, project, rule count,
+  updated-at); clicking it opens a **detail Sheet** carrying everything — overview, actions,
+  binding constraints, work state, assurance, timeline, handoffs, provenance, evidence chain.
 - **Project registry + guided onboarding.** Projects are first-class: register a repo once
   (browse for its folder, give it a name), and the console scaffolds a bilingual contract guide
   under `<project>/.agent-control/`. A **tree view** organizes each project's contracts, sessions

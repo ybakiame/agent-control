@@ -108,6 +108,7 @@ pub struct Console {
     pub rename_target: Option<Uuid>,
     pub selected_agent: usize,
     pub session_show_completed: bool,
+    pub session_kind_filter: crate::ui::SessionKind,
     pub session_owners: std::collections::HashMap<Uuid, Vec<String>>,
     pub session_goal_input: Entity<TextareaState>,
     pub session_work_input: Entity<TextareaState>,
@@ -218,6 +219,7 @@ impl Console {
             rename_target: None,
             selected_agent: 0,
             session_show_completed: false,
+            session_kind_filter: crate::ui::SessionKind::All,
             session_owners: std::collections::HashMap::new(),
             session_goal_input,
             session_work_input,
@@ -302,6 +304,18 @@ impl Console {
 
     pub fn current_project_path(&self) -> Option<PathBuf> {
         self.current_project().map(|p| p.path.clone())
+    }
+
+    pub fn project_display_name(&self, path: &std::path::Path) -> String {
+        self.projects
+            .iter()
+            .find(|p| p.path == path)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string_lossy().to_string())
+            })
     }
 
     pub fn refresh_data(&mut self, cx: &mut App) {
