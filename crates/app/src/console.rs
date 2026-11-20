@@ -44,6 +44,15 @@ pub struct LogEntry {
     pub text: String,
 }
 
+/// UX12 Sheet panes: overview keeps the decision surface, activity is the full-height evidence
+/// timeline, history is the dedicated constraint/snapshot thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetTab {
+    Overview,
+    Activity,
+    History,
+}
+
 pub struct Console {
     pub store: Arc<Store>,
     pub runtime: Arc<tokio::runtime::Runtime>,
@@ -116,6 +125,11 @@ pub struct Console {
     pub sheet_data: Option<crate::views::session_sheet::SheetData>,
     pub sheet_payload: Option<Uuid>,
     pub sheet_show_telemetry: bool,
+    pub sheet_tab: SheetTab,
+    pub sheet_kind_filter: Option<&'static str>,
+    pub sheet_cap: usize,
+    pub sheet_live_rules: Option<Vec<agent_control_core::model::Rule>>,
+    pub sheet_work_version: u64,
     pub chain_stats: (usize, usize),
 }
 
@@ -227,6 +241,11 @@ impl Console {
             sheet_data: None,
             sheet_payload: None,
             sheet_show_telemetry: false,
+            sheet_tab: SheetTab::Overview,
+            sheet_kind_filter: None,
+            sheet_cap: 100,
+            sheet_live_rules: None,
+            sheet_work_version: 0,
             chain_stats: (0, 0),
         };
         console.refresh_data(cx);
@@ -385,6 +404,7 @@ impl Console {
         self.chain_stats = (valid, broken);
         if self.sheet_session.is_some() {
             self.load_sheet_data();
+            self.load_sheet_live_rules();
         }
     }
 
@@ -1132,7 +1152,7 @@ impl Console {
             .find(|s| s.id == session_id)
             .map(|s| serde_json::json!({ "summary": crate::ui::display_title(s), "exported_from": "console" }))
             .unwrap_or_else(|| serde_json::json!({ "exported_from": "console" }));
-        match self.store.export_handoff(session_id, None, context) {
+        match self.store.export_handoff(session_id, None, context, false) {
             Ok(bundle) => {
                 self.log(self.tr(
                     "log.handoff_exported",
@@ -1185,12 +1205,61 @@ impl Console {
     }
 
     /// Mirror the selected session's goal + work items into the editor textareas (empty when none).
+    /// SNAP1: the LIVE effective rule set for the sheet's project+agent, resolved purely (no
+    /// provenance write) and cached here — never resolved at render time.
+    pub fn load_sheet_live_rules(&mut self) {
+        self.sheet_live_rules = self.sheet_session.and_then(|id| {
+            let session = self.sessions.iter().find(|s| s.id == id)?;
+            let ctx = agent_control_core::model::QueryContext {
+                project_path: session.project_path.clone(),
+                agent_id: session.agent_id.clone(),
+                file_paths: vec![],
+                languages: vec![],
+                task_tags: vec![],
+                session_id: Some(id),
+            };
+            let rules = self.store.load_rules(Some(&session.project_path)).ok()?;
+            let (_, resolution) = agent_control_core::RuleEngine::provenance(&rules, &ctx);
+            Some(
+                resolution
+                    .applied
+                    .iter()
+                    .filter(|m| m.decision == agent_control_core::model::Decision::Applied)
+                    .map(|m| m.rule.clone())
+                    .collect(),
+            )
+        });
+    }
+
+    /// SNAP1 re-freeze from the GUI: adopt the live set, then reload sheet + live cache.
+    pub fn refresh_session_snapshot(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.sheet_session else {
+            return;
+        };
+        match self.store.refresh_snapshot(id, "console") {
+            Ok(_) => {
+                self.load_sheet_data();
+                self.load_sheet_live_rules();
+                self.refresh_data(cx);
+            }
+            Err(err) => self.log(err.to_string()),
+        }
+        cx.notify();
+    }
+
     pub fn load_session_work_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (goal, work) = self
+        let (goal, work, version) = self
             .selected_session
             .and_then(|id| self.sessions.iter().find(|s| s.id == id))
-            .map(|s| (s.goal.clone(), format_work_items(&s.work_items)))
+            .map(|s| {
+                (
+                    s.goal.clone(),
+                    format_work_items(&s.work_items),
+                    s.work_state_version,
+                )
+            })
             .unwrap_or_default();
+        self.sheet_work_version = version;
         self.session_goal_input
             .update(cx, |state, cx| state.set_value(goal, window, cx));
         self.session_work_input
@@ -1206,11 +1275,15 @@ impl Console {
         let goal = self.session_goal_input.read(cx).value().trim().to_string();
         let work_text = self.session_work_input.read(cx).value().to_string();
         let work_items = parse_work_items(&work_text);
-        match self
-            .store
-            .set_session_work_state(session_id, goal, work_items, "console")
-        {
+        match self.store.set_session_work_state(
+            session_id,
+            goal,
+            work_items,
+            "console",
+            Some(self.sheet_work_version),
+        ) {
             Ok(session) => {
+                self.sheet_work_version = session.work_state_version;
                 self.log(self.tr(
                     "log.work_state_saved",
                     &[&session.work_items.len().to_string()],

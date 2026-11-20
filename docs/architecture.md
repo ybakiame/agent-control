@@ -308,19 +308,24 @@ and owns the `Store`. Nav groups (UX4): **Workspace** = Dashboard, Projects, Ses
 (the core destination, kept primary-tinted even when unselected), Suggestions; **Contracts** =
 Project Contracts, Personal Preferences, Work Environment; **System** = Settings.
 
-**Per-session Sheet (UX2/UX8)** (`views/session_sheet.rs`): clicking a session card (or its row menu)
-opens a gpui-kit `Sheet` (`window.open_sheet`, 620px) carrying **all** session detail and actions —
-overview (task, status + agent, derived ownership chain, project, timestamps, snapshot), an action
-row (**Mark completed** / **Reopen**, **Verify constraints**, danger **Delete session**; rename sits
-in the Sheet header), binding constraints, work state (goal + done/doing/todo + editor disclosure),
-achieved assurance, **timeline** (UX3:
-day-grouped vertical spine over the evidence chain, per-kind icon + tint via `ui::kind_visual`,
-ownership-flip markers on `ownership_change`/`handoff_in`, click a node to expand its payload JSON;
-default milestone-only, the **Show telemetry** Switch admits `tool_gate` noise), handoffs (export
-button + bundle/brief paths, latest highlighted, superseded collapsed), provenance
-(`Store::provenance_for_session`: linked rows plus legacy
-NULL-session rows matched by agent + time window, tagged `legacy`), the evidence chain
-(integrity tag + entry count + rows) and a verification-details disclosure. `SheetData` is loaded
+**Per-session Sheet (UX2/UX8/UX11/UX12/SNAP1)** (`views/session_sheet.rs`): clicking a session card
+(or its row menu) opens a gpui-kit `Sheet` (`window.open_sheet`, 620px) with three tabs (UX12):
+**Overview** — overview (task, status + agent, derived ownership chain, project, timestamps,
+snapshot), action row (**Mark completed** / **Reopen**, **Verify constraints**, danger **Delete
+session**; rename in the header), the **Current effective set** (SNAP1: live `get_applicable_rules`
+resolution for project+agent, cached on open/refresh, with a +new/-removed/changed delta badge
+against the frozen snapshot, a **Re-freeze snapshot** button calling `Store::refresh_snapshot`, and
+the frozen-at-create snapshot demoted to a referenced baseline disclosure), work state (goal +
+done/doing/todo + editor disclosure, saved with the CONC1 `work_state_version` CAS), achieved
+assurance, handoffs (export button + bundle/brief paths, latest highlighted, superseded collapsed),
+provenance and verification details; **Activity** — the full-height evidence timeline, newest-first,
+kind filter chips (all/gate/tool/test/handoff/ack/status/work) with collapsible per-kind groups,
+click-to-expand payloads, a 100-entry lazy cap with **Load more**, milestone-only default for
+work/continuity (the **Show telemetry** Switch admits `tool_gate`); **Constraint history** — the
+dedicated freeze / `snapshot_refresh` / handoff-carry thread. Telemetry sessions (UX11, task `hook`)
+get the reduced template: overview + gate/audit Activity (gate filter preselected) + integrity;
+work-state editor, handoff export and verify actions are absent, and the model rejects work state /
+handoff export for them outright. `SheetData` and the live rule cache are loaded
 once on open and on `refresh_data`, never
 at render time; the former Provenance/Evidence views and the Verify nav group are gone —
 cross-session chain integrity lives in the Dashboard **Chain integrity** stat card

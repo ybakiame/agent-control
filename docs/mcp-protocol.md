@@ -71,9 +71,13 @@ across projects.
 `list_suggestions` reads the queue (`pending|approved|rejected`) plus a pending count. Prefer
 `suggest_rule` when a human should sign off first, `save_rule` when the rule is confident knowledge.
 `update_work_state` (`session_id`, optional `goal`, optional `work_items[]` of `{title, status}` with
-`status` = `done|doing|todo`, default `todo`) records the session's resumable **work state** via
-`Store::set_session_work_state` — the `/goal` objective plus done/doing/todo progress. It **replaces**
-the session's goal + items and returns the updated session. `export_handoff` carries them into the
+`status` = `done|doing|todo`, default `todo`, optional `expected_version`) records the session's
+resumable **work state** via `Store::set_session_work_state` — the `/goal` objective plus
+done/doing/todo progress. It **replaces** the session's goal + items and returns the updated session
+(including `work_state_version`). CONC1: pass `expected_version` (the version you read) for
+optimistic concurrency — a stale value is a conflict error carrying the current version, so
+concurrent planners/implementers retry instead of clobbering; omitted keeps unconditional replace.
+Telemetry sessions (task `hook`, UX11) reject work state outright. `export_handoff` carries them into the
 bundle and `handoff/latest.md` (a **Goal** + **Work state** section), and `import_handoff` /
 `get_session_context` surface them, so a new harness inherits progress instead of relying on its own
 todo list. Call it as work completes/starts and before handing off.
@@ -181,7 +185,9 @@ Recommended harness call order:
 8. `verify_evidence` — recompute the chain, detect tampering.
 9. `set_session_status` — `completed`/`failed` when the unit of work ends (appends `session_end`
    evidence, keeps the chain auditable, leaves the active list); `active` reopens. `handed_off` is
-   set only by `export_handoff`.
+   set only by `export_handoff`. `non_owner: true` (CONC1) refreshes bundle + brief without flipping
+   status or superseding the owner's pending bundle; telemetry sessions reject export (UX11).
+   `refresh_snapshot` (SNAP1) re-freezes a long-lived session from the live rule set.
 
 When adding a tool: implement the handler in `crates/mcp/src/lib.rs` with the rmcp `#[tool]`
 macro, keep it a thin adapter over `Store`/`RuleEngine` (no business logic in the transport

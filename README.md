@@ -66,8 +66,11 @@ delivered into the tools agents already read.
   (no OS chrome), eight nav destinations: Dashboard, **Projects**, Personal Preferences,
   Project Contracts, Work Environment, **Suggestions**, Sessions & Continuity, Settings.
   Each session appears as a compact card (title, status, kind, owner, project, rule count,
-  updated-at); clicking it opens a **detail Sheet** carrying everything — overview, actions,
-  binding constraints, work state, assurance, timeline, handoffs, provenance, evidence chain.
+  updated-at); clicking it opens a **detail Sheet** with three tabs — Overview (actions, the live
+  current-effective rule set with a delta badge vs the frozen snapshot and a re-freeze action, work
+  state, assurance, handoffs, provenance), Activity (newest-first evidence timeline with kind filter
+  chips and collapsible groups) and Constraint history. Telemetry (hook) sessions get a reduced
+  gate/audit-only template.
 - **Project registry + guided onboarding.** Projects are first-class: register a repo once
   (browse for its folder, give it a name), and the console scaffolds a bilingual contract guide
   under `<project>/.agent-control/`. A **tree view** organizes each project's contracts, sessions

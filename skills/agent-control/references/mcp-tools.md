@@ -78,6 +78,10 @@ next harness's own todo list.
 - `agent_id` (string, optional) — the **acting** identity recorded in the `work_state_update`
   evidence entry; defaults to the session owner. Every work-state edit leaves an attributable,
   hash-chained trail.
+- `expected_version` (int, optional) — CONC1 optimistic concurrency: the `work_state_version` this
+  edit was prepared against. A mismatch is an `isError` conflict carrying the current version;
+  re-read (`get_session_context`) and retry. Omitted = unconditional replace (still bumps version).
+- Telemetry sessions (task `hook`) are rejected (UX11): they carry gate/audit records only.
 - Returns the updated `session` (including `goal` and `work_items[]`). Call it as work completes or
   starts, and before `export_handoff`; the goal + items then ride into the bundle and `latest.md`.
 
@@ -100,7 +104,9 @@ Produce a bundle to transfer the session to another harness.
 - `session_id` (UUID string, required), `to_agent` (string, **optional**) — a receiver hint recorded
   in the handoff history; the real receiver chooses itself at `import_handoff` (`new_agent`), so
   omit it when unknown. `context` (object, default `{}`) — carry-over summary (conversation state,
-  files touched, decisions).
+  files touched, decisions). `non_owner` (bool, default `false`) — CONC1 planner mode: write bundle +
+  brief WITHOUT flipping status to `handed_off` or superseding the owner's pending bundle.
+  Telemetry sessions (task `hook`) are rejected in both modes (UX11).
 - Returns the bundle (includes `bundle_hash`, frozen constraints, evidence head, the source
   session's achieved `assurance[]` tiers as a baseline, and the session's `goal` + `work_items[]`).
 - **Dual write.** Besides the JSON bundle at `<data root>/bundles/<session_id>.json`, it also writes a
