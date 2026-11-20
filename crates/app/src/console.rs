@@ -111,6 +111,7 @@ pub struct Console {
     pub session_work_input: Entity<TextareaState>,
     pub sheet_session: Option<Uuid>,
     pub sheet_data: Option<crate::views::session_sheet::SheetData>,
+    pub sheet_payload: Option<Uuid>,
     pub sheet_show_telemetry: bool,
     pub chain_stats: (usize, usize),
 }
@@ -218,6 +219,7 @@ impl Console {
             session_work_input,
             sheet_session: None,
             sheet_data: None,
+            sheet_payload: None,
             sheet_show_telemetry: false,
             chain_stats: (0, 0),
         };

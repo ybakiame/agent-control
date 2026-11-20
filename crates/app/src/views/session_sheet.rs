@@ -3,7 +3,9 @@ use agent_control_core::model::{
 };
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, Sizable, StyledExt, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, Sizable, StyledExt, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -57,6 +59,7 @@ impl Console {
 
     pub fn open_session_sheet(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         self.sheet_session = Some(id);
+        self.sheet_payload = None;
         self.load_sheet_data();
         let weak = cx.weak_entity();
         let close_weak = weak.clone();
@@ -81,6 +84,7 @@ impl Console {
     pub fn close_session_sheet(&mut self, cx: &mut Context<Self>) {
         self.sheet_session = None;
         self.sheet_data = None;
+        self.sheet_payload = None;
         cx.notify();
     }
 
@@ -171,6 +175,161 @@ impl Console {
                     .into_any_element()
             }));
 
+        let border = cx.theme().border;
+        let chain_badge = || {
+            if data.chain.valid {
+                Tag::success().child(self.t("ev.valid"))
+            } else {
+                Tag::danger().child(self.t("ev.broken"))
+            }
+        };
+        let telemetry_switch = Switch::new("sheet-telemetry")
+            .checked(self.sheet_show_telemetry)
+            .accessibility_label(self.t("sheet.telemetry"))
+            .xsmall()
+            .on_click(cx.listener(|this, checked, _, cx| {
+                this.sheet_show_telemetry = *checked;
+                cx.notify();
+            }));
+        let milestones: Vec<&EvidenceEntry> = data
+            .evidence
+            .iter()
+            .filter(|e| self.sheet_show_telemetry || e.kind != EvidenceKind::ToolGate)
+            .collect();
+        let mut timeline_nodes: Vec<AnyElement> = Vec::new();
+        let mut last_day = String::new();
+        for (i, e) in milestones.iter().enumerate() {
+            let day = e
+                .timestamp
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string();
+            if day != last_day {
+                timeline_nodes.push(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(day.clone())
+                        .into_any_element(),
+                );
+                last_day = day;
+            }
+            let (icon, tint) = ui::kind_visual(cx, e.kind);
+            let eid = e.id;
+            let expanded = self.sheet_payload == Some(eid);
+            let flip = match e.kind {
+                EvidenceKind::OwnershipChange | EvidenceKind::HandoffIn => {
+                    let from = e
+                        .payload
+                        .get("from")
+                        .or_else(|| e.payload.get("from_agent"))
+                        .and_then(|v| v.as_str());
+                    let to = e
+                        .payload
+                        .get("to")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&e.agent_id);
+                    from.map(|f| format!("{f} → {to}"))
+                }
+                _ => None,
+            };
+            let kind_label = serde_json::to_value(e.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "event".to_string());
+            let row = h_flex()
+                .gap_2()
+                .items_start()
+                .child(
+                    v_flex()
+                        .items_center()
+                        .w(px(16.))
+                        .gap_1()
+                        .child(Icon::new(icon).size(px(14.)).text_color(tint))
+                        .when(i + 1 < milestones.len(), |this| {
+                            this.child(div().w(px(1.)).h(px(14.)).bg(border))
+                        }),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .flex_wrap()
+                                .child(ui::kind_tag(e.kind))
+                                .child(Tag::secondary().child(e.agent_id.clone()))
+                                .children(flip.map(|f| div().text_xs().text_color(tint).child(f)))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(local_time(e.timestamp)),
+                                ),
+                        )
+                        .when(expanded, |this| {
+                            this.child(
+                                div()
+                                    .p_2()
+                                    .border_1()
+                                    .border_color(border)
+                                    .rounded_md()
+                                    .bg(cx.theme().group_box)
+                                    .child(ui::mono(
+                                        cx,
+                                        serde_json::to_string_pretty(&e.payload)
+                                            .unwrap_or_default(),
+                                    )),
+                            )
+                        }),
+                );
+            timeline_nodes.push(
+                div()
+                    .id(format!("tl-{eid}"))
+                    .role(Role::Button)
+                    .aria_label(format!("#{seq} {kind_label}", seq = e.seq))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sheet_payload = if this.sheet_payload == Some(eid) {
+                            None
+                        } else {
+                            Some(eid)
+                        };
+                        cx.notify();
+                    }))
+                    .child(row)
+                    .into_any_element(),
+            );
+        }
+        let timeline = v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(ui::section_label(cx, self.t("sheet.timeline")))
+                    .child(chain_badge())
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(self.t("sheet.telemetry")),
+                    )
+                    .child(telemetry_switch),
+            )
+            .children(timeline_nodes)
+            .when(milestones.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(self.t("sheet.no_events")),
+                )
+            });
+
         let handoff_rows = session.handoffs.iter().map(|h| {
             let tag = if h.acknowledged {
                 Tag::success().child(self.t("sess.ack"))
@@ -251,11 +410,7 @@ impl Console {
                 )
             });
 
-        let chain_tag = if data.chain.valid {
-            Tag::success().child(self.t("ev.valid"))
-        } else {
-            Tag::danger().child(self.t("ev.broken"))
-        };
+        let chain_tag = chain_badge();
         let evidence_rows = data
             .evidence
             .iter()
@@ -275,14 +430,6 @@ impl Console {
                     )
                     .into_any_element()
             });
-        let telemetry_switch = Switch::new("sheet-telemetry")
-            .checked(self.sheet_show_telemetry)
-            .accessibility_label(self.t("sheet.telemetry"))
-            .xsmall()
-            .on_click(cx.listener(|this, checked, _, cx| {
-                this.sheet_show_telemetry = *checked;
-                cx.notify();
-            }));
         let evidence =
             v_flex()
                 .gap_1()
@@ -294,15 +441,7 @@ impl Console {
                         .child(chain_tag)
                         .child(div().text_xs().text_color(muted).child(
                             self.tr("ev.entries", &[&data.chain.entries_checked.to_string()]),
-                        ))
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(self.t("sheet.telemetry")),
-                        )
-                        .child(telemetry_switch),
+                        )),
                 )
                 .children(evidence_rows);
 
@@ -310,6 +449,7 @@ impl Console {
             .gap_4()
             .p_4()
             .child(overview)
+            .child(timeline)
             .child(handoffs)
             .child(provenance)
             .child(evidence)

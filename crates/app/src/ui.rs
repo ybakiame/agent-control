@@ -217,3 +217,24 @@ pub fn kind_tag(kind: agent_control_core::model::EvidenceKind) -> gpui_kit::comp
         EvidenceKind::OwnershipChange => Tag::info().child("ownership_change"),
     }
 }
+
+/// Timeline icon + tint per evidence kind (session Sheet spine).
+pub fn kind_visual(cx: &App, kind: agent_control_core::model::EvidenceKind) -> (IconName, Hsla) {
+    use agent_control_core::model::EvidenceKind;
+    let t = cx.theme();
+    match kind {
+        EvidenceKind::SessionStart => (IconName::Play, t.success),
+        EvidenceKind::SessionEnd => (IconName::Square, t.muted_foreground),
+        EvidenceKind::RuleAcknowledgment => (IconName::Check, t.primary),
+        EvidenceKind::ToolCall => (IconName::SquareTerminal, t.muted_foreground),
+        EvidenceKind::ToolGate => (IconName::Square, t.warning),
+        EvidenceKind::FileChange => (IconName::File, t.warning),
+        EvidenceKind::TestResult => (IconName::Check, t.success),
+        EvidenceKind::HandoffOut => (IconName::ExternalLink, t.info),
+        EvidenceKind::HandoffIn => (IconName::Link, t.info),
+        EvidenceKind::ConstraintViolation => (IconName::TriangleAlert, t.danger),
+        EvidenceKind::WorkStateUpdate => (IconName::FileText, t.primary),
+        EvidenceKind::StatusChange => (IconName::RefreshCw, t.info),
+        EvidenceKind::OwnershipChange => (IconName::User, t.info),
+    }
+}

@@ -276,6 +276,12 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ),
     ("sheet.evidence", "Evidence chain", "证据链"),
     ("sheet.telemetry", "Show telemetry", "显示遥测"),
+    ("sheet.timeline", "Timeline", "时间线"),
+    (
+        "sheet.no_events",
+        "No milestone events yet",
+        "暂无里程碑事件",
+    ),
     ("sess.bundle", "bundle {}… · {}", "交接包 {}… · {}"),
     (
         "sess.empty",

@@ -608,14 +608,17 @@ Built on **gpui-kit 0.9** (`gpui-pre` + `gpui-component` + `gpui-base`; docs at
 and owns the `Store`.
 
 **Per-session Sheet (UX2)** (`views/session_sheet.rs`): the session row's **Details** button opens a
-gpui-kit `Sheet` (`window.open_sheet`, 620px) with four sections — overview (task, status + agent,
-derived ownership chain, project, timestamps, snapshot, goal + work items), handoffs (ack /
+gpui-kit `Sheet` (`window.open_sheet`, 620px) with five sections — overview (task, status + agent,
+derived ownership chain, project, timestamps, snapshot, goal + work items), **timeline** (UX3:
+day-grouped vertical spine over the evidence chain, per-kind icon + tint via `ui::kind_visual`,
+ownership-flip markers on `ownership_change`/`handoff_in`, click a node to expand its payload JSON;
+default milestone-only, the **Show telemetry** Switch admits `tool_gate` noise), handoffs (ack /
 superseded / pending-ack tags), provenance (`Store::provenance_for_session`: linked rows plus legacy
 NULL-session rows matched by agent + time window, tagged `legacy`) and the evidence chain
-(integrity tag + entry count + rows). A **Show telemetry** Switch (default off) collapses
-`tool_gate` noise. `SheetData` is loaded once on open and on `refresh_data`, never at render time;
-the former Provenance/Evidence views and the Verify nav group are gone — cross-session chain
-integrity lives in the Dashboard **Chain integrity** stat card (`Console::chain_stats`) and `doctor`.
+(integrity tag + entry count + rows). `SheetData` is loaded once on open and on `refresh_data`, never
+at render time; the former Provenance/Evidence views and the Verify nav group are gone —
+cross-session chain integrity lives in the Dashboard **Chain integrity** stat card
+(`Console::chain_stats`) and `doctor`.
 
 **Shared view helpers** (`crates/app/src/ui.rs`): reuse these instead of re-rolling surfaces —
 `card(cx)` (standard bordered `group_box` panel), `section_label(cx, text)` (heading with a brand
