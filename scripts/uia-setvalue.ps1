@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Name, [Parameter(Mandatory=$true)][string]$Value, [int]$Hwnd = 0)
+param([Parameter(Mandatory=$true)][string]$Name, [Parameter(Mandatory=$true)][string]$Value, [int]$Hwnd = 0, [switch]$Last)
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
@@ -13,6 +13,10 @@ $condName = New-Object System.Windows.Automation.PropertyCondition([System.Windo
 $condAid = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $Name)
 $cond = New-Object System.Windows.Automation.OrCondition($condName, $condAid)
 $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+if ($Last) {
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    if ($all.Count -gt 0) { $el = $all[$all.Count - 1] }
+}
 if ($null -eq $el) {
     Write-Output "NOT_FOUND: $Name"
     exit 1

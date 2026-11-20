@@ -299,6 +299,7 @@ impl Store {
             work_items: vec![],
             harness_session_id,
             predecessor,
+            title: String::new(),
         };
         self.db.upsert_session(&session)?;
         // The snapshot resolution ran before the session id existed; link its provenance now (UX2).
@@ -384,6 +385,28 @@ impl Store {
                 "work_items": session.work_items,
                 "harness_session_id": session.harness_session_id,
             }),
+        )?;
+        Ok(session)
+    }
+
+    /// Rename the human-facing title only (UX7). `task` stays the machine identity key for
+    /// get-or-create / hooks / bundles; the rename is audited with the acting identity.
+    pub fn set_session_title(
+        &self,
+        id: Uuid,
+        title: &str,
+        acting_agent_id: &str,
+    ) -> Result<Session> {
+        let mut session = self.db.get_session(id)?.context("session not found")?;
+        let from = session.title.clone();
+        session.title = title.trim().to_string();
+        session.updated_at = Utc::now();
+        self.db.upsert_session(&session)?;
+        self.db.append_evidence(
+            id,
+            EvidenceKind::SessionRename,
+            acting_agent_id,
+            serde_json::json!({ "from": from, "to": session.title }),
         )?;
         Ok(session)
     }
@@ -801,6 +824,7 @@ impl Store {
         let mut bundle = HandoffBundle {
             session_id,
             task: session.task.clone(),
+            title: session.title.clone(),
             project_path: session.project_path.clone(),
             constraint_snapshot: session.constraint_snapshot.clone(),
             assurance: session.assurance.clone(),
@@ -889,6 +913,7 @@ impl Store {
                 work_items: bundle.work_items.clone(),
                 harness_session_id: None,
                 predecessor: None,
+                title: bundle.title.clone(),
             },
         };
         let snapshot_hash = canonical_hash(

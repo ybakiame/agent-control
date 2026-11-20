@@ -1,6 +1,7 @@
 use agent_control_core::model::{
     EvidenceEntry, EvidenceKind, OwnershipSpan, ProvenanceRecord, Session, VerificationReport,
 };
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
@@ -92,7 +93,14 @@ impl Console {
         let title = h_flex()
             .gap_2()
             .items_center()
-            .child(div().font_medium().text_sm().child(self.t("sheet.title")))
+            .child(
+                div().font_medium().text_sm().child(
+                    self.sheet_data
+                        .as_ref()
+                        .map(|d| ui::display_title(&d.session))
+                        .unwrap_or_else(|| self.t("sheet.title").to_string()),
+                ),
+            )
             .child(
                 div()
                     .text_xs()
@@ -103,6 +111,18 @@ impl Console {
                             .map(|d| d.session.id.to_string()[..8].to_string())
                             .unwrap_or_default(),
                     ),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("sheet-rename")
+                    .label(self.t("sess.rename"))
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(id) = this.sheet_session {
+                            this.open_session_rename_dialog(id, window, cx);
+                        }
+                    })),
             )
             .into_any_element();
         (title, self.render_sheet_body(cx).into_any_element())

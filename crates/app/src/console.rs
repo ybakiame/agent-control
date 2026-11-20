@@ -105,6 +105,9 @@ pub struct Console {
     pub project_rename_input: Entity<InputState>,
 
     pub session_task_input: Entity<InputState>,
+    pub session_title_input: Entity<InputState>,
+    pub rename_input: Entity<InputState>,
+    pub rename_target: Option<Uuid>,
     pub selected_agent: usize,
     pub session_show_completed: bool,
     pub session_owners: std::collections::HashMap<Uuid, Vec<String>>,
@@ -143,6 +146,10 @@ impl Console {
         let project_tree = cx.new(|cx| TreeState::new(cx));
         let session_task_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.task")));
+        let session_title_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.session_title")));
+        let rename_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.session_title")));
         let session_goal_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder(i18n::t(locale, "ph.goal")));
         let session_work_input = cx
@@ -214,6 +221,9 @@ impl Console {
             project_name_input,
             project_rename_input,
             session_task_input,
+            session_title_input,
+            rename_input,
+            rename_target: None,
             selected_agent: 0,
             session_show_completed: false,
             session_owners: std::collections::HashMap::new(),
@@ -267,6 +277,12 @@ impl Console {
         });
         self.session_task_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.task"), window, cx)
+        });
+        self.session_title_input.update(cx, |s, cx| {
+            s.set_placeholder(i18n::t(locale, "ph.session_title"), window, cx)
+        });
+        self.rename_input.update(cx, |s, cx| {
+            s.set_placeholder(i18n::t(locale, "ph.session_title"), window, cx)
         });
         self.session_goal_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.goal"), window, cx)
@@ -1129,6 +1145,14 @@ impl Console {
             .create_session(&task, &project, &agent_id, vec![], None)
         {
             Ok((session, reused)) => {
+                let title = self.session_title_input.read(cx).value().trim().to_string();
+                if !title.is_empty() {
+                    if let Err(e) = self.store.set_session_title(session.id, &title, "console") {
+                        self.log(self.tr("log.rename_failed", &[&e.to_string()]));
+                    }
+                    self.session_title_input
+                        .update(cx, |s, cx| s.set_value("", window, cx));
+                }
                 self.log(self.tr(
                     "log.session_created",
                     &[
@@ -1305,6 +1329,69 @@ impl Console {
                     true
                 })
         });
+    }
+
+    pub fn open_session_rename_dialog(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.rename_target = Some(id);
+        let current = self
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
+        self.rename_input
+            .update(cx, |s, cx| s.set_value(&current, window, cx));
+        let title = self.t("sess.rename_title").to_string();
+        let save = self.t("common.save").to_string();
+        let cancel = self.t("common.cancel").to_string();
+        let weak = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let Some(console) = weak.upgrade() else {
+                return dialog.title(title.clone());
+            };
+            let input = console.update(cx, |this, _| {
+                Input::new(&this.rename_input).id("session-rename-input")
+            });
+            let save_weak = weak.clone();
+            let save_label = save.clone();
+            let cancel_label = cancel.clone();
+            dialog
+                .title(title.clone())
+                .child(input)
+                .width(px(420.))
+                .centered()
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().trigger(move |b| b.label(cancel_label.clone())))
+                        .child(
+                            Button::new("session-rename-save")
+                                .label(save_label.clone())
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    if let Some(c) = save_weak.upgrade() {
+                                        c.update(cx, |this, ccx| this.save_session_rename(window, ccx));
+                                    }
+                                }),
+                        ),
+                )
+        })
+    }
+
+    pub fn save_session_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.rename_target else {
+            return;
+        };
+        let title = self.rename_input.read(cx).value().trim().to_string();
+        match self.store.set_session_title(id, &title, "console") {
+            Ok(_) => {
+                self.notify(window, cx, self.t("sess.rename_toast"));
+                self.refresh_data(cx);
+                window.close_dialog(cx);
+            }
+            Err(e) => self.log(self.tr("log.rename_failed", &[&e.to_string()])),
+        }
+        self.rename_target = None;
+        cx.notify();
     }
 
     pub fn resolve_conflicts_for_project(&mut self, cx: &mut Context<Self>) {

@@ -245,6 +245,16 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "Superseded handoffs ({})",
         "已取代的交接（{}）",
     ),
+    ("sess.rename", "Rename", "重命名"),
+    ("sess.rename_title", "Rename session", "重命名会话"),
+    ("sess.rename_toast", "Session renamed", "会话已重命名"),
+    (
+        "ph.session_title",
+        "Human-readable title (optional)",
+        "人类可读标题（可选）",
+    ),
+    ("log.rename_failed", "rename failed: {}", "重命名失败：{}"),
+    ("common.save", "Save", "保存"),
     // Per-session Sheet (UX2): overview / handoffs / provenance / evidence
     ("sheet.title", "Session details", "会话详情"),
     ("sheet.empty", "No session selected", "未选择会话"),

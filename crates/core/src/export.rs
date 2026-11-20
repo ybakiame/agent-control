@@ -303,6 +303,9 @@ pub fn render_handoff_brief(bundle: &HandoffBundle, resumed_under: Option<&str>)
         );
     }
     out.push_str(&format!("- **Task**: {}\n", bundle.task));
+    if !bundle.title.is_empty() {
+        out.push_str(&format!("- **Title**: {}\n", bundle.title));
+    }
     out.push_str(&format!("- **From harness**: {}\n", bundle.from_agent));
     if let Some(agent) = resumed_under {
         out.push_str(&format!("- **Resumed under**: {agent}\n"));
@@ -645,6 +648,7 @@ mod tests {
         let bundle = HandoffBundle {
             session_id: Uuid::new_v4(),
             task: "ship layer 1".into(),
+            title: String::new(),
             project_path: PathBuf::from("C:/project"),
             constraint_snapshot: snapshot,
             assurance: vec![ConstraintAssurance {

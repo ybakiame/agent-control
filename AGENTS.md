@@ -89,6 +89,11 @@ wrapper). Session work state is written via
 done/doing/todo list; backs MCP `update_work_state` and the Sessions-view work editor). Every session
 mutation appends evidence carrying the **acting** agent (caller-supplied), not `session.agent_id`:
 `WorkStateUpdate` on work-state edits, `StatusChange` on every status transition (including reopen),
+`SessionRename` on title edits (UX7: `Session.title`, serde default `''`, display falls back to
+`task`; `set_session_title(id, title, acting_agent_id)` touches **only** the title so the machine
+identity key behind get-or-create / hooks / bundles stays stable; the GUI passes `console` as the
+acting identity, and the handoff brief gains a human-readable **Title** line while briefings stay
+agent-neutral),
 `OwnershipChange` on an `import_handoff` agent flip. `delete_session(id)` removes a session and,
 **cascade**, its evidence chain + provenance record (backs the Sessions-view Delete button / row menu,
 behind a confirm dialog).

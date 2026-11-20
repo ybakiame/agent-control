@@ -60,7 +60,8 @@ impl Db {
                 goal TEXT NOT NULL DEFAULT '',
                 work_items_json TEXT NOT NULL DEFAULT '[]',
                 harness_session_id TEXT,
-                predecessor TEXT
+                predecessor TEXT,
+                title TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS evidence (
                 session_id TEXT NOT NULL,
@@ -165,6 +166,11 @@ impl Db {
             .is_ok();
         if !has_predecessor {
             conn.execute_batch("ALTER TABLE sessions ADD COLUMN predecessor TEXT;")?;
+        }
+        // Human-facing title (UX7); empty falls back to task at display time, no backfill.
+        let has_title = conn.prepare("SELECT title FROM sessions LIMIT 0").is_ok();
+        if !has_title {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT '';")?;
         }
         // Full-text shadow tables (P1). Rows store app-segmented tokens (CJK bigrams), so
         // unicode61 only splits on spaces; original titles stay in UNINDEXED display columns.
@@ -356,8 +362,8 @@ impl Db {
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                 task = excluded.task,
                 project_path = excluded.project_path,
@@ -370,7 +376,8 @@ impl Db {
                 goal = excluded.goal,
                 work_items_json = excluded.work_items_json,
                 harness_session_id = excluded.harness_session_id,
-                predecessor = excluded.predecessor",
+                predecessor = excluded.predecessor,
+                title = excluded.title",
             rusqlite::params![
                 session.id.to_string(),
                 session.task,
@@ -386,6 +393,7 @@ impl Db {
                 serde_json::to_string(&session.work_items)?,
                 session.harness_session_id,
                 session.predecessor.map(|id| id.to_string()),
+                session.title,
             ],
         )?;
         Self::search_sync_session_conn(&conn, session)?;
@@ -395,7 +403,7 @@ impl Db {
     pub fn get_session(&self, id: Uuid) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor FROM sessions WHERE id = ?1",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id.to_string()])?;
         match rows.next()? {
@@ -407,7 +415,7 @@ impl Db {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor FROM sessions ORDER BY updated_at DESC",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title FROM sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], session_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -916,6 +924,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
             .get::<_, Option<String>>(13)?
             .map(|s| Uuid::parse_str(&s).map_err(invalid_uuid))
             .transpose()?,
+        title: row.get(14)?,
     })
 }
 

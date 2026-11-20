@@ -350,6 +350,7 @@ pub enum EvidenceKind {
     WorkStateUpdate,
     StatusChange,
     OwnershipChange,
+    SessionRename,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -607,6 +608,10 @@ pub struct Session {
     /// conversations of the same harness sharing one Agent Control session.
     #[serde(default)]
     pub harness_session_id: Option<String>,
+    /// Human-facing label (UX7); empty falls back to `task` for display. `task` stays the machine
+    /// identity key for get-or-create / hooks / bundles, so a rename never touches it.
+    #[serde(default)]
+    pub title: String,
     /// The closed same-(project, agent, task) session this one continues, when `create_session`
     /// split a new snapshot off it; links chain splits so they read as one thread (UX1).
     #[serde(default)]
@@ -644,6 +649,8 @@ pub struct HandoffRecord {
 pub struct HandoffBundle {
     pub session_id: Uuid,
     pub task: String,
+    #[serde(default)]
+    pub title: String,
     pub project_path: PathBuf,
     pub constraint_snapshot: ConstraintSnapshot,
     #[serde(default)]

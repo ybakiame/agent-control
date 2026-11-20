@@ -547,6 +547,51 @@ fn create_session_reuses_active_same_task() {
 }
 
 #[test]
+fn rename_touches_title_only_and_keeps_get_or_create() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let (session, _) = store
+        .create_session("machine task", project.path(), "harness-a", vec![], None)
+        .unwrap();
+    assert_eq!(session.title, "");
+
+    let renamed = store
+        .set_session_title(session.id, "  Ship the login flow  ", "console")
+        .unwrap();
+    assert_eq!(renamed.title, "Ship the login flow");
+    assert_eq!(renamed.task, "machine task");
+
+    // The machine identity key is untouched, so same-task calls still reuse the session.
+    let (again, reused) = store
+        .create_session("machine task", project.path(), "harness-a", vec![], None)
+        .unwrap();
+    assert!(reused);
+    assert_eq!(again.id, session.id);
+    assert_eq!(again.title, "Ship the login flow");
+
+    // The rename is audited with the acting identity, not the session owner.
+    let evidence = store.get_evidence(session.id).unwrap();
+    let rename = evidence
+        .iter()
+        .find(|e| e.kind == EvidenceKind::SessionRename)
+        .unwrap();
+    assert_eq!(rename.agent_id, "console");
+    assert_eq!(rename.payload["from"], "");
+    assert_eq!(rename.payload["to"], "Ship the login flow");
+    assert!(store.verify_chain(session.id).unwrap().valid);
+
+    // The human-readable title reaches the handoff brief; task stays the machine key.
+    let bundle = store
+        .export_handoff(session.id, None, serde_json::json!({}))
+        .unwrap();
+    assert_eq!(bundle.title, "Ship the login flow");
+    let brief = agent_control_core::export::render_handoff_brief(&bundle, None);
+    assert!(brief.contains("- **Title**: Ship the login flow"));
+    assert!(brief.contains("- **Task**: machine task"));
+}
+
+#[test]
 fn set_session_status_closes_and_reopens_with_evidence() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();

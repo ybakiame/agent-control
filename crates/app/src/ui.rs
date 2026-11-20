@@ -215,6 +215,16 @@ pub fn kind_tag(kind: agent_control_core::model::EvidenceKind) -> gpui_kit::comp
         EvidenceKind::WorkStateUpdate => Tag::primary().child("work_state_update"),
         EvidenceKind::StatusChange => Tag::secondary().child("status_change"),
         EvidenceKind::OwnershipChange => Tag::info().child("ownership_change"),
+        EvidenceKind::SessionRename => Tag::primary().child("session_rename"),
+    }
+}
+
+/// Human-facing session label: title when set, else the machine task (UX7).
+pub fn display_title(session: &agent_control_core::model::Session) -> String {
+    if session.title.is_empty() {
+        session.task.clone()
+    } else {
+        session.title.clone()
     }
 }
 
@@ -236,5 +246,6 @@ pub fn kind_visual(cx: &App, kind: agent_control_core::model::EvidenceKind) -> (
         EvidenceKind::WorkStateUpdate => (IconName::FileText, t.primary),
         EvidenceKind::StatusChange => (IconName::RefreshCw, t.info),
         EvidenceKind::OwnershipChange => (IconName::User, t.info),
+        EvidenceKind::SessionRename => (IconName::FileText, t.primary),
     }
 }

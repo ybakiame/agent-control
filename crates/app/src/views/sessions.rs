@@ -67,6 +67,8 @@ impl Console {
                         let selected = self.selected_session == Some(id);
                         let row_weak = weak.clone();
                         let delete_label = self.t("sess.delete").to_string();
+                        let rename_label = self.t("sess.rename").to_string();
+                        let display_title = ui::display_title(s);
                         let kind_tag = if s.task == "hook" {
                             Tag::secondary().child(self.t("sess.kind_telemetry"))
                         } else if !s.handoffs.is_empty()
@@ -85,7 +87,7 @@ impl Console {
                         v_flex()
                             .id(format!("session-row-{id}"))
                             .role(Role::Button)
-                            .aria_label(s.task.clone())
+                            .aria_label(display_title.clone())
                             .p_3()
                             .gap_1()
                             .border_1()
@@ -103,9 +105,15 @@ impl Console {
                                 this.select_session(id, window, cx);
                             }))
                             .context_menu(move |menu, _window, _cx| {
-                                session_row_menu(menu, row_weak.clone(), id, delete_label.clone())
+                                session_row_menu(
+                                    menu,
+                                    row_weak.clone(),
+                                    id,
+                                    delete_label.clone(),
+                                    rename_label.clone(),
+                                )
                             })
-                            .child(div().font_medium().text_sm().child(s.task.clone()))
+                            .child(div().font_medium().text_sm().child(display_title))
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -603,6 +611,9 @@ impl Console {
                                 .child(
                                     Input::new(&self.session_task_input).id("session-task-input"),
                                 )
+                                .child(
+                                    Input::new(&self.session_title_input).id("session-title-input"),
+                                )
                                 .child(match self.current_project() {
                                     Some(p) => div()
                                         .text_sm()
@@ -647,7 +658,21 @@ fn session_row_menu(
     weak: WeakEntity<Console>,
     id: Uuid,
     delete_label: String,
+    rename_label: String,
 ) -> PopupMenu {
+    let rename = weak.clone();
+    let menu = menu.item(
+        PopupMenuItem::new(rename_label)
+            .icon(Icon::new(IconName::FileText))
+            .on_click(move |_, window, cx| {
+                if let Some(entity) = rename.upgrade() {
+                    entity.update(cx, |this, ccx| {
+                        this.open_session_rename_dialog(id, window, ccx);
+                        ccx.notify();
+                    });
+                }
+            }),
+    );
     let delete = weak.clone();
     menu.item(
         PopupMenuItem::new(delete_label)
