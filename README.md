@@ -484,7 +484,9 @@ scripts/uia-shot.ps1   -Hwnd <hwnd> -Out out.png       # capture the window rect
 the console + MCP executables, both READMEs (English + 简体中文), the brand icon, the hook script and a
 `portable.marker`, so an extracted copy runs fully portable (store beside the exe) out of the box. The
 Windows executable embeds `crates/app/assets/icon.ico` (multi-size) plus version info through
-`crates/app/build.rs` (winresource), so Explorer / the taskbar show the Agent Control icon.
+`crates/app/build.rs` (winresource), so Explorer / the taskbar show the Agent Control icon. The zip
+name and the app footer follow the workspace Cargo version; see [CHANGELOG.md](CHANGELOG.md) and the
+runbook in [docs/release.md](docs/release.md).
 
 ## Developer docs
 

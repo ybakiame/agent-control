@@ -374,7 +374,8 @@ scripts/uia-shot.ps1   -Hwnd <hwnd> -Out out.png       # 截取窗口矩形
 `dist/agent-control-v<版本>-windows-x64.zip`。压缩包内含控制台与 MCP 可执行文件、两个 README（English + 简体中文）、
 品牌图标、hook 脚本与 `portable.marker`，解压即便携运行（存储位于 exe 旁）。Windows 可执行文件通过
 `crates/app/build.rs`（winresource）嵌入多尺寸 `crates/app/assets/icon.ico` 与版本信息，资源管理器 / 任务栏显示
-Agent Control 图标。
+Agent Control 图标。zip 名称与界面 footer 跟随 workspace Cargo 版本；见 [CHANGELOG.md](CHANGELOG.md) 与
+[docs/release.md](docs/release.md) 的发布手册。
 
 ## 开发者文档
 
