@@ -288,6 +288,8 @@ impl Store {
             harness_session_id,
         };
         self.db.upsert_session(&session)?;
+        // The snapshot resolution ran before the session id existed; link its provenance now (UX2).
+        self.db.set_provenance_session(record.id, session.id)?;
         self.db.append_evidence(
             session.id,
             EvidenceKind::SessionStart,
@@ -934,6 +936,12 @@ impl Store {
 
     pub fn list_provenance(&self, limit: usize) -> Result<Vec<ProvenanceRecord>> {
         self.db.list_provenance(limit)
+    }
+
+    /// Provenance linked to a session, with legacy NULL rows fell back to project+agent+lifetime
+    /// window (UX2 Sheet provenance section).
+    pub fn provenance_for_session(&self, session: &Session) -> Result<Vec<ProvenanceRecord>> {
+        self.db.provenance_for_session(session)
     }
 
     pub fn load_agents(&self) -> Result<Vec<AgentRegistration>> {

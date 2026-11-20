@@ -526,6 +526,47 @@ impl Db {
         })
     }
 
+    /// Link a provenance record to the session it was resolved inside (UX2). Resolutions that
+    /// happen before the session id exists (create_session) are linked right after creation.
+    pub fn set_provenance_session(&self, provenance_id: Uuid, session_id: Uuid) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE provenance SET session_id = ?1 WHERE id = ?2",
+            rusqlite::params![session_id.to_string(), provenance_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Provenance for a session: records linked by session_id, plus legacy NULL rows matched by
+    /// project + agent + the session's lifetime window (pre-linkage history).
+    pub fn provenance_for_session(&self, session: &Session) -> Result<Vec<ProvenanceRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, session_id, agent_id, context_json, trace_json, conflicts_json
+             FROM provenance
+             WHERE session_id = ?1
+                OR (session_id IS NULL AND agent_id = ?2 AND timestamp >= ?3 AND timestamp <= ?4)
+             ORDER BY timestamp DESC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                session.id.to_string(),
+                session.agent_id,
+                session.created_at.to_rfc3339(),
+                session.updated_at.to_rfc3339(),
+            ],
+            provenance_from_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            let record = row?;
+            if record.session_id.is_some() || record.context.project_path == session.project_path {
+                out.push(record);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn insert_provenance(&self, record: &ProvenanceRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(

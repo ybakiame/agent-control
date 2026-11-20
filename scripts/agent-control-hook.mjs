@@ -375,6 +375,7 @@ async function handleCompact(cwd, brief, harnessSessionId) {
       file_paths: [],
       languages: [],
       task_tags: [],
+      session_id: sessionId,
     });
     briefing = typeof data?.briefing === "string" ? data.briefing : "";
     if (sessionId) {
@@ -419,8 +420,9 @@ async function main() {
   if (isGateEvent(EVENT)) return handleGate(headers, parsed, cwd);
 
   // Start event: freeze the snapshot, then inject the binding-rule briefing where the vendor supports it.
+  let hookSessionId = null;
   try {
-    await resolveSession(headers, cwd, parsed?.session_id);
+    hookSessionId = await resolveSession(headers, cwd, parsed?.session_id);
   } catch (e) {
     debug(`session creation skipped: ${e?.message ?? String(e)}`);
   }
@@ -433,6 +435,7 @@ async function main() {
     file_paths: [],
     languages: [],
     task_tags: [],
+    session_id: hookSessionId,
   });
   // The briefing is rendered by core (render_constraint_briefing) and returned by get_applicable_rules,
   // so the hook, the MCP constraint-briefing prompt and any other reach path present identical text.

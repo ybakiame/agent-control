@@ -6,13 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
@@ -22,7 +20,6 @@ globset = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
-notify = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,8 +1,7 @@
 mod dashboard;
-mod evidence;
 mod projects;
-mod provenance;
 mod rules;
+pub(crate) mod session_sheet;
 mod sessions;
 mod settings;
 mod suggestions;

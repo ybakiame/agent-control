@@ -153,6 +153,9 @@ pub struct RulesQuery {
     /// Task tags for task-scoped rule matching
     #[serde(default)]
     pub task_tags: Vec<String>,
+    /// Session UUID when resolving inside a session; links the provenance record to it.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl RulesQuery {
@@ -163,7 +166,10 @@ impl RulesQuery {
             file_paths: self.file_paths.clone(),
             languages: self.languages.clone(),
             task_tags: self.task_tags.clone(),
-            session_id: None,
+            session_id: self
+                .session_id
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok()),
         }
     }
 }

@@ -218,6 +218,21 @@ impl Console {
                         self.t("dash.stat.suggestions"),
                         self.pending_suggestions.to_string(),
                         cx.theme().warning,
+                    ))
+                    .child(ui::stat_card(
+                        cx,
+                        IconName::Link,
+                        self.t("dash.stat.chains"),
+                        format!(
+                            "{}/{}",
+                            self.chain_stats.0,
+                            self.chain_stats.0 + self.chain_stats.1
+                        ),
+                        if self.chain_stats.1 == 0 {
+                            cx.theme().success
+                        } else {
+                            cx.theme().danger
+                        },
                     )),
             )
             .child(

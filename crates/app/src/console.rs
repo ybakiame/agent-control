@@ -2,9 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_control_core::model::{
-    AgentRegistration, Conflict, Enforcement, EvidenceEntry, Project, ProvenanceRecord, Rule,
-    RuleSuggestion, Scope, Session, SessionStatus, SuggestionEdits, SuggestionStatus,
-    VerificationReport, WorkItem, WorkItemStatus,
+    AgentRegistration, Conflict, Enforcement, Project, ProvenanceRecord, Rule, RuleSuggestion,
+    Scope, Session, SessionStatus, SuggestionEdits, SuggestionStatus, WorkItem, WorkItemStatus,
 };
 use agent_control_core::{
     AppConfig, DoctorReport, ExportTarget, HookStatus, HookTarget, SearchHit, Store,
@@ -36,8 +35,6 @@ pub enum Nav {
     Rules,
     Environment,
     Suggestions,
-    Provenance,
-    Evidence,
     Sessions,
     Settings,
 }
@@ -74,10 +71,7 @@ pub struct Console {
     pub open_sections: std::collections::HashSet<String>,
 
     pub selected_rule: Option<usize>,
-    pub selected_provenance: Option<usize>,
     pub selected_session: Option<Uuid>,
-    pub evidence: Vec<EvidenceEntry>,
-    pub verification: Option<VerificationReport>,
 
     pub suggestions: Vec<RuleSuggestion>,
     pub pending_suggestions: usize,
@@ -115,6 +109,10 @@ pub struct Console {
     pub session_show_completed: bool,
     pub session_goal_input: Entity<TextareaState>,
     pub session_work_input: Entity<TextareaState>,
+    pub sheet_session: Option<Uuid>,
+    pub sheet_data: Option<crate::views::session_sheet::SheetData>,
+    pub sheet_show_telemetry: bool,
+    pub chain_stats: (usize, usize),
 }
 
 impl Console {
@@ -186,10 +184,7 @@ impl Console {
             hook_statuses: vec![],
             open_sections: std::collections::HashSet::new(),
             selected_rule: None,
-            selected_provenance: None,
             selected_session: None,
-            evidence: vec![],
-            verification: None,
             suggestions: vec![],
             pending_suggestions: 0,
             selected_suggestion: None,
@@ -221,6 +216,10 @@ impl Console {
             session_show_completed: false,
             session_goal_input,
             session_work_input,
+            sheet_session: None,
+            sheet_data: None,
+            sheet_show_telemetry: false,
+            chain_stats: (0, 0),
         };
         console.refresh_data(cx);
         console.load_session_work_inputs(window, cx);
@@ -336,10 +335,22 @@ impl Console {
         {
             self.selected_suggestion = None;
         }
-        self.refresh_evidence();
         self.rebuild_project_tree(cx);
         self.refresh_export_drift();
         self.refresh_hook_status();
+        // Cross-session chain integrity (moved here from the removed Evidence view, UX2).
+        let mut valid = 0;
+        let mut broken = 0;
+        for s in &self.sessions {
+            match self.store.verify_chain(s.id) {
+                Ok(r) if r.valid => valid += 1,
+                _ => broken += 1,
+            }
+        }
+        self.chain_stats = (valid, broken);
+        if self.sheet_session.is_some() {
+            self.load_sheet_data();
+        }
     }
 
     /// Recompute whether the selected project's native export is stale (missing or outdated-format
@@ -432,15 +443,6 @@ impl Console {
                 state.set_selected_index(Some(ix), cx);
             }
         });
-    }
-
-    pub fn refresh_evidence(&mut self) {
-        if let Some(id) = self.selected_session {
-            self.evidence = self.store.get_evidence(id).unwrap_or_default();
-        } else {
-            self.evidence.clear();
-        }
-        self.verification = None;
     }
 
     pub fn log(&mut self, text: impl Into<String>) {
@@ -1183,10 +1185,9 @@ impl Console {
         }
     }
 
-    /// Select a session: move the highlight, refresh its evidence, and load its work-state inputs.
+    /// Select a session: move the highlight and load its work-state inputs.
     pub fn select_session(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_session = Some(id);
-        self.refresh_evidence();
         self.load_session_work_inputs(window, cx);
         cx.notify();
     }
@@ -1285,29 +1286,6 @@ impl Console {
                     true
                 })
         });
-    }
-
-    pub fn verify_selected_chain(&mut self) {
-        let Some(session_id) = self.selected_session else {
-            return;
-        };
-        match self.store.verify_chain(session_id) {
-            Ok(report) => {
-                self.log(self.tr(
-                    "log.chain",
-                    &[
-                        self.t(if report.valid {
-                            "log.valid"
-                        } else {
-                            "log.broken"
-                        }),
-                        &report.entries_checked.to_string(),
-                    ],
-                ));
-                self.verification = Some(report);
-            }
-            Err(e) => self.log(self.tr("log.verify_failed", &[&e.to_string()])),
-        }
     }
 
     pub fn resolve_conflicts_for_project(&mut self, cx: &mut Context<Self>) {
@@ -2017,8 +1995,6 @@ impl Render for Console {
             Nav::Rules => self.render_rules(cx).into_any_element(),
             Nav::Environment => self.render_rules(cx).into_any_element(),
             Nav::Suggestions => self.render_suggestions(cx).into_any_element(),
-            Nav::Provenance => self.render_provenance(cx).into_any_element(),
-            Nav::Evidence => self.render_evidence(cx).into_any_element(),
             Nav::Sessions => self.render_sessions(cx).into_any_element(),
             Nav::Settings => self.render_settings(cx).into_any_element(),
         };
@@ -2084,8 +2060,6 @@ impl Console {
             Nav::Rules => self.t("header.rules"),
             Nav::Environment => self.t("header.environment"),
             Nav::Suggestions => self.t("header.suggestions"),
-            Nav::Provenance => self.t("header.provenance"),
-            Nav::Evidence => self.t("header.evidence"),
             Nav::Sessions => self.t("header.sessions"),
             Nav::Settings => self.t("header.settings"),
         }
@@ -2099,8 +2073,6 @@ impl Console {
             Nav::Rules => self.t("desc.rules"),
             Nav::Environment => self.t("desc.environment"),
             Nav::Suggestions => self.t("desc.suggestions"),
-            Nav::Provenance => self.t("desc.provenance"),
-            Nav::Evidence => self.t("desc.evidence"),
             Nav::Sessions => self.t("desc.sessions"),
             Nav::Settings => self.t("desc.settings"),
         }
@@ -2219,23 +2191,6 @@ impl Console {
                 "nav.sessions",
                 "nav-sessions",
                 IconName::SquareTerminal,
-                0,
-                cx,
-            ))
-            .child(self.nav_group_label("nav.group.verify", cx))
-            .child(self.nav_item(
-                Nav::Provenance,
-                "nav.provenance",
-                "nav-provenance",
-                IconName::Network,
-                0,
-                cx,
-            ))
-            .child(self.nav_item(
-                Nav::Evidence,
-                "nav.evidence",
-                "nav-evidence",
-                IconName::FileText,
                 0,
                 cx,
             ))

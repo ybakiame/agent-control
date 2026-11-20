@@ -63,8 +63,9 @@ delivered into the tools agents already read.
 - **Rust-first**, edition 2024, workspace of three crates (`core`, `mcp`, `app`).
 - **Native GUI** built on [`gpui-kit`](https://nsh.dev/docs/) (GPUI) with a branded dark design
   system (violet accent, card surfaces, grouped icon sidebar, status bar). Self-rendered title bar
-  (no OS chrome), eight views: Dashboard, **Projects**, Rules & Contracts, **Suggestions**,
-  Provenance Explorer, Verifiable Evidence, Sessions & Continuity, Settings.
+  (no OS chrome), eight nav destinations: Dashboard, **Projects**, Personal Preferences,
+  Project Contracts, Work Environment, **Suggestions**, Sessions & Continuity, Settings.
+  Each session row opens a **detail Sheet** (overview, handoffs, provenance, evidence chain).
 - **Project registry + guided onboarding.** Projects are first-class: register a repo once
   (browse for its folder, give it a name), and the console scaffolds a bilingual contract guide
   under `<project>/.agent-control/`. A **tree view** organizes each project's contracts, sessions
@@ -245,7 +246,7 @@ This is distinct from `verify_evidence` (which recomputes the hash chain to dete
 The console's Sessions pane exposes it as **Verify constraints**. The same pane shows the session's
 **work state** (goal + done/doing/todo items) with an inline editor backed by `update_work_state`,
 tucks the snapshot hash / provenance id into a collapsed **Verification details** disclosure (the full
-chain stays in the Evidence / Provenance views), and offers a **Delete session** action (header button
+chain stays in the session's detail Sheet), and offers a **Delete session** action (header button
 or row right-click) that cascades to the session's evidence chain + provenance behind a confirm dialog.
 
 `check_tool_call` (`project_path`, `tool_name`, `tool_input`, `agent_id`, optional `session_id`) is the

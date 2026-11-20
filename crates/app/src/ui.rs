@@ -162,3 +162,58 @@ pub fn mono(cx: &App, text: impl Into<SharedString>) -> Div {
         .text_xs()
         .child(text.into())
 }
+
+/// Lifecycle status tag shared by the sessions list and the session sheet.
+pub fn status_tag(
+    status: agent_control_core::model::SessionStatus,
+    locale: crate::i18n::Locale,
+) -> gpui_kit::component::tag::Tag {
+    use agent_control_core::model::SessionStatus;
+    use gpui_kit::component::tag::Tag;
+    match status {
+        SessionStatus::Active => Tag::success().child(crate::i18n::t(locale, "sess.status.active")),
+        SessionStatus::HandedOff => {
+            Tag::info().child(crate::i18n::t(locale, "sess.status.handed_off"))
+        }
+        SessionStatus::Completed => {
+            Tag::secondary().child(crate::i18n::t(locale, "sess.status.completed"))
+        }
+        SessionStatus::Failed => Tag::danger().child(crate::i18n::t(locale, "sess.status.failed")),
+    }
+}
+
+/// Work-item status tag shared by the sessions list and the session sheet.
+pub fn work_status_tag(
+    status: agent_control_core::model::WorkItemStatus,
+    locale: crate::i18n::Locale,
+) -> gpui_kit::component::tag::Tag {
+    use agent_control_core::model::WorkItemStatus;
+    use gpui_kit::component::tag::Tag;
+    match status {
+        WorkItemStatus::Done => Tag::success().child(crate::i18n::t(locale, "work.done")),
+        WorkItemStatus::Doing => Tag::primary().child(crate::i18n::t(locale, "work.doing")),
+        WorkItemStatus::Todo => Tag::secondary().child(crate::i18n::t(locale, "work.todo")),
+    }
+}
+
+/// Evidence-kind tag (protocol kind labels, monospace semantics) shared by the sheet timeline
+/// and evidence list.
+pub fn kind_tag(kind: agent_control_core::model::EvidenceKind) -> gpui_kit::component::tag::Tag {
+    use agent_control_core::model::EvidenceKind;
+    use gpui_kit::component::tag::Tag;
+    match kind {
+        EvidenceKind::FileChange => Tag::warning().child("file_change"),
+        EvidenceKind::ConstraintViolation => Tag::danger().child("violation"),
+        EvidenceKind::TestResult => Tag::success().child("test_result"),
+        EvidenceKind::HandoffOut => Tag::info().child("handoff_out"),
+        EvidenceKind::HandoffIn => Tag::info().child("handoff_in"),
+        EvidenceKind::RuleAcknowledgment => Tag::primary().child("rule_ack"),
+        EvidenceKind::ToolCall => Tag::secondary().child("tool_call"),
+        EvidenceKind::ToolGate => Tag::warning().child("tool_gate"),
+        EvidenceKind::SessionStart => Tag::secondary().child("session_start"),
+        EvidenceKind::SessionEnd => Tag::secondary().child("session_end"),
+        EvidenceKind::WorkStateUpdate => Tag::primary().child("work_state_update"),
+        EvidenceKind::StatusChange => Tag::secondary().child("status_change"),
+        EvidenceKind::OwnershipChange => Tag::info().child("ownership_change"),
+    }
+}

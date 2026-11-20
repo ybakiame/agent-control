@@ -65,7 +65,7 @@ Three crates under `crates/`. Dependency direction: `app → {mcp, core}`, `mcp 
 |-------|---------|------|----------------|-----------|
 | core | `agent-control-core` | lib | Rule engine, provenance, conflict detection, hybrid storage, evidence hash chain, handoff bundles, project registry, native pointer export + drift + revoke, assurance tiers, tool-call gate, hooks config | `engine.rs` (`RuleEngine`), `model.rs` (`Rule`, `Scope`, `Enforcement`, `AssuranceTier`, `ConstraintAssurance`, `ToolGuard`, `ToolGateReport`, `Project`, `Session`, `EvidenceEntry`, `canonical_hash`, …), `conflict.rs` (`evaluate_code_checks`), `gate.rs` (`check_tool_call`, repo gate + tool guards), `hooks.rs` (`HookTarget`, `ConfigCodec`, `HookScope`, `HookEvents`, `register`/`revoke`/`detect`), `export.rs` (`PROJECT_GUIDANCE`, `render_constraint_briefing`, `handoff_tier_warning`, `render_handoff_brief`, `wrap_block`, `upsert_managed_block`, `remove_managed_block`, `ExportTarget`, `ExportReport`, `RevokeReport`, `DriftReport`), `config.rs` (`DataLayout`), `store/{mod,db,files}.rs` (`Store`, `Db`) |
 | mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 28 tools + resources + prompts; stdio & Streamable HTTP | `lib.rs` (`ControlServer`, `serve_http`), `main.rs` (CLI) |
-| app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), eight views, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review, native export + hooks registration | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
+| app | `agent-control-app` | bin | GPUI desktop console (gpui-kit), six view modules + per-session Sheet, branded design system, bilingual UI, self-rendered title bar, project tree + onboarding, suggestion review, native export + hooks registration | `main.rs`, `console.rs` (`Console` entity), `i18n.rs`, `theme.rs` (brand tokens), `ui.rs` (shared view helpers), `views/*.rs` |
 
 Public surface of `core` (re-exported from `lib.rs`): `DataLayout`, `RuleEngine`, `Store`,
 `RuleExplanation`, `AcknowledgmentReport`, `ConstraintVerificationReport`, `ExportReport`,
@@ -600,11 +600,22 @@ Bilingual **English / 简体中文**, runtime-switchable in Settings, persisted 
 Built on **gpui-kit 0.9** (`gpui-pre` + `gpui-component` + `gpui-base`; docs at
 <https://nsh.dev/docs/>). Branded dark theme applied in `main.rs` via `theme::apply_brand`
 (`Theme::update`): violet primary `#7c6af0`, background `#0e1116`, semantic tokens
-(`sidebar`, `status_bar`, `group_box`, `radius`/`radius_lg`). Eight views under
-`crates/app/src/views/`: `dashboard`, `projects`, `rules`, `suggestions`, `provenance`, `evidence`,
-`sessions`, `settings`. `Console` (`console.rs`) is the root entity: grouped icon sidebar
-(Workspace / Verify / System) + header (title, project switcher, refresh) + content + status bar,
+(`sidebar`, `status_bar`, `group_box`, `radius`/`radius_lg`). Six view modules under
+`crates/app/src/views/`: `dashboard`, `projects`, `rules` (rendered at three scopes by the nav),
+`suggestions`, `sessions`, `settings`, plus `session_sheet` (the per-session detail Sheet).
+`Console` (`console.rs`) is the root entity: grouped icon sidebar
+(Workspace / System) + header (title, project switcher, refresh) + content + status bar,
 and owns the `Store`.
+
+**Per-session Sheet (UX2)** (`views/session_sheet.rs`): the session row's **Details** button opens a
+gpui-kit `Sheet` (`window.open_sheet`, 620px) with four sections — overview (task, status + agent,
+derived ownership chain, project, timestamps, snapshot, goal + work items), handoffs (ack /
+superseded / pending-ack tags), provenance (`Store::provenance_for_session`: linked rows plus legacy
+NULL-session rows matched by agent + time window, tagged `legacy`) and the evidence chain
+(integrity tag + entry count + rows). A **Show telemetry** Switch (default off) collapses
+`tool_gate` noise. `SheetData` is loaded once on open and on `refresh_data`, never at render time;
+the former Provenance/Evidence views and the Verify nav group are gone — cross-session chain
+integrity lives in the Dashboard **Chain integrity** stat card (`Console::chain_stats`) and `doctor`.
 
 **Shared view helpers** (`crates/app/src/ui.rs`): reuse these instead of re-rolling surfaces —
 `card(cx)` (standard bordered `group_box` panel), `section_label(cx, text)` (heading with a brand
@@ -717,7 +728,7 @@ A **Work state** section shows a locale-formatted last-updated line (`sess.work_
 Work items are edited as one `status: title` line each (`parse_work_items` / `format_work_items`; an
 unknown/missing prefix defaults to `todo`). The snapshot hash + provenance id moved out of the header
 into a collapsed **Verification details** disclosure ("sess-verification") — the full chain stays in
-the Evidence/Provenance views. A danger **Delete session** button (header) and a row right-click menu
+the per-session Sheet. A danger **Delete session** button (header) and a row right-click menu
 call `confirm_delete_session` → `delete_selected_session` → `Store::delete_session` (cascade evidence +
 provenance), behind an AlertDialog whose copy states the cascade. `select_session(id, window, cx)`
 moves the highlight, refreshes evidence and reloads the work inputs; `load_session_work_inputs` mirrors

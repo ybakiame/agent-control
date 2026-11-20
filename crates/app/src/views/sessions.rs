@@ -1,5 +1,5 @@
 use agent_control_core::DataLayout;
-use agent_control_core::model::{AssuranceTier, Scope, SessionStatus, WorkItemStatus};
+use agent_control_core::model::{AssuranceTier, Scope, SessionStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
@@ -12,27 +12,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::console::Console;
-use crate::i18n::{self, Locale};
 use crate::ui;
-
-fn status_tag(status: SessionStatus, locale: Locale) -> Tag {
-    match status {
-        SessionStatus::Active => Tag::success().child(i18n::t(locale, "sess.status.active")),
-        SessionStatus::HandedOff => Tag::info().child(i18n::t(locale, "sess.status.handed_off")),
-        SessionStatus::Completed => {
-            Tag::secondary().child(i18n::t(locale, "sess.status.completed"))
-        }
-        SessionStatus::Failed => Tag::danger().child(i18n::t(locale, "sess.status.failed")),
-    }
-}
-
-fn work_status_tag(status: WorkItemStatus, locale: Locale) -> Tag {
-    match status {
-        WorkItemStatus::Done => Tag::success().child(i18n::t(locale, "work.done")),
-        WorkItemStatus::Doing => Tag::primary().child(i18n::t(locale, "work.doing")),
-        WorkItemStatus::Todo => Tag::secondary().child(i18n::t(locale, "work.todo")),
-    }
-}
 
 impl Console {
     pub fn render_sessions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -85,8 +65,17 @@ impl Console {
                     h_flex()
                         .gap_1()
                         .items_center()
-                        .child(status_tag(s.status, self.locale))
-                        .child(Tag::secondary().child(s.agent_id.clone())),
+                        .child(ui::status_tag(s.status, self.locale))
+                        .child(Tag::secondary().child(s.agent_id.clone()))
+                        .child(
+                            Button::new(format!("sess-sheet-{id}"))
+                                .label(self.t("sess.sheet"))
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_session_sheet(id, window, cx);
+                                })),
+                        ),
                 )
                 .child(div().text_xs().text_color(muted).child(self.tr(
                     "sess.binding",
@@ -137,7 +126,7 @@ impl Console {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(work_status_tag(item.status, self.locale))
+                    .child(ui::work_status_tag(item.status, self.locale))
                     .child(div().text_sm().child(item.title.clone()))
                     .into_any_element()
             });
@@ -269,7 +258,7 @@ impl Console {
                             h_flex()
                                 .gap_2()
                                 .items_center()
-                                .child(status_tag(session.status, self.locale))
+                                .child(ui::status_tag(session.status, self.locale))
                                 .child(
                                     div()
                                         .flex_1()
