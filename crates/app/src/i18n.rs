@@ -927,6 +927,7 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("nav.suggestions", "Suggestions", "建议审核"),
     ("header.suggestions", "Rule Suggestions", "规则建议"),
     ("nav.group.workspace", "Workspace", "工作区"),
+    ("nav.group.contracts", "Contracts", "契约"),
     ("nav.group.system", "System", "系统"),
     (
         "desc.dashboard",

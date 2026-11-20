@@ -607,8 +607,10 @@ Built on **gpui-kit 0.9** (`gpui-pre` + `gpui-component` + `gpui-base`; docs at
 `crates/app/src/views/`: `dashboard`, `projects`, `rules` (rendered at three scopes by the nav),
 `suggestions`, `sessions`, `settings`, plus `session_sheet` (the per-session detail Sheet).
 `Console` (`console.rs`) is the root entity: grouped icon sidebar
-(Workspace / System) + header (title, project switcher, refresh) + content + status bar,
-and owns the `Store`.
+(Workspace / Contracts / System) + header (title, project switcher, refresh) + content + status bar,
+and owns the `Store`. Nav groups (UX4): **Workspace** = Dashboard, Projects, Sessions & Handoff
+(the core destination, kept primary-tinted even when unselected), Suggestions; **Contracts** =
+Project Contracts, Personal Preferences, Work Environment; **System** = Settings.
 
 **Per-session Sheet (UX2)** (`views/session_sheet.rs`): the session row's **Details** button opens a
 gpui-kit `Sheet` (`window.open_sheet`, 620px) with five sections — overview (task, status + agent,

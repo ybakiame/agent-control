@@ -2108,6 +2108,20 @@ impl Console {
     ) -> impl IntoElement {
         let label = self.t(key);
         let primary = cx.theme().primary;
+        // The product's core destination keeps a primary tint even when not selected (UX4).
+        let emphasize = nav == Nav::Sessions && self.nav != nav;
+        let icon = Icon::new(icon).size_4();
+        let icon = if emphasize {
+            icon.text_color(primary)
+        } else {
+            icon
+        };
+        let label_div = div().flex_1().min_w_0().text_sm();
+        let label_div = if emphasize {
+            label_div.font_medium().text_color(primary)
+        } else {
+            label_div
+        };
         Button::new(id)
             .ghost()
             .selected(self.nav == nav)
@@ -2117,8 +2131,8 @@ impl Console {
                     .w_full()
                     .gap_2()
                     .items_center()
-                    .child(Icon::new(icon).size_4())
-                    .child(div().flex_1().min_w_0().text_sm().child(label))
+                    .child(icon)
+                    .child(label_div.child(label))
                     .when(badge > 0, |this| {
                         this.child(Badge::new().count(badge).color(primary))
                     }),
@@ -2174,26 +2188,10 @@ impl Console {
                 cx,
             ))
             .child(self.nav_item(
-                Nav::Preferences,
-                "nav.preferences",
-                "nav-preferences",
-                IconName::User,
-                0,
-                cx,
-            ))
-            .child(self.nav_item(
-                Nav::Rules,
-                "nav.rules",
-                "nav-rules",
-                IconName::BookOpen,
-                0,
-                cx,
-            ))
-            .child(self.nav_item(
-                Nav::Environment,
-                "nav.environment",
-                "nav-environment",
-                IconName::Cpu,
+                Nav::Sessions,
+                "nav.sessions",
+                "nav-sessions",
+                IconName::SquareTerminal,
                 0,
                 cx,
             ))
@@ -2205,11 +2203,28 @@ impl Console {
                 pending,
                 cx,
             ))
+            .child(self.nav_group_label("nav.group.contracts", cx))
             .child(self.nav_item(
-                Nav::Sessions,
-                "nav.sessions",
-                "nav-sessions",
-                IconName::SquareTerminal,
+                Nav::Rules,
+                "nav.rules",
+                "nav-rules",
+                IconName::BookOpen,
+                0,
+                cx,
+            ))
+            .child(self.nav_item(
+                Nav::Preferences,
+                "nav.preferences",
+                "nav-preferences",
+                IconName::User,
+                0,
+                cx,
+            ))
+            .child(self.nav_item(
+                Nav::Environment,
+                "nav.environment",
+                "nav-environment",
+                IconName::Cpu,
                 0,
                 cx,
             ))
