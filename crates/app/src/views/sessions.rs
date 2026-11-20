@@ -1,12 +1,11 @@
-use agent_control_core::DataLayout;
 use agent_control_core::model::{AssuranceTier, Scope, SessionStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Sizable, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -151,20 +150,6 @@ impl Console {
             })
             .collect();
 
-        let agent_buttons = self.agents.iter().enumerate().map(|(index, agent)| {
-            let selected = self.selected_agent == index;
-            Button::new(format!("agent-{index}"))
-                .label(agent.name.clone())
-                .ghost()
-                .small()
-                .selected(selected)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected_agent = index;
-                    cx.notify();
-                }))
-                .into_any_element()
-        });
-
         let detail = if let Some(session) = self
             .selected_session
             .and_then(|id| self.sessions.iter().find(|s| s.id == id))
@@ -216,54 +201,6 @@ impl Console {
                     .child(div().text_xs().text_color(muted).child(a.basis.clone()))
                     .into_any_element()
             });
-            let handoff_row = |h: &agent_control_core::model::HandoffRecord, highlight: bool| {
-                let ack = if h.acknowledged {
-                    Tag::success().child(self.t("sess.ack"))
-                } else if h.superseded {
-                    Tag::secondary().child(self.t("sess.superseded"))
-                } else {
-                    Tag::warning().child(self.t("sess.pending_ack"))
-                };
-                v_flex()
-                    .p_2()
-                    .gap_1()
-                    .border_1()
-                    .border_color(if highlight { primary } else { border })
-                    .rounded_sm()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().text_sm().child(format!(
-                                "{} → {}",
-                                h.from_agent,
-                                h.to_agent.as_deref().unwrap_or(self.t("sess.unspecified"))
-                            )))
-                            .child(ack),
-                    )
-                    .child(div().text_xs().text_color(muted).child(self.tr(
-                        "sess.bundle",
-                        &[
-                            &h.bundle_hash[..12.min(h.bundle_hash.len())],
-                            &h.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
-                        ],
-                    )))
-                    .into_any_element()
-            };
-            let latest_handoff = session.handoffs.last();
-            let superseded: Vec<_> = session.handoffs.iter().filter(|h| h.superseded).collect();
-            let handoff_rows = session
-                .handoffs
-                .iter()
-                .filter(|h| !h.superseded && Some(h.id) != latest_handoff.map(|l| l.id))
-                .map(|h| handoff_row(h, false));
-
-            let bundle_path = self
-                .store
-                .layout
-                .bundles_dir()
-                .join(format!("{}.json", session.id));
-            let latest_path = DataLayout::project_handoff_latest(&session.project_path);
 
             let work_editor = v_flex()
                 .w_full()
@@ -493,51 +430,6 @@ impl Console {
                         this.toggle_section("sess-verification", cx);
                     }),
                 ))
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child(ui::section_label(cx, self.t("sess.handoff_title")))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(self.t("sess.handoff_hint")),
-                        )
-                        .child(
-                            Button::new("handoff-export")
-                                .label(self.t("sess.export"))
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    if this.export_handoff(cx) {
-                                        this.notify(window, cx, this.t("sess.exported"));
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(ui::mono(
-                            cx,
-                            self.tr("sess.bundle_path", &[&bundle_path.display().to_string()]),
-                        ))
-                        .child(ui::mono(
-                            cx,
-                            self.tr("sess.latest_path", &[&latest_path.display().to_string()]),
-                        ))
-                        .children(latest_handoff.map(|h| handoff_row(h, true)))
-                        .children(handoff_rows)
-                        .when(!superseded.is_empty(), |this| {
-                            this.child(ui::disclosure(
-                                "sess-handoff-history",
-                                self.tr("sess.handoff_history", &[&superseded.len().to_string()]),
-                                self.open_sections.contains("sess-handoff-history"),
-                                v_flex()
-                                    .gap_1()
-                                    .children(superseded.iter().map(|h| handoff_row(h, false))),
-                                cx.listener(|this, _, _, cx| {
-                                    this.toggle_section("sess-handoff-history", cx);
-                                }),
-                            ))
-                        }),
-                )
                 .into_any_element()
         } else {
             ui::empty_state(
@@ -605,47 +497,6 @@ impl Console {
                         .gap_3()
                         .id("sessions-detail")
                         .overflow_y_scroll()
-                        .child(
-                            ui::card(cx)
-                                .child(ui::section_label(cx, self.t("sess.new")))
-                                .child(
-                                    Input::new(&self.session_task_input).id("session-task-input"),
-                                )
-                                .child(
-                                    Input::new(&self.session_title_input).id("session-title-input"),
-                                )
-                                .child(match self.current_project() {
-                                    Some(p) => div()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .child(self.tr("sess.current_project", &[&p.name]))
-                                        .into_any_element(),
-                                    None => div()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .child(self.t("sess.no_project"))
-                                        .into_any_element(),
-                                })
-                                .child(h_flex().gap_1().flex_wrap().children(agent_buttons))
-                                .child(
-                                    Button::new("session-create")
-                                        .label(self.t("sess.create"))
-                                        .primary()
-                                        .small()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            match this.create_session_from_inputs(window, cx) {
-                                                Some(true) => {
-                                                    this.notify(window, cx, this.t("sess.reused"))
-                                                }
-                                                Some(false) => {
-                                                    this.notify(window, cx, this.t("sess.created"))
-                                                }
-                                                None => {}
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
                         .child(detail),
                 ),
         )

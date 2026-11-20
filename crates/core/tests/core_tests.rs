@@ -592,6 +592,59 @@ fn rename_touches_title_only_and_keeps_get_or_create() {
 }
 
 #[test]
+fn closing_session_auto_exports_handoff_and_keeps_closed_status() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let (session, _) = store
+        .create_session("auto export", project.path(), "harness-a", vec![], None)
+        .unwrap();
+
+    let closed = store
+        .set_session_status(session.id, SessionStatus::Completed, "console")
+        .unwrap();
+    assert_eq!(closed.status, SessionStatus::Completed);
+    assert_eq!(closed.handoffs.len(), 1);
+    assert!(!closed.handoffs[0].superseded);
+    assert!(
+        root.path()
+            .join("bundles")
+            .join(format!("{}.json", session.id))
+            .exists()
+    );
+    assert!(DataLayout::project_handoff_latest(project.path()).exists());
+    let evidence = store.get_evidence(session.id).unwrap();
+    let out = evidence
+        .iter()
+        .find(|e| e.kind == EvidenceKind::HandoffOut)
+        .unwrap();
+    assert_eq!(out.agent_id, "console");
+    let bundle_json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            root.path()
+                .join("bundles")
+                .join(format!("{}.json", session.id)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bundle_json["context"]["auto"], "session_close");
+
+    // A second close supersedes the first auto-export, exactly like a manual re-export.
+    store
+        .set_session_status(session.id, SessionStatus::Active, "console")
+        .unwrap();
+    let closed2 = store
+        .set_session_status(session.id, SessionStatus::Completed, "console")
+        .unwrap();
+    assert_eq!(closed2.status, SessionStatus::Completed);
+    assert_eq!(closed2.handoffs.len(), 2);
+    assert!(closed2.handoffs[0].superseded);
+    assert!(!closed2.handoffs[1].superseded);
+    assert!(store.verify_chain(session.id).unwrap().valid);
+}
+
+#[test]
 fn set_session_status_closes_and_reopens_with_evidence() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
@@ -2606,10 +2659,14 @@ fn session_mutations_record_acting_identity() {
         .set_session_status(session.id, SessionStatus::Completed, "auditor")
         .unwrap();
     let entries = store.get_evidence(session.id).unwrap();
-    let end = entries.last().unwrap();
+    // Closing auto-exports (UX6), so the chain ends with the HandoffOut after SessionEnd.
+    let out = entries.last().unwrap();
+    assert_eq!(out.kind, EvidenceKind::HandoffOut);
+    assert_eq!(out.agent_id, "auditor");
+    let end = &entries[entries.len() - 2];
     assert_eq!(end.kind, EvidenceKind::SessionEnd);
     assert_eq!(end.agent_id, "auditor");
-    let change = &entries[entries.len() - 2];
+    let change = &entries[entries.len() - 3];
     assert_eq!(change.kind, EvidenceKind::StatusChange);
     assert_eq!(change.payload["status"], "completed");
 

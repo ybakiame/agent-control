@@ -106,7 +106,9 @@ guarded `ALTER` column) so chain splits read as one continuity thread instead of
 `harness_session_id` (optional, serde
 default, guarded `ALTER` column) records the harness-native conversation id to distinguish several
 conversations of one harness. `set_session_status(id, status, acting_agent_id) -> Session` closes
-(`Completed`/`Failed`, appending `status_change` + `session_end`) or reopens (`Active`, appending
+(`Completed`/`Failed`, appending `status_change` + `session_end`, then **auto-exporting** the handoff
+bundle + brief via `record_handoff` with the closed status preserved — UX6, so a manual export is
+redundant) or reopens (`Active`, appending
 `status_change`) a session; `HandedOff` is set only by `export_handoff` (whose `to_agent` is an optional
 receiver hint — the real receiver is chosen at `import_handoff`).
 `ownership_timeline(id) -> Vec<OwnershipSpan>` **derives** the ownership history from the evidence
@@ -732,8 +734,10 @@ snapshot summary, binding constraints, achieved assurance and handoffs in the op
 The header carries a **Mark completed** / **Reopen** button (`set_selected_session_status` →
 `Store::set_session_status`, toast feedback) beside the danger **Delete session** button; the list
 header has a **Show completed** Switch (`Console.session_show_completed`, default off) that hides
-Completed/Failed rows so finished work leaves the active list. The **Handoff bundle** panel has no
-target input: a hint + **Export bundle** button (`Console::export_handoff`, `to_agent = None`) plus
+Completed/Failed rows so finished work leaves the active list. There is **no manual create panel**
+(UX6): sessions arrive from agent activity via MCP/hooks, and humans label them with rename (UX7).
+The handoff cluster lives in the per-session **Sheet** (UX6): an **Export bundle** button
+(`Console::export_handoff(id, cx)`, `to_agent = None`) plus
 mono rows showing the deterministic bundle path (`<root>/bundles/<session_id>.json`) and the
 project-local `handoff/latest.md` brief path; only the **latest** handoff record is highlighted
 (primary border), other non-superseded records render plainly, and superseded records collapse into

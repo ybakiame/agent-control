@@ -357,6 +357,15 @@ impl Store {
                 acting_agent_id,
                 serde_json::json!({ "status": db::status_label(status) }),
             )?;
+            // UX6: closing auto-exports the handoff artifacts so a manual export is redundant;
+            // the closed status is preserved and the closer is the acting identity.
+            self.record_handoff(
+                &mut session,
+                None,
+                serde_json::json!({ "auto": "session_close" }),
+                acting_agent_id,
+                None,
+            )?;
         }
         Ok(session)
     }
@@ -820,9 +829,31 @@ impl Store {
             .db
             .get_session(session_id)?
             .context("session not found")?;
-        let head_hash = self.db.evidence_head_hash(session_id)?;
+        let acting = session.agent_id.clone();
+        self.record_handoff(
+            &mut session,
+            to_agent,
+            context,
+            &acting,
+            Some(SessionStatus::HandedOff),
+        )
+    }
+
+    /// Write the handoff bundle + project-local brief and record the handoff, superseding every
+    /// still-unacknowledged prior record. `status_after` flips the session only when asked:
+    /// `export_handoff` passes `HandedOff`, while the auto-export on close (UX6) keeps the
+    /// closed status so finished work stays out of the active list.
+    fn record_handoff(
+        &self,
+        session: &mut Session,
+        to_agent: Option<&str>,
+        context: serde_json::Value,
+        acting_agent_id: &str,
+        status_after: Option<SessionStatus>,
+    ) -> Result<HandoffBundle> {
+        let head_hash = self.db.evidence_head_hash(session.id)?;
         let mut bundle = HandoffBundle {
-            session_id,
+            session_id: session.id,
             task: session.task.clone(),
             title: session.title.clone(),
             project_path: session.project_path.clone(),
@@ -847,21 +878,24 @@ impl Store {
             superseded: false,
         };
         self.db.append_evidence(
-            session_id,
+            session.id,
             EvidenceKind::HandoffOut,
-            &session.agent_id,
+            acting_agent_id,
             serde_json::json!({
                 "to_agent": to_agent,
                 "bundle_hash": bundle.bundle_hash,
                 "handoff_id": record.id,
             }),
         )?;
-        self.db.append_evidence(
-            session.id,
-            EvidenceKind::StatusChange,
-            &session.agent_id,
-            serde_json::json!({ "status": "handed_off", "handoff_id": record.id }),
-        )?;
+        if let Some(status) = status_after {
+            self.db.append_evidence(
+                session.id,
+                EvidenceKind::StatusChange,
+                acting_agent_id,
+                serde_json::json!({ "status": "handed_off", "handoff_id": record.id }),
+            )?;
+            session.status = status;
+        }
         // A newer export replaces every still-unacknowledged prior record; only the latest
         // handoff can be acknowledged, so older ones must not read as pending forever.
         for handoff in session.handoffs.iter_mut() {
@@ -870,11 +904,13 @@ impl Store {
             }
         }
         session.handoffs.push(record);
-        session.status = SessionStatus::HandedOff;
         session.updated_at = Utc::now();
-        self.db.upsert_session(&session)?;
+        self.db.upsert_session(session)?;
 
-        let bundle_path = self.layout.bundles_dir().join(format!("{session_id}.json"));
+        let bundle_path = self
+            .layout
+            .bundles_dir()
+            .join(format!("{}.json", session.id));
         std::fs::write(&bundle_path, serde_json::to_vec_pretty(&bundle)?)?;
 
         // Project-local continuity brief: any harness reads this file to inherit the handoff without

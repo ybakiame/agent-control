@@ -89,7 +89,10 @@ delivered into the tools agents already read.
 - **Session lifecycle.** `create_session` is get-or-create per (project, agent, task) — repeated
   calls reuse the active session (`reused: true`) instead of piling up duplicates. `set_session_status`
   closes (`completed`/`failed`) or reopens (`active`) a session, appending a `session_end` evidence
-  entry so finished work leaves the active list while staying auditable. The Sessions view groups
+  entry so finished work leaves the active list while staying auditable; closing also auto-exports
+  the handoff bundle + brief, so continuity never depends on a manual export. The console is an
+  observability surface: sessions arrive from agent activity (MCP/hooks), not a manual create form.
+  The Sessions view groups
   rows by project, tags each as work / continuity / hook-telemetry, links chain splits via a
   predecessor, shows the agent-ownership history, and collapses superseded handoffs into a
   disclosure. It shows the resumable **work state** (goal + done/doing/todo), achieved assurance

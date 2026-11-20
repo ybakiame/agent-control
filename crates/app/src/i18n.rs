@@ -183,10 +183,6 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("ev.entries", "{} entries checked", "已检查 {} 条"),
     // Sessions
     ("sess.title", "Sessions", "会话"),
-    ("sess.new", "New session", "新建会话"),
-    ("sess.create", "Create session", "创建会话"),
-    ("sess.created", "Session created", "会话已创建"),
-    ("sess.reused", "Reused existing session", "已复用现有会话"),
     ("sess.complete", "Mark completed", "标记完成"),
     ("sess.reopen", "Reopen", "恢复进行中"),
     (
@@ -221,12 +217,6 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "约束快照: {}… · 溯源 {}",
     ),
     ("sess.binding_title", "Binding constraints", "绑定约束"),
-    ("sess.handoff_title", "Handoff bundle", "交接包"),
-    (
-        "sess.handoff_hint",
-        "Writes the bundle and refreshes handoff/latest.md. The receiving harness chooses itself when importing, so no target is needed here.",
-        "写出交接包并刷新 handoff/latest.md。接收方 harness 在导入时自行指定，此处无需填写目标。",
-    ),
     ("sess.export", "Export bundle", "导出交接包"),
     ("sess.exported", "Handoff bundle exported", "交接包已导出"),
     ("sess.bundle_path", "bundle: {}", "交接包：{}"),
@@ -486,7 +476,6 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "竞争主题（可选）",
     ),
     ("ph.project", "C:/path/to/project", "C:/路径/到/项目"),
-    ("ph.task", "What should the agent do?", "希望代理做什么？"),
     ("ph.mcp_port", "9870", "9870"),
     (
         "ph.goal",
@@ -518,16 +507,6 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("log.rule_enabled", "enabled rule '{}'", "已启用规则 '{}'"),
     ("log.rule_disabled", "disabled rule '{}'", "已禁用规则 '{}'"),
     ("log.toggle_failed", "toggle failed: {}", "切换失败: {}"),
-    (
-        "log.task_required",
-        "task and project path are required",
-        "任务与项目路径必填",
-    ),
-    (
-        "log.session_created",
-        "session {} created with {} binding rules",
-        "会话 {} 已创建，含 {} 条绑定规则",
-    ),
     (
         "log.session_failed",
         "session operation failed: {}",
@@ -824,12 +803,6 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "当前项目：{}",
     ),
     ("dash.no_project", "No project selected", "未选择项目"),
-    ("sess.current_project", "Project: {}", "项目：{}"),
-    (
-        "sess.no_project",
-        "Select or onboard a project first.",
-        "请先选择或接入一个项目。",
-    ),
     // Placeholders (projects)
     ("ph.project_path", "C:/path/to/repo", "C:/路径/到/仓库"),
     ("ph.project_name", "Project display name", "项目显示名称"),

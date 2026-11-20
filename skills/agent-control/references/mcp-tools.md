@@ -90,7 +90,9 @@ Close or reopen a session so finished work leaves the active list instead of pil
   entry; defaults to the session owner.
 - Returns the updated `session`. Every transition appends `status_change` (including reopen);
   completing/failing additionally appends `session_end` (the chain stays auditable and is never
-  deleted); `active` reopens it. A completed session no longer
+  deleted) and **auto-exports** the handoff bundle + `handoff/latest.md` brief with the closed
+  status preserved, so a separate `export_handoff` call is optional; `active` reopens it.
+  A completed session no longer
   absorbs `create_session` calls for the same task.
 
 ### export_handoff

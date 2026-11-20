@@ -104,8 +104,6 @@ pub struct Console {
     pub project_name_input: Entity<InputState>,
     pub project_rename_input: Entity<InputState>,
 
-    pub session_task_input: Entity<InputState>,
-    pub session_title_input: Entity<InputState>,
     pub rename_input: Entity<InputState>,
     pub rename_target: Option<Uuid>,
     pub selected_agent: usize,
@@ -144,10 +142,6 @@ impl Console {
         let project_rename_input = cx
             .new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.project_name")));
         let project_tree = cx.new(|cx| TreeState::new(cx));
-        let session_task_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.task")));
-        let session_title_input = cx
-            .new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.session_title")));
         let rename_input = cx
             .new(|cx| InputState::new(window, cx).placeholder(i18n::t(locale, "ph.session_title")));
         let session_goal_input =
@@ -220,8 +214,6 @@ impl Console {
             project_path_input,
             project_name_input,
             project_rename_input,
-            session_task_input,
-            session_title_input,
             rename_input,
             rename_target: None,
             selected_agent: 0,
@@ -274,12 +266,6 @@ impl Console {
         });
         self.project_rename_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.project_name"), window, cx)
-        });
-        self.session_task_input.update(cx, |s, cx| {
-            s.set_placeholder(i18n::t(locale, "ph.task"), window, cx)
-        });
-        self.session_title_input.update(cx, |s, cx| {
-            s.set_placeholder(i18n::t(locale, "ph.session_title"), window, cx)
         });
         self.rename_input.update(cx, |s, cx| {
             s.set_placeholder(i18n::t(locale, "ph.session_title"), window, cx)
@@ -1121,67 +1107,12 @@ impl Console {
 
     /// Returns `Some(reused)` on success (`reused` = an existing active session was returned
     /// instead of creating a duplicate), `None` on failure (already logged).
-    pub fn create_session_from_inputs(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<bool> {
-        let task = self.session_task_input.read(cx).value().trim().to_string();
-        let Some(project) = self.current_project_path() else {
-            self.log(self.t("log.no_project"));
-            return None;
-        };
-        if task.is_empty() {
-            self.log(self.t("log.task_required"));
-            return None;
-        }
-        let agent_id = self
-            .agents
-            .get(self.selected_agent)
-            .map(|a| a.id.clone())
-            .unwrap_or_else(|| "manual".into());
-        match self
-            .store
-            .create_session(&task, &project, &agent_id, vec![], None)
-        {
-            Ok((session, reused)) => {
-                let title = self.session_title_input.read(cx).value().trim().to_string();
-                if !title.is_empty() {
-                    if let Err(e) = self.store.set_session_title(session.id, &title, "console") {
-                        self.log(self.tr("log.rename_failed", &[&e.to_string()]));
-                    }
-                    self.session_title_input
-                        .update(cx, |s, cx| s.set_value("", window, cx));
-                }
-                self.log(self.tr(
-                    "log.session_created",
-                    &[
-                        &session.id.to_string(),
-                        &session.constraint_snapshot.rules.len().to_string(),
-                    ],
-                ));
-                self.selected_session = Some(session.id);
-                self.refresh_data(cx);
-                self.load_session_work_inputs(window, cx);
-                Some(reused)
-            }
-            Err(e) => {
-                self.log(self.tr("log.session_failed", &[&e.to_string()]));
-                None
-            }
-        }
-    }
-
-    pub fn export_handoff(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(session_id) = self.selected_session else {
-            self.log(self.t("log.select_session"));
-            return false;
-        };
+    pub fn export_handoff(&mut self, session_id: Uuid, cx: &mut Context<Self>) -> bool {
         let context = self
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(|s| serde_json::json!({ "summary": s.task, "exported_from": "console" }))
+            .map(|s| serde_json::json!({ "summary": crate::ui::display_title(s), "exported_from": "console" }))
             .unwrap_or_else(|| serde_json::json!({ "exported_from": "console" }));
         match self.store.export_handoff(session_id, None, context) {
             Ok(bundle) => {
@@ -1331,7 +1262,12 @@ impl Console {
         });
     }
 
-    pub fn open_session_rename_dialog(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_session_rename_dialog(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.rename_target = Some(id);
         let current = self
             .sessions
@@ -1369,7 +1305,9 @@ impl Console {
                                 .primary()
                                 .on_click(move |_, window, cx| {
                                     if let Some(c) = save_weak.upgrade() {
-                                        c.update(cx, |this, ccx| this.save_session_rename(window, ccx));
+                                        c.update(cx, |this, ccx| {
+                                            this.save_session_rename(window, ccx)
+                                        });
                                     }
                                 }),
                         ),

@@ -1,3 +1,4 @@
+use agent_control_core::DataLayout;
 use agent_control_core::model::{
     EvidenceEntry, EvidenceKind, OwnershipSpan, ProvenanceRecord, Session, VerificationReport,
 };
@@ -350,7 +351,7 @@ impl Console {
                 )
             });
 
-        let handoff_rows = session.handoffs.iter().map(|h| {
+        let handoff_row = |h: &agent_control_core::model::HandoffRecord, highlight: bool| {
             let tag = if h.acknowledged {
                 Tag::success().child(self.t("sess.ack"))
             } else if h.superseded {
@@ -358,27 +359,103 @@ impl Console {
             } else {
                 Tag::warning().child(self.t("sess.pending_ack"))
             };
-            h_flex()
+            v_flex()
+                .p_2()
                 .gap_1()
-                .items_center()
-                .child(tag)
-                .child(div().text_sm().child(format!(
-                    "{} → {}",
-                    h.from_agent,
-                    h.to_agent.as_deref().unwrap_or(self.t("sess.unspecified"))
-                )))
+                .border_1()
+                .border_color(if highlight {
+                    cx.theme().primary
+                } else {
+                    border
+                })
+                .rounded_sm()
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(local_time(h.timestamp)),
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(tag)
+                        .child(div().text_sm().child(format!(
+                            "{} → {}",
+                            h.from_agent,
+                            h.to_agent.as_deref().unwrap_or(self.t("sess.unspecified"))
+                        )))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(local_time(h.timestamp)),
+                        ),
                 )
+                .child(ui::mono(
+                    cx,
+                    self.tr(
+                        "sess.bundle",
+                        &[
+                            &h.bundle_hash[..12.min(h.bundle_hash.len())],
+                            &h.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        ],
+                    ),
+                ))
                 .into_any_element()
-        });
+        };
+        let latest_handoff = session.handoffs.last();
+        let superseded: Vec<_> = session.handoffs.iter().filter(|h| h.superseded).collect();
+        let other_handoffs = session
+            .handoffs
+            .iter()
+            .filter(|h| !h.superseded && Some(h.id) != latest_handoff.map(|l| l.id))
+            .map(|h| handoff_row(h, false));
+        let bundle_path = self
+            .store
+            .layout
+            .bundles_dir()
+            .join(format!("{}.json", session.id));
+        let latest_path = DataLayout::project_handoff_latest(&session.project_path);
+        let sheet_id = session.id;
         let handoffs = v_flex()
             .gap_1()
-            .child(ui::section_label(cx, self.t("sheet.handoffs")))
-            .children(handoff_rows)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(ui::section_label(cx, self.t("sheet.handoffs")))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("sheet-handoff-export")
+                            .label(self.t("sess.export"))
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if this.export_handoff(sheet_id, cx) {
+                                    this.notify(window, cx, this.t("sess.exported"));
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(ui::mono(
+                cx,
+                self.tr("sess.bundle_path", &[&bundle_path.display().to_string()]),
+            ))
+            .child(ui::mono(
+                cx,
+                self.tr("sess.latest_path", &[&latest_path.display().to_string()]),
+            ))
+            .children(latest_handoff.map(|h| handoff_row(h, true)))
+            .children(other_handoffs)
+            .when(!superseded.is_empty(), |this| {
+                this.child(ui::disclosure(
+                    "sess-handoff-history",
+                    self.tr("sess.handoff_history", &[&superseded.len().to_string()]),
+                    self.open_sections.contains("sess-handoff-history"),
+                    v_flex()
+                        .gap_1()
+                        .children(superseded.iter().map(|h| handoff_row(h, false))),
+                    cx.listener(|this, _, _, cx| {
+                        this.toggle_section("sess-handoff-history", cx);
+                    }),
+                ))
+            })
             .when(session.handoffs.is_empty(), |this| {
                 this.child(
                     div()
