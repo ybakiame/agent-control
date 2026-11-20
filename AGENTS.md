@@ -95,7 +95,10 @@ behind a confirm dialog).
 `create_session(task, project_path, agent_id, task_tags, harness_session_id) -> (Session, bool)` is
 **get-or-create**: an **active** session with the same project + agent + task is returned unchanged
 (`reused = true`), so repeated calls from one harness conversation never pile up duplicate sessions; a
-new task or a closed source session freezes a fresh snapshot. `harness_session_id` (optional, serde
+new task or a closed source session freezes a fresh snapshot. When the source session was **closed**
+with the same (project, agent, task), the new session records it as `predecessor` (serde default,
+guarded `ALTER` column) so chain splits read as one continuity thread instead of duplicates (UX1).
+`harness_session_id` (optional, serde
 default, guarded `ALTER` column) records the harness-native conversation id to distinguish several
 conversations of one harness. `set_session_status(id, status, acting_agent_id) -> Session` closes
 (`Completed`/`Failed`, appending `status_change` + `session_end`) or reopens (`Active`, appending
@@ -713,7 +716,11 @@ status + kind tags; the approve button label, edit hint and success toast are sc
 read-only with status, review note and `approved_rule_id`. `refresh_data` reloads the queue + pending
 count and repairs a dangling selection.
 
-**Sessions lifecycle, work state & deletion** (`views/sessions.rs`): the selected-session detail keeps the
+**Sessions lifecycle, work state & deletion** (`views/sessions.rs`): the list is **grouped by
+project** (UX1) with a per-group count; each row carries a kind tag — `telemetry` (task `hook`),
+`continuity` (has handoffs / a predecessor / handed off) or `work` — plus the derived agent-ownership
+chain (`Console::session_owners`, from `ownership_timeline`, precomputed in `refresh_data`) and a
+`continues <id>` line when `predecessor` links a chain split. The selected-session detail keeps the
 snapshot summary, binding constraints, achieved assurance and handoffs in the open, and collapses the rest.
 The header carries a **Mark completed** / **Reopen** button (`set_selected_session_status` →
 `Store::set_session_status`, toast feedback) beside the danger **Delete session** button; the list
@@ -721,7 +728,9 @@ header has a **Show completed** Switch (`Console.session_show_completed`, defaul
 Completed/Failed rows so finished work leaves the active list. The **Handoff bundle** panel has no
 target input: a hint + **Export bundle** button (`Console::export_handoff`, `to_agent = None`) plus
 mono rows showing the deterministic bundle path (`<root>/bundles/<session_id>.json`) and the
-project-local `handoff/latest.md` brief path; handoff history rows render an unspecified receiver as
+project-local `handoff/latest.md` brief path; only the **latest** handoff record is highlighted
+(primary border), other non-superseded records render plainly, and superseded records collapse into
+a `sess-handoff-history` disclosure (UX1). Handoff rows render an unspecified receiver as
 `sess.unspecified` and tag each record acknowledged (`sess.ack`) / superseded (`sess.superseded`,
 a newer export replaced it) / pending ack (`sess.pending_ack`).
 A **Work state** section shows a locale-formatted last-updated line (`sess.work_updated`,

@@ -236,6 +236,15 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("sess.pending_ack", "pending ack", "待确认"),
     ("sess.superseded", "superseded", "已取代"),
     ("sess.sheet", "Details", "详情"),
+    ("sess.kind_telemetry", "telemetry", "遥测"),
+    ("sess.kind_continuity", "continuity", "连续性"),
+    ("sess.kind_work", "work", "工作"),
+    ("sess.continues", "continues {}", "接续 {}"),
+    (
+        "sess.handoff_history",
+        "Superseded handoffs ({})",
+        "已取代的交接（{}）",
+    ),
     // Per-session Sheet (UX2): overview / handoffs / provenance / evidence
     ("sheet.title", "Session details", "会话详情"),
     ("sheet.empty", "No session selected", "未选择会话"),

@@ -107,6 +107,7 @@ pub struct Console {
     pub session_task_input: Entity<InputState>,
     pub selected_agent: usize,
     pub session_show_completed: bool,
+    pub session_owners: std::collections::HashMap<Uuid, Vec<String>>,
     pub session_goal_input: Entity<TextareaState>,
     pub session_work_input: Entity<TextareaState>,
     pub sheet_session: Option<Uuid>,
@@ -215,6 +216,7 @@ impl Console {
             session_task_input,
             selected_agent: 0,
             session_show_completed: false,
+            session_owners: std::collections::HashMap::new(),
             session_goal_input,
             session_work_input,
             sheet_session: None,
@@ -322,6 +324,21 @@ impl Console {
             .load_rules(self.current_project_path().as_deref())
             .unwrap_or_default();
         self.sessions = self.store.list_sessions().unwrap_or_default();
+        self.session_owners = self
+            .sessions
+            .iter()
+            .map(|s| {
+                let mut owners: Vec<String> = self
+                    .store
+                    .ownership_timeline(s.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|span| span.agent_id)
+                    .collect();
+                owners.dedup();
+                (s.id, owners)
+            })
+            .collect();
         self.provenance = self.store.list_provenance(50).unwrap_or_default();
         self.agents = self.store.load_agents().unwrap_or_default();
         if self.selected_session.is_none() {

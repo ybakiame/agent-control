@@ -32,60 +32,116 @@ impl Console {
                     || !matches!(s.status, SessionStatus::Completed | SessionStatus::Failed)
             })
             .collect();
-        let session_rows = visible_sessions.iter().map(|s| {
-            let id = s.id;
-            let selected = self.selected_session == Some(id);
-            let row_weak = weak.clone();
-            let delete_label = self.t("sess.delete").to_string();
-            v_flex()
-                .id(format!("session-row-{id}"))
-                .role(Role::Button)
-                .aria_label(s.task.clone())
-                .p_3()
-                .gap_1()
-                .border_1()
-                .border_color(if selected { primary } else { border })
-                .rounded_md()
-                .bg(if selected { list_active } else { bg })
-                .hover(move |s| {
-                    if selected {
-                        s.bg(list_active)
-                    } else {
-                        s.bg(list_hover)
-                    }
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.select_session(id, window, cx);
-                }))
-                .context_menu(move |menu, _window, _cx| {
-                    session_row_menu(menu, row_weak.clone(), id, delete_label.clone())
-                })
-                .child(div().font_medium().text_sm().child(s.task.clone()))
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .child(ui::status_tag(s.status, self.locale))
-                        .child(Tag::secondary().child(s.agent_id.clone()))
-                        .child(
-                            Button::new(format!("sess-sheet-{id}"))
-                                .label(self.t("sess.sheet"))
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_session_sheet(id, window, cx);
-                                })),
-                        ),
-                )
-                .child(div().text_xs().text_color(muted).child(self.tr(
-                    "sess.binding",
-                    &[
-                        &s.constraint_snapshot.rules.len().to_string(),
-                        &id.to_string()[..8],
-                    ],
-                )))
-                .into_any_element()
-        });
+        let mut groups: Vec<(std::path::PathBuf, Vec<&agent_control_core::model::Session>)> =
+            Vec::new();
+        for s in &visible_sessions {
+            match groups.iter_mut().find(|(p, _)| p == &s.project_path) {
+                Some((_, rows)) => rows.push(s),
+                None => groups.push((s.project_path.clone(), vec![s])),
+            }
+        }
+        let grouped_rows: Vec<AnyElement> = groups
+            .iter()
+            .map(|(path, rows)| {
+                let name = self
+                    .projects
+                    .iter()
+                    .find(|p| &p.path == path)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.to_string_lossy().to_string())
+                    });
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(div().text_xs().text_color(muted).child(name))
+                            .child(Tag::secondary().child(rows.len().to_string())),
+                    )
+                    .children(rows.iter().map(|s| {
+                        let id = s.id;
+                        let selected = self.selected_session == Some(id);
+                        let row_weak = weak.clone();
+                        let delete_label = self.t("sess.delete").to_string();
+                        let kind_tag = if s.task == "hook" {
+                            Tag::secondary().child(self.t("sess.kind_telemetry"))
+                        } else if !s.handoffs.is_empty()
+                            || s.predecessor.is_some()
+                            || s.status == SessionStatus::HandedOff
+                        {
+                            Tag::info().child(self.t("sess.kind_continuity"))
+                        } else {
+                            Tag::primary().child(self.t("sess.kind_work"))
+                        };
+                        let owners = self
+                            .session_owners
+                            .get(&id)
+                            .filter(|o| o.len() > 1)
+                            .map(|o| o.join(" → "));
+                        v_flex()
+                            .id(format!("session-row-{id}"))
+                            .role(Role::Button)
+                            .aria_label(s.task.clone())
+                            .p_3()
+                            .gap_1()
+                            .border_1()
+                            .border_color(if selected { primary } else { border })
+                            .rounded_md()
+                            .bg(if selected { list_active } else { bg })
+                            .hover(move |s| {
+                                if selected {
+                                    s.bg(list_active)
+                                } else {
+                                    s.bg(list_hover)
+                                }
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_session(id, window, cx);
+                            }))
+                            .context_menu(move |menu, _window, _cx| {
+                                session_row_menu(menu, row_weak.clone(), id, delete_label.clone())
+                            })
+                            .child(div().font_medium().text_sm().child(s.task.clone()))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(ui::status_tag(s.status, self.locale))
+                                    .child(kind_tag)
+                                    .child(Tag::secondary().child(s.agent_id.clone()))
+                                    .child(
+                                        Button::new(format!("sess-sheet-{id}"))
+                                            .label(self.t("sess.sheet"))
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.open_session_sheet(id, window, cx);
+                                            })),
+                                    ),
+                            )
+                            .child(div().text_xs().text_color(muted).child(self.tr(
+                                "sess.binding",
+                                &[
+                                    &s.constraint_snapshot.rules.len().to_string(),
+                                    &id.to_string()[..8],
+                                ],
+                            )))
+                            .children(owners.map(|o| div().text_xs().text_color(muted).child(o)))
+                            .children(s.predecessor.map(|p| {
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(self.tr("sess.continues", &[&p.to_string()[..8]]))
+                            }))
+                            .into_any_element()
+                    }))
+                    .into_any_element()
+            })
+            .collect();
 
         let agent_buttons = self.agents.iter().enumerate().map(|(index, agent)| {
             let selected = self.selected_agent == index;
@@ -152,7 +208,7 @@ impl Console {
                     .child(div().text_xs().text_color(muted).child(a.basis.clone()))
                     .into_any_element()
             });
-            let handoff_rows = session.handoffs.iter().map(|h| {
+            let handoff_row = |h: &agent_control_core::model::HandoffRecord, highlight: bool| {
                 let ack = if h.acknowledged {
                     Tag::success().child(self.t("sess.ack"))
                 } else if h.superseded {
@@ -164,7 +220,7 @@ impl Console {
                     .p_2()
                     .gap_1()
                     .border_1()
-                    .border_color(border)
+                    .border_color(if highlight { primary } else { border })
                     .rounded_sm()
                     .child(
                         h_flex()
@@ -185,7 +241,14 @@ impl Console {
                         ],
                     )))
                     .into_any_element()
-            });
+            };
+            let latest_handoff = session.handoffs.last();
+            let superseded: Vec<_> = session.handoffs.iter().filter(|h| h.superseded).collect();
+            let handoff_rows = session
+                .handoffs
+                .iter()
+                .filter(|h| !h.superseded && Some(h.id) != latest_handoff.map(|l| l.id))
+                .map(|h| handoff_row(h, false));
 
             let bundle_path = self
                 .store
@@ -451,7 +514,21 @@ impl Console {
                             cx,
                             self.tr("sess.latest_path", &[&latest_path.display().to_string()]),
                         ))
-                        .children(handoff_rows),
+                        .children(latest_handoff.map(|h| handoff_row(h, true)))
+                        .children(handoff_rows)
+                        .when(!superseded.is_empty(), |this| {
+                            this.child(ui::disclosure(
+                                "sess-handoff-history",
+                                self.tr("sess.handoff_history", &[&superseded.len().to_string()]),
+                                self.open_sections.contains("sess-handoff-history"),
+                                v_flex()
+                                    .gap_1()
+                                    .children(superseded.iter().map(|h| handoff_row(h, false))),
+                                cx.listener(|this, _, _, cx| {
+                                    this.toggle_section("sess-handoff-history", cx);
+                                }),
+                            ))
+                        }),
                 )
                 .into_any_element()
         } else {
@@ -509,7 +586,7 @@ impl Console {
                                 .gap_2()
                                 .id("sessions-list")
                                 .overflow_y_scroll()
-                                .children(session_rows),
+                                .children(grouped_rows),
                         ),
                 )
                 .child(

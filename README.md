@@ -89,9 +89,11 @@ delivered into the tools agents already read.
 - **Session lifecycle.** `create_session` is get-or-create per (project, agent, task) — repeated
   calls reuse the active session (`reused: true`) instead of piling up duplicates. `set_session_status`
   closes (`completed`/`failed`) or reopens (`active`) a session, appending a `session_end` evidence
-  entry so finished work leaves the active list while staying auditable. The Sessions view shows the
-  resumable **work state** (goal + done/doing/todo), achieved assurance tiers, and a delete action
-  that cascades to the session's evidence + provenance.
+  entry so finished work leaves the active list while staying auditable. The Sessions view groups
+  rows by project, tags each as work / continuity / hook-telemetry, links chain splits via a
+  predecessor, shows the agent-ownership history, and collapses superseded handoffs into a
+  disclosure. It shows the resumable **work state** (goal + done/doing/todo), achieved assurance
+  tiers, and a delete action that cascades to the session's evidence + provenance.
 - **Bilingual UI (English / 简体中文)** with a runtime switcher in Settings; the choice is
   persisted to `<data root>/config.toml`.
 - **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 28 tools plus

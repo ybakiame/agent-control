@@ -538,6 +538,12 @@ fn create_session_reuses_active_same_task() {
         .unwrap();
     assert!(!reused);
     assert_ne!(fresh.id, first.id);
+    // The split links back to the closed session so the pair reads as one thread (UX1).
+    assert_eq!(fresh.predecessor, Some(first.id));
+    assert_eq!(first.predecessor, None);
+    assert_eq!(other.predecessor, None);
+    let reloaded = store.get_session(fresh.id).unwrap().unwrap();
+    assert_eq!(reloaded.predecessor, Some(first.id));
 }
 
 #[test]

@@ -247,14 +247,26 @@ impl Store {
         task_tags: Vec<String>,
         harness_session_id: Option<String>,
     ) -> Result<(Session, bool)> {
-        if let Some(existing) = self.db.list_sessions()?.into_iter().find(|s| {
+        let all = self.db.list_sessions()?;
+        if let Some(existing) = all.iter().find(|s| {
             s.status == SessionStatus::Active
                 && s.agent_id == agent_id
                 && s.project_path == project_path
                 && s.task == task
         }) {
-            return Ok((existing, true));
+            return Ok((existing.clone(), true));
         }
+        // A closed same-(project, agent, task) session means this is a chain split, not a duplicate.
+        let predecessor = all
+            .iter()
+            .filter(|s| {
+                s.status != SessionStatus::Active
+                    && s.agent_id == agent_id
+                    && s.project_path == project_path
+                    && s.task == task
+            })
+            .max_by_key(|s| s.created_at)
+            .map(|s| s.id);
         let ctx = QueryContext {
             project_path: project_path.to_path_buf(),
             agent_id: agent_id.to_string(),
@@ -286,6 +298,7 @@ impl Store {
             goal: String::new(),
             work_items: vec![],
             harness_session_id,
+            predecessor,
         };
         self.db.upsert_session(&session)?;
         // The snapshot resolution ran before the session id existed; link its provenance now (UX2).
@@ -300,6 +313,7 @@ impl Store {
                 "rule_count": session.constraint_snapshot.rules.len(),
                 "provenance_id": record.id,
                 "harness_session_id": session.harness_session_id,
+                "predecessor": session.predecessor,
             }),
         )?;
         Ok((session, false))
@@ -874,6 +888,7 @@ impl Store {
                 goal: bundle.goal.clone(),
                 work_items: bundle.work_items.clone(),
                 harness_session_id: None,
+                predecessor: None,
             },
         };
         let snapshot_hash = canonical_hash(

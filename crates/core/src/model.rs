@@ -607,6 +607,10 @@ pub struct Session {
     /// conversations of the same harness sharing one Agent Control session.
     #[serde(default)]
     pub harness_session_id: Option<String>,
+    /// The closed same-(project, agent, task) session this one continues, when `create_session`
+    /// split a new snapshot off it; links chain splits so they read as one thread (UX1).
+    #[serde(default)]
+    pub predecessor: Option<Uuid>,
 }
 
 /// One span of session ownership, derived from the evidence chain (SessionStart agent plus

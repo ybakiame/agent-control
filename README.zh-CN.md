@@ -65,7 +65,9 @@ Agent Control 是同一规则库之上的**解析层**，会**编译进**这些�
   让推断出的契约始终有人在环。
 - **会话生命周期。** `create_session` 按 (项目, agent, 任务) get-or-create——重复调用复用活动会话
   （`reused: true`），而非堆积重复项。`set_session_status` 关闭（`completed`/`failed`）或重开（`active`）会话，
-  并追加 `session_end` 证据条目，让已完成的工作离开活动列表却仍可审计。会话视图显示可恢复的**工作态**
+  并追加 `session_end` 证据条目，让已完成的工作离开活动列表却仍可审计。会话视图按项目分组，
+  为每行标记工作 / 连续性 / hook 遥测，用 predecessor 链接同任务链分裂，显示代理归属历史，
+  并把已取代的交接收进折叠区。视图显示可恢复的**工作态**
   （goal + done/doing/todo）、已达保证分级，以及级联删除会话证据 + 溯源的删除动作。
 - **双语 UI（English / 简体中文）**，设置内有运行时切换器；选择持久化到 `<数据根>/config.toml`。
 - **MCP 服务端**（rmcp），支持 **stdio** 与 **Streamable HTTP** 两种模式，暴露 28 个工具及资源与提示。

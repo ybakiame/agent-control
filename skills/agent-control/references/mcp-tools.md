@@ -35,6 +35,8 @@ Freeze a constraint snapshot for a unit of work. **Idempotent per (project_path,
 an existing **active** session with the same triple is returned unchanged (`reused: true`) instead
 of creating a duplicate, so repeated calls from one harness conversation never pile up sessions.
 A new task — or a closed (completed/failed/handed-off) source session — freezes a fresh snapshot.
+Splitting from a closed same-(project, agent, task) session records it as the new session's
+`predecessor`, so chain splits read as one continuity thread (visible in the console's session list).
 - `task` (string, required), `project_path` (string, required), `agent_id` (string, required),
   `task_tags` (string[], default `[]`), `harness_session_id` (string, optional — the harness-native
   conversation id, distinguishing several conversations of one harness).
