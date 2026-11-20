@@ -1,10 +1,10 @@
-use agent_control_core::{ExportTarget, HookScope, HookTarget};
+use agent_control_core::{HookScope, HookTarget};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tree::tree;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, StyledExt, h_flex, v_flex};
@@ -142,8 +142,9 @@ impl Console {
                 } else {
                     Tag::secondary().child(hooks_summary)
                 };
-                let export_help_open = self.open_sections.contains("proj-export-help");
-                let hooks_help_open = self.open_sections.contains("proj-hooks-help");
+                let integration_detail_open =
+                    self.open_sections.contains("proj-integration-detail");
+                let hooks_on = registered_count > 0;
 
                 ui::card(cx)
                     .child(
@@ -232,75 +233,87 @@ impl Console {
                                 h_flex()
                                     .gap_2()
                                     .items_center()
-                                    .child(ui::section_label(cx, self.t("proj.export_title")))
+                                    .child(ui::section_label(cx, self.t("proj.integration_title")))
                                     .when(self.export_stale, |this| {
                                         this.child(
                                             Tag::warning().child(self.t("proj.export_stale")),
                                         )
-                                    }),
+                                    })
+                                    .child(hooks_tag),
                             )
-                            .child(h_flex().gap_3().flex_wrap().children(
-                                ExportTarget::ALL.iter().map(|t| {
-                                    let (key, id) = match t {
-                                        ExportTarget::Agents => {
-                                            ("proj.target_agents", "export-target-agents")
-                                        }
-                                        ExportTarget::Claude => {
-                                            ("proj.target_claude", "export-target-claude")
-                                        }
-                                        ExportTarget::Gemini => {
-                                            ("proj.target_gemini", "export-target-gemini")
-                                        }
-                                        ExportTarget::Cursor => {
-                                            ("proj.target_cursor", "export-target-cursor")
-                                        }
-                                    };
-                                    let checked = self.export_targets.contains(t);
-                                    let target = *t;
-                                    Checkbox::new(id)
-                                        .label(self.t(key))
-                                        .checked(checked)
-                                        .on_click(cx.listener(move |this, next, _, cx| {
-                                            this.toggle_export_target(target, *next, cx);
-                                        }))
-                                        .into_any_element()
-                                }),
-                            ))
+                            .child(
+                                Button::new("project-setup")
+                                    .label(self.t("proj.setup"))
+                                    .primary()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.setup_for_selected_project(cx);
+                                    })),
+                            )
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .flex_wrap()
+                                    .items_center()
                                     .child(
-                                        Button::new("project-setup")
-                                            .label(self.t("proj.setup"))
-                                            .primary()
-                                            .small()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.setup_for_selected_project(cx);
-                                            })),
+                                        div()
+                                            .flex_1()
+                                            .text_sm()
+                                            .child(self.t("proj.pointer_toggle")),
                                     )
                                     .child(
-                                        Button::new("project-export")
-                                            .label(self.t("proj.export"))
-                                            .primary()
-                                            .small()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.export_native_for_selected_project(cx);
+                                        Switch::new("integration-pointer")
+                                            .checked(self.export_pointer_on)
+                                            .accessibility_label(self.t("proj.pointer_toggle"))
+                                            .on_click(cx.listener(|this, next, _, cx| {
+                                                this.set_integration_pointer(*next, cx);
                                             })),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_sm()
+                                            .child(self.t("proj.inline_toggle")),
                                     )
                                     .child(
-                                        Button::new("project-revoke")
-                                            .label(self.t("proj.revoke"))
-                                            .small()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.confirm_revoke_native(window, cx);
+                                        Switch::new("integration-inline")
+                                            .checked(self.export_inline)
+                                            .accessibility_label(self.t("proj.inline_toggle"))
+                                            .on_click(cx.listener(|this, next, _, cx| {
+                                                this.set_integration_inline(*next, cx);
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(self.t("proj.inline_hint")),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div().flex_1().text_sm().child(self.t("proj.hooks_toggle")),
+                                    )
+                                    .child(
+                                        Switch::new("integration-hooks")
+                                            .checked(hooks_on)
+                                            .accessibility_label(self.t("proj.hooks_toggle"))
+                                            .on_click(cx.listener(|this, next, window, cx| {
+                                                this.set_integration_hooks(*next, window, cx);
                                             })),
                                     ),
                             )
                             .child(ui::disclosure(
-                                "proj-export-help",
-                                self.t("proj.export_details"),
-                                export_help_open,
+                                "proj-integration-detail",
+                                self.t("proj.integration_details"),
+                                integration_detail_open,
                                 v_flex()
                                     .gap_1()
                                     .pt_1()
@@ -308,19 +321,7 @@ impl Console {
                                         div()
                                             .text_xs()
                                             .text_color(muted)
-                                            .child(self.t("proj.export_targets_hint")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
                                             .child(self.t("proj.export_hint")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(self.t("proj.revoke_hint")),
                                     )
                                     .when(self.export_stale, |this| {
                                         this.child(
@@ -329,144 +330,66 @@ impl Console {
                                                 .text_color(cx.theme().warning)
                                                 .child(self.t("proj.export_stale_hint")),
                                         )
-                                    }),
-                                cx.listener(|this, _, _, cx| {
-                                    this.toggle_section("proj-export-help", cx);
-                                }),
-                            )),
-                    )
-                    .child(div().h(px(1.)).w_full().bg(cx.theme().border))
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(ui::section_label(cx, self.t("proj.hooks_title")))
-                                    .child(hooks_tag),
-                            )
-                            .child(h_flex().gap_3().flex_wrap().children(
-                                HookTarget::ALL.iter().map(|t| {
-                                    let target = *t;
-                                    let (key, id) = match target {
-                                        HookTarget::Claude => {
-                                            ("proj.hook_target_claude", "hook-target-claude")
-                                        }
-                                        HookTarget::CodeBuddy => {
-                                            ("proj.hook_target_codebuddy", "hook-target-codebuddy")
-                                        }
-                                        HookTarget::WorkBuddy => {
-                                            ("proj.hook_target_workbuddy", "hook-target-workbuddy")
-                                        }
-                                        HookTarget::Qoder => {
-                                            ("proj.hook_target_qoder", "hook-target-qoder")
-                                        }
-                                        HookTarget::QoderCn => {
-                                            ("proj.hook_target_qoder_cn", "hook-target-qoder-cn")
-                                        }
-                                        HookTarget::Codex => {
-                                            ("proj.hook_target_codex", "hook-target-codex")
-                                        }
-                                        HookTarget::Cursor => {
-                                            ("proj.hook_target_cursor", "hook-target-cursor")
-                                        }
-                                        HookTarget::Antigravity => (
-                                            "proj.hook_target_antigravity",
-                                            "hook-target-antigravity",
-                                        ),
-                                        HookTarget::Kimi => {
-                                            ("proj.hook_target_kimi", "hook-target-kimi")
-                                        }
-                                    };
-                                    let checked = self.hook_targets.contains(&target);
-                                    let status =
-                                        self.hook_statuses.iter().find(|s| s.target == target);
-                                    let registered = status.map(|s| s.registered).unwrap_or(false);
-                                    let installed = status.map(|s| s.installed).unwrap_or(false);
-                                    let user_scope = target.scope() == HookScope::User;
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(
-                                            Checkbox::new(id)
-                                                .label(self.t(key))
-                                                .checked(checked)
-                                                .on_click(cx.listener(move |this, next, _, cx| {
-                                                    this.toggle_hook_target(target, *next, cx);
-                                                })),
-                                        )
-                                        .when(user_scope, |this| {
-                                            this.child(
-                                                Tag::info().child(self.t("proj.hook_scope_user")),
-                                            )
-                                        })
-                                        .when(registered, |this| {
-                                            this.child(
-                                                Tag::success()
-                                                    .child(self.t("proj.hook_registered")),
-                                            )
-                                        })
-                                        .when(!registered && installed, |this| {
-                                            this.child(
-                                                Tag::secondary()
-                                                    .child(self.t("proj.hook_installed")),
-                                            )
-                                        })
-                                        .into_any_element()
-                                }),
-                            ))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .flex_wrap()
-                                    .child(
-                                        Button::new("project-hooks-register")
-                                            .label(self.t("proj.hooks_register"))
-                                            .primary()
-                                            .small()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.register_hooks_for_selected_project(
-                                                    window, cx,
-                                                );
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("project-hooks-revoke")
-                                            .label(self.t("proj.hooks_revoke"))
-                                            .small()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.confirm_revoke_hooks(window, cx);
-                                            })),
-                                    ),
-                            )
-                            .child(ui::disclosure(
-                                "proj-hooks-help",
-                                self.t("proj.hooks_details"),
-                                hooks_help_open,
-                                v_flex()
-                                    .gap_1()
-                                    .pt_1()
+                                    })
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(muted)
                                             .child(self.t("proj.hooks_hint")),
                                     )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(self.t("proj.hooks_register_hint")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(self.t("proj.hooks_revoke_hint")),
-                                    ),
+                                    .children(HookTarget::ALL.iter().map(|t| {
+                                        let target = *t;
+                                        let key = match target {
+                                            HookTarget::Claude => "proj.hook_target_claude",
+                                            HookTarget::CodeBuddy => "proj.hook_target_codebuddy",
+                                            HookTarget::WorkBuddy => "proj.hook_target_workbuddy",
+                                            HookTarget::Qoder => "proj.hook_target_qoder",
+                                            HookTarget::QoderCn => "proj.hook_target_qoder_cn",
+                                            HookTarget::Codex => "proj.hook_target_codex",
+                                            HookTarget::Cursor => "proj.hook_target_cursor",
+                                            HookTarget::Antigravity => {
+                                                "proj.hook_target_antigravity"
+                                            }
+                                            HookTarget::Kimi => "proj.hook_target_kimi",
+                                        };
+                                        let status =
+                                            self.hook_statuses.iter().find(|s| s.target == target);
+                                        let registered =
+                                            status.map(|s| s.registered).unwrap_or(false);
+                                        let installed =
+                                            status.map(|s| s.installed).unwrap_or(false);
+                                        let user_scope = target.scope() == HookScope::User;
+                                        h_flex()
+                                            .gap_1()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(self.t(key)),
+                                            )
+                                            .when(user_scope, |this| {
+                                                this.child(
+                                                    Tag::info()
+                                                        .child(self.t("proj.hook_scope_user")),
+                                                )
+                                            })
+                                            .when(registered, |this| {
+                                                this.child(
+                                                    Tag::success()
+                                                        .child(self.t("proj.hook_registered")),
+                                                )
+                                            })
+                                            .when(!registered && installed, |this| {
+                                                this.child(
+                                                    Tag::secondary()
+                                                        .child(self.t("proj.hook_installed")),
+                                                )
+                                            })
+                                            .into_any_element()
+                                    })),
                                 cx.listener(|this, _, _, cx| {
-                                    this.toggle_section("proj-hooks-help", cx);
+                                    this.toggle_section("proj-integration-detail", cx);
                                 }),
                             )),
                     )

@@ -263,6 +263,11 @@ or enforcement — the block directs the agent to read the live rules like any A
 - `include_user` (bool, default `false`) — also write a **user** preferences pointer to
   `~/.claude/CLAUDE.md` (global, follows the user). Leave `false` for a project-only export so nothing
   outside the repo is touched.
+- `inline` (bool, default `false`) — opt-in: embed the enabled project `contract`/`constraint` rule
+  bodies plus a ruleset hash in the block, with a `<!-- agent-control:mode:inline -->` marker and a
+  `<!-- agent-control:ruleset:<sha256> -->` line. Trades the pointer's never-stale property for
+  agents that only read the file: a rule edit then makes the block stale until re-export
+  (`check_export_drift` compares the ruleset hashes). Default off keeps the static pointer.
 - Writes an in-place **managed block** delimited by `<!-- agent-control:begin -->` /
   `<!-- agent-control:end -->`. The body is a constant, **discovery-first** pointer (`PROJECT_GUIDANCE`):
   it opens with "understand this project before changing it" and tells the
@@ -293,17 +298,20 @@ or enforcement — the block directs the agent to read the live rules like any A
 - Errors (`isError`): empty `project_path`, an unknown `targets` name, or a malformed existing block.
 
 ### check_export_drift
-Detect native entry points missing the **current-format** pointer block (**file-vs-store format**
-drift). Read-only: it prompts a re-export and **never rewrites** files.
+Detect native entry points missing the **current-format** pointer block or holding an outdated
+**inline** snapshot (**file-vs-store** drift). Read-only: it prompts a re-export and **never rewrites**
+files.
 - `project_path` (string, required), `targets` (string[], optional, same selection as `export_native`,
   omitted → `["agents"]`), `include_user` (bool, default `false`).
 - Each managed block embeds a **block-format version** (`<!-- agent-control:block-format:2 -->`). A
   target is `stale` when it exists and that version differs from the current `BLOCK_FORMAT` — e.g. a
   legacy v1 full-text block (which carried a ruleset hash, no version marker) reads as stale and
-  should be migrated. Because the pointer is static, a **rule edit does not** make it stale.
+  should be migrated. Because the pointer is static, a **rule edit does not** make it stale; an
+  **inline** block (`mode:inline`) additionally carries a ruleset hash and **is** stale when
+  `exported_ruleset != current_ruleset`.
 - Returns: `report` (`DriftReport`: `project_path`, `stale` bool, `targets[]` each
-  `{ path, exists, exported_format, current_format, stale }`) and an `instruction`. A never-exported
-  file is **not** stale (`exists: false`).
+  `{ path, exists, exported_format, current_format, inline, exported_ruleset, current_ruleset, stale }`)
+  and an `instruction`. A never-exported file is **not** stale (`exists: false`).
 - Scope limit: detects layer-1 (missing/older-format block) only — **not** whether an already-running
   session's injected context is stale (layer 2). When stale, re-run `export_native`.
 - Errors (`isError`): empty `project_path`, an unknown `targets` name.

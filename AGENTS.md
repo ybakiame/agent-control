@@ -121,9 +121,10 @@ superseded.
 
 **Native export** (`core/src/export.rs` + `Store::export_native`): writes a *static pointer block*
 into the selected harness entry points so agents that never call MCP still learn where the contracts
-live. `export_native(project_path, targets: &[ExportTarget], include_user) -> ExportReport` loads the
-**enabled** rules (to report counts) and writes a managed block — `<!-- agent-control:begin --> …
-<!-- agent-control:end -->` — into each selected target. The block body is the constant
+live. `export_native(project_path, targets: &[ExportTarget], include_user, inline) -> ExportReport`
+loads the **enabled** rules (to report counts) and writes a managed block — `<!-- agent-control:begin --> …
+<!-- agent-control:end -->` — into each selected target. With `inline = false` (default) the block body
+is the constant
 `PROJECT_GUIDANCE`: it leads with **discovery** — "start by understanding this project before changing
 it" — and tells the agent to **read and summarize** the enabled `contract`/`constraint` rules in
 `.agent-control/rules/` (priority wins, `applies_to` narrows, skip `enabled: false`), then personal
@@ -131,7 +132,14 @@ preferences in `~/.agent-control/rules/user/`, and to prefer MCP `get_applicable
 resolution. It notes that machine/project-local environment notes live in git-ignored
 `.agent-control/local/` and reach the agent only through the briefing/hook — **never** this committed
 file. It does **not** copy rule text, so the body never varies with the rule set: editing a rule never
-makes the block stale and re-export is byte-idempotent. `export_native` loads only the enabled
+makes the block stale and re-export is byte-idempotent. With `inline = true` (opt-in, UX9) the block
+additionally carries a `<!-- agent-control:mode:inline -->` marker, a
+`<!-- agent-control:ruleset:<sha256> -->` line (`Store::inline_ruleset_hash`, a `canonical_hash` over
+the enabled project contract/constraint rules' `{id,title,content}`) and the rule bodies rendered by
+`render_inline_contracts` — so a rule edit **does** dirty the block until re-export (the deliberate
+v1-style tradeoff, default off). `wrap_block_mode(body, inline, ruleset_hash)` writes the markers;
+`read_exported_inline` / `read_exported_ruleset` parse them; pointer blocks carry **no** mode line, so
+they stay byte-identical to v2. `export_native` loads only the enabled
 `Project`/`User` rules for its counts; `Environment` rules are deliberately excluded from every
 committed target. `ExportTarget` (`Agents` | `Claude` | `Gemini` | `Cursor`,
 serde lowercase) selects the files via `DataLayout::project_agents_md` / `project_claude_md` /
@@ -148,8 +156,13 @@ the markers, append when absent, and error on a lone marker. The project guidanc
 **no trailing newline**; the file's terminating newline is added on append so it survives as the suffix
 after the end marker — this keeps re-export **byte-idempotent** (`TargetOutcome.action` = `created` |
 `updated` | `unchanged`; unchanged files are not rewritten). Backs the MCP `export_native` tool and the
-Projects-view target checkboxes + **Export to harnesses** button
-(`Console::export_native_for_selected_project`, project-only, `Console::export_targets`). The companion
+Projects-view **Integration** section (UX9): an `AGENTS.md pointer` Switch
+(`integration-pointer`, on = `export_native([Agents])`, off = `revoke_native([Agents])`), an opt-in
+`Inline-list contracts in AGENTS.md` Switch (`integration-inline`, default off,
+`Console::export_inline`) and an `Enforcement hooks` Switch (`integration-hooks`, on =
+`register_hooks(HookTarget::ALL)`, off = confirm → `revoke_hooks`), plus the primary **Setup** button.
+The GUI writes only `AGENTS.md`; the other three targets remain MCP-only. Handlers:
+`Console::set_integration_pointer` / `set_integration_inline` / `set_integration_hooks`. The companion
 `scripts/agent-control-hook.mjs` is a dependency-free Claude Code **SessionStart** hook that calls
 `get_applicable_rules` over MCP HTTP and injects a briefing via `hookSpecificOutput.additionalContext`;
 it is read-only and exits `0` silently when the daemon is unreachable. The hook also calls
@@ -160,17 +173,20 @@ a re-export, never rewrites). Reach ≠ verify ≠ enforce — see **Assurance t
 managed block embeds a *block-format version* (`FORMAT_PREFIX = "<!-- agent-control:block-format:"`,
 `BLOCK_FORMAT = 2`); `read_exported_format` extracts it (a legacy v1 full-text block carried a ruleset
 hash instead, so it reads as `None`). `export_drift(project_path, targets, include_user) -> DriftReport`
-reports `TargetDrift { path, exists, exported_format: Option<u32>, current_format, stale }` per target;
-`stale = exists && exported_format != Some(BLOCK_FORMAT)` — a never-exported file is **not** stale, and a
-rule edit does **not** make a current pointer stale (the body is static). Drift therefore means "missing
-block or an older format" (e.g. a v1 block to migrate), detecting **file-vs-store format** drift (layer
-1) only, **not** whether a running session's injected context is stale (layer 2).
+reports `TargetDrift { path, exists, exported_format: Option<u32>, current_format, inline,
+exported_ruleset: Option<String>, current_ruleset: Option<String>, stale }` per target;
+`stale = exists && (exported_format != Some(BLOCK_FORMAT) || (inline && exported_ruleset !=
+current_ruleset))` — a never-exported file is **not** stale, and a rule edit does **not** make a current
+*pointer* stale (the body is static), but **does** make an *inline* block stale (ruleset-hash check).
+Drift therefore means "missing block, an older format, or an outdated inline snapshot", detecting
+**file-vs-store** drift (layer 1) only, **not** whether a running session's injected context is stale
+(layer 2).
 `revoke_native(project_path, targets, include_user) -> RevokeReport` is the explicit undo: it strips the
 block via `remove_managed_block`, preserving surrounding prose (`action = removed`), deletes a file that
 held only the block or only the generated Cursor frontmatter (`deleted`), and leaves a block-free target
 `unchanged`. Backs the MCP `check_export_drift` / `revoke_native` tools, the hook warning, the
-Projects-view **export stale** badge (`Console::export_stale`, refreshed in
-`refresh_data`/`select_project`/export — never at render time) and the **Revoke** button
+Projects-view **export stale** badge (`Console::export_stale` + `export_pointer_on`, refreshed in
+`refresh_data`/`select_project`/export — never at render time); revoking rides the pointer Switch off
 (`Console::confirm_revoke_native` → `revoke_native_for_selected_project`).
 
 **Assurance tiers** (`core/src/model.rs` + `Store::verify_constraints`): two orthogonal axes.
@@ -394,11 +410,15 @@ the session's goal + items and returns the updated session. `export_handoff` car
 bundle and `handoff/latest.md` (a **Goal** + **Work state** section), and `import_handoff` /
 `get_session_context` surface them, so a new harness inherits progress instead of relying on its own
 todo list. Call it as work completes/starts and before handing off.
-`export_native` (`project_path`, optional `targets`, optional `include_user`) writes a static pointer
-block into the selected native harness entry points via `Store::export_native`. `targets` is a list of
+`export_native` (`project_path`, optional `targets`, optional `include_user`, optional `inline`)
+writes a managed pointer block into the selected native harness entry points via
+`Store::export_native`. `targets` is a list of
 `agents|claude|gemini|cursor` (omitted → `AGENTS.md` only); the block points at the live rules in
 `.agent-control/rules/` and does **not** copy rule text, so a rule edit never makes it stale and
-re-export is byte-idempotent. Everything outside the block is preserved; it returns an `ExportReport`
+re-export is byte-idempotent. `inline: true` (default false) additionally embeds the enabled project
+contract/constraint bodies plus a ruleset hash (mode marker `inline`), trading staleness-on-edit for
+agents that only read the file; `check_export_drift` then flags ruleset drift until re-export.
+Everything outside the block is preserved; it returns an `ExportReport`
 with per-target `created|updated|unchanged`. The guidance leads with read-and-summarize discovery of
 the project norms, excludes environment notes (git-ignored `local/`, briefing-only), and ends with an
 optional `### Continuity` section (read `.agent-control/handoff/latest.md`, refresh via
@@ -417,8 +437,9 @@ opts the gate into fail-closed. Export/hook *deliver* rules; `code_checks` + the
 *verify*; hard enforcement exists only where the gate mediates the call (see **Assurance tiers** above).
 `check_export_drift` (`project_path`, optional `targets`, optional `include_user`) returns a
 `DriftReport` flagging targets missing the current-format block (embedded block-format version ≠
-`BLOCK_FORMAT`, e.g. a legacy v1 full-text block); read-only, prompts re-export, never rewrites, and
-never goes stale on a rule edit.
+`BLOCK_FORMAT`, e.g. a legacy v1 full-text block) or holding an outdated **inline** snapshot
+(`inline && exported_ruleset != current_ruleset`); read-only, prompts re-export, never rewrites. A
+pointer block never goes stale on a rule edit; an inline block does (by design).
 `verify_constraints` (`session_id`, `agent_id`) runs the frozen snapshot's `code_checks` against the
 repo, records achieved tiers + evidence, and returns a `ConstraintVerificationReport`
 (`verified`/`advisory`/`enforced` counts). `save_rule` / `suggest_rule` accept `enforcement`
@@ -764,15 +785,17 @@ the selected session into the textareas (empty when none). Disclosure open/close
 `Console.open_sections: HashSet<String>` toggled by `toggle_section(key, cx)` (shared with the
 Projects export/hooks help disclosures).
 
-**Projects detail & hooks feedback** (`views/projects.rs`): the detail pane groups actions (project
-actions / export cluster / hooks cluster) separated by dividers, and tucks verbose guidance into
-`ui::disclosure` panels ("proj-export-help", "proj-hooks-help"). The Hooks cluster shows a summary tag
-(`proj.hooks_summary`, registered/total) plus per-target registered/installed tags from `detect_hooks`;
-**Register** / **Revoke** emit success **and** failure toasts (`proj.hooks_register_toast` /
-`hooks_revoke_toast` / `hooks_failed_toast` / `hooks_no_script_toast`) so the outcome is always visible.
-The export cluster leads with a primary **Setup** button (`project-setup`,
-`Console::setup_for_selected_project` → `Store::setup`): one click wires the default export + all
-nine hook targets, with `log.setup_done` / `log.setup_failed` toasts.
+**Projects detail & Integration** (`views/projects.rs`): the detail pane groups project actions and a
+single **Integration** section (UX9) separated by a divider. Integration leads with the primary
+**Setup** button (`project-setup`, `Console::setup_for_selected_project` → `Store::setup`: one click
+wires the default export + all nine hook targets, `log.setup_done` / `log.setup_failed` toasts), then
+three Switches — `integration-pointer` (AGENTS.md pointer on/off), `integration-inline` (opt-in inline
+contract snapshot, default off, with a tradeoff hint line) and `integration-hooks` (register/revoke
+all nine harnesses; revoke goes through the confirm dialog). The header carries the **export stale**
+badge and the hooks summary tag (`proj.hooks_summary`, registered/total). Verbose guidance and the
+read-only per-target registered/installed/scope tags from `detect_hooks` live in one
+`ui::disclosure` ("proj-integration-detail"). Register/revoke emit success **and** failure toasts
+(`proj.hooks_register_toast` / `hooks_revoke_toast` / `hooks_failed_toast` / `hooks_no_script_toast`).
 
 ---
 

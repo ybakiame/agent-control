@@ -65,8 +65,8 @@ pub struct Console {
     pub tree_rule_enabled: std::collections::HashMap<String, bool>,
     pub show_onboarding: bool,
     pub export_stale: bool,
-    pub export_targets: Vec<ExportTarget>,
-    pub hook_targets: Vec<HookTarget>,
+    pub export_inline: bool,
+    pub export_pointer_on: bool,
     pub hook_statuses: Vec<HookStatus>,
     pub open_sections: std::collections::HashSet<String>,
 
@@ -183,8 +183,8 @@ impl Console {
             tree_rule_enabled: std::collections::HashMap::new(),
             show_onboarding: false,
             export_stale: false,
-            export_targets: ExportTarget::default_targets(),
-            hook_targets: HookTarget::ALL.to_vec(),
+            export_inline: false,
+            export_pointer_on: false,
             hook_statuses: vec![],
             open_sections: std::collections::HashSet::new(),
             selected_rule: None,
@@ -393,15 +393,19 @@ impl Console {
     /// never at render time. Project-only: the console export action does not write user-global files,
     /// so include_user=false.
     fn refresh_export_drift(&mut self) {
-        self.export_stale = self
+        let report = self
             .selected_project
             .and_then(|id| self.projects.iter().find(|p| p.id == id))
-            .map(|p| {
+            .and_then(|p| {
                 self.store
-                    .export_drift(&p.path, &self.export_targets, false)
-                    .map(|r| r.stale)
-                    .unwrap_or(false)
-            })
+                    .export_drift(&p.path, &[ExportTarget::Agents], false)
+                    .ok()
+            });
+        self.export_stale = report.as_ref().map(|r| r.stale).unwrap_or(false);
+        self.export_pointer_on = report
+            .as_ref()
+            .and_then(|r| r.targets.first())
+            .map(|t| t.exists)
             .unwrap_or(false);
     }
 
@@ -1599,7 +1603,10 @@ impl Console {
             self.log(self.t("log.no_project"));
             return;
         };
-        match self.store.export_native(&path, &self.export_targets, false) {
+        match self
+            .store
+            .export_native(&path, &[ExportTarget::Agents], false, self.export_inline)
+        {
             Ok(report) => {
                 let targets = report
                     .targets
@@ -1629,7 +1636,10 @@ impl Console {
             self.log(self.t("log.no_project"));
             return;
         };
-        match self.store.revoke_native(&path, &self.export_targets, false) {
+        match self
+            .store
+            .revoke_native(&path, &[ExportTarget::Agents], false)
+        {
             Ok(report) => {
                 let targets = report
                     .targets
@@ -1645,23 +1655,34 @@ impl Console {
         cx.notify();
     }
 
-    /// Toggle one harness entry point in the export selection. Keeps at least the order stable and
-    /// recomputes the stale badge for the new selection.
-    pub fn toggle_export_target(
-        &mut self,
-        target: ExportTarget,
-        checked: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if checked {
-            if !self.export_targets.contains(&target) {
-                self.export_targets.push(target);
-            }
+    /// UX9 Integration: the AGENTS.md pointer switch. On exports the pointer (or inline snapshot
+    /// when the inline opt-in is set); off revokes it, preserving surrounding prose.
+    pub fn set_integration_pointer(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on {
+            self.export_native_for_selected_project(cx);
         } else {
-            self.export_targets.retain(|t| *t != target);
+            self.revoke_native_for_selected_project(cx);
         }
-        self.refresh_export_drift();
+    }
+
+    /// UX9 inline opt-in (default off): re-export the pointer block with/without the inline
+    /// contract snapshot. Only meaningful while the pointer is on.
+    pub fn set_integration_inline(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.export_inline = on;
+        if self.export_pointer_on {
+            self.export_native_for_selected_project(cx);
+        }
         cx.notify();
+    }
+
+    /// UX9 hooks switch: on registers all nine harness targets, off revokes them (behind the
+    /// existing confirm dialog, since revoke can delete block-only settings files).
+    pub fn set_integration_hooks(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if on {
+            self.register_hooks_for_selected_project(window, cx);
+        } else {
+            self.confirm_revoke_hooks(window, cx);
+        }
     }
 
     /// Confirm before revoking: the action can delete block-only files, so it goes through an alert
@@ -1716,10 +1737,7 @@ impl Console {
             self.notify(window, cx, self.t("proj.hooks_no_script_toast"));
             return;
         };
-        match self
-            .store
-            .register_hooks(&path, &self.hook_targets, &command)
-        {
+        match self.store.register_hooks(&path, &HookTarget::ALL, &command) {
             Ok(report) => {
                 let targets = report
                     .targets
@@ -1759,7 +1777,7 @@ impl Console {
             self.log(self.t("log.no_project"));
             return;
         };
-        match self.store.revoke_hooks(&path, &self.hook_targets) {
+        match self.store.revoke_hooks(&path, &HookTarget::ALL) {
             Ok(report) => {
                 let targets = report
                     .targets
@@ -1781,23 +1799,6 @@ impl Console {
             }
         }
         self.refresh_hook_status();
-        cx.notify();
-    }
-
-    /// Toggle one harness in the hook selection.
-    pub fn toggle_hook_target(
-        &mut self,
-        target: HookTarget,
-        checked: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if checked {
-            if !self.hook_targets.contains(&target) {
-                self.hook_targets.push(target);
-            }
-        } else {
-            self.hook_targets.retain(|t| *t != target);
-        }
         cx.notify();
     }
 

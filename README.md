@@ -216,6 +216,9 @@ list (`agents` | `claude` | `gemini` | `cursor`; omitted → `AGENTS.md` only), 
 `include_user`. It writes a *managed block* — `<!-- agent-control:begin --> … <!-- agent-control:end -->`
 — into the selected files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursor/rules/agent-control.mdc`);
 with `include_user: true` it also writes a preferences pointer to the user-global `~/.claude/CLAUDE.md`.
+With `inline: true` (opt-in, default off) the block additionally embeds the enabled project
+contract/constraint bodies plus a ruleset hash — useful for agents that only read the file, at the
+cost of going stale on rule edits until you re-export.
 The block **points at** the live rules in `.agent-control/rules/` — it does **not** copy their text —
 so editing a rule never makes it stale. Everything **outside** the block is preserved (a hand-written
 `AGENTS.md` is safe), and re-export is **idempotent** (an up-to-date file is reported `unchanged` and
@@ -227,8 +230,10 @@ narrows) rather than leading with a binding-contract headline. Environment notes
 the committed block (they are git-ignored and reach the agent only via the briefing/hook). A static
 **`### Continuity (optional)`** section comes **last**, pointing at
 `<project>/.agent-control/handoff/latest.md` and noting it may be refreshed via `export_handoff`. The
-console exposes the same action as target checkboxes + **Export to harnesses** in the Projects detail
-pane; `revoke_native` (the **Revoke** button) removes the block again — keeping surrounding prose and
+console exposes this as the Projects **Integration** section: an `AGENTS.md pointer` switch (on =
+export, off = revoke), an opt-in `Inline-list contracts in AGENTS.md` switch, and an
+`Enforcement hooks` switch for all nine harnesses; the other three export targets remain MCP-only.
+`revoke_native` removes the block again — keeping surrounding prose and
 deleting files that held only the block.
 
 `save_rule` and `suggest_rule` also accept an **`enforcement`** intent — `advisory` (default),
@@ -240,9 +245,10 @@ accepts `code_checks`. This is a property of the *rule*, not a guarantee of what
 entry points are missing the current-format pointer block. Each block embeds a **block-format
 version**; a target is **stale** when it exists and that version differs from the current one (e.g. a
 legacy v1 full-text block that should be migrated to the pointer). Because the pointer is static, a
-rule edit does **not** make it stale. It is read-only: it prompts a re-export and **never rewrites**
-anything. The SessionStart hook calls it and appends a migration warning. It detects **file-vs-store
-format** drift only — it does **not** tell you whether an already-running session's injected context
+rule edit does **not** make it stale; an **inline** block (opt-in) additionally carries a ruleset hash
+and **does** go stale on rule edits until re-export. It is read-only: it prompts a re-export and
+**never rewrites** anything. The SessionStart hook calls it and appends a migration warning. It detects
+**file-vs-store** drift only — it does **not** tell you whether an already-running session's injected context
 is stale; that boundary is per-session and explicit.
 
 `verify_constraints` (`session_id`, `agent_id`) evaluates the frozen snapshot's `code_checks` against
@@ -275,9 +281,9 @@ Rule files in `.agent-control/rules/` are the source of truth, but most agents r
 entry points (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursor/rules`) rather than calling MCP. Agent
 Control bridges that gap with two delivery mechanisms:
 
-- **Native export (pull-friendly).** `export_native` / the **Export to harnesses** button writes a
-  static *pointer* block into the entry points you select (`AGENTS.md` by default; `CLAUDE.md`,
-  `GEMINI.md`, Cursor opt-in). The block is **discovery-first**: it tells the agent to understand the
+- **Native export (pull-friendly).** `export_native` / the Projects **Integration** switches write a
+  static *pointer* block into `AGENTS.md` (other entry points via MCP; an opt-in inline mode embeds
+  contract bodies at the cost of staleness-on-edit). The block is **discovery-first**: it tells the agent to understand the
   project and **read and summarize the enabled rules** in `.agent-control/rules/` — it does not
   duplicate their text, so a rule edit never makes it stale, and it never commits the git-ignored
   environment notes. The block is the management boundary: re-export replaces only the block, so

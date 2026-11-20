@@ -171,23 +171,27 @@ harness 推荐调用顺序（**MCP 协作路径**，即 agent 自行调用 MCP�
 传入 `project_path`、可选 `targets` 列表（`agents` | `claude` | `gemini` | `cursor`；省略 → 仅 `AGENTS.md`），
 以及可选 `include_user`。它向选中文件（`AGENTS.md`、`CLAUDE.md`、`GEMINI.md`、`.cursor/rules/agent-control.mdc`）
 写入*托管块*——`<!-- agent-control:begin --> … <!-- agent-control:end -->`；`include_user: true` 时还向用户全局
-`~/.claude/CLAUDE.md` 写入偏好指针。该块**指向** `.agent-control/rules/` 中的活规则——**不复制**其文本——
+`~/.claude/CLAUDE.md` 写入偏好指针。`inline: true`（可选，默认关闭）时块内额外内嵌启用的项目
+contract/constraint 规则正文与规则集哈希——适合只读文件的 agent，代价是改规则后块会过期、需重新导出。
+该块**指向** `.agent-control/rules/` 中的活规则——**不复制**其文本——
 因此改规则绝不会让它过期。块**外**的一切都被保留（手写 `AGENTS.md` 安全），重复导出**幂等**（已最新的文件
 报告 `unchanged` 且不重写）。目标是可选的，因为有些 harness 只读自己的文件：当 `CLAUDE.md` 与 `AGENTS.md`
 并存时 Claude Code 只读 `CLAUDE.md`。项目 guidance 以**发现为先**：开头是「改动前先理解这个项目」，并让 agent
 **读取并总结** `.agent-control/rules/` 中的**启用**规则（种类 `contract`/`constraint`，优先级胜出，`applies_to`
 收窄），而非以绑定契约标题开头。环境说明被**排除**出提交块（它们被 git 忽略，只经简报/hook 触达）。一段静态
 **`### Continuity (optional)`** 置于**最后**，指向 `<project>/.agent-control/handoff/latest.md` 并注明可用
-`export_handoff` 刷新。指挥台在 Projects 详情面板以目标多选 + **导出到 harness** 暴露同一动作；`revoke_native`
-（**撤回**按钮）再次移除托管块——保留周围正文、删除仅含块的文件。
+`export_handoff` 刷新。指挥台在 Projects 的**接入集成**区暴露同一动作：`AGENTS.md 指针`开关（开=导出、
+关=撤回）、可选的`在 AGENTS.md 内联列出契约`开关、以及面向全部九家 harness 的`强制 Hooks`开关；
+其余三个导出目标仅经 MCP 提供。`revoke_native` 再次移除托管块——保留周围正文、删除仅含块的文件。
 
 `save_rule` 与 `suggest_rule` 还接受 **`enforcement`** 意图——`advisory`（默认）、`verify` 或 `hard`——声明规则
 是否可机械校验；`save_rule` 另接受 `code_checks`。这是*规则*的属性，而非会话所达成结果的保证（见下文**保证分级**）。
 
 `check_export_drift`（`project_path`、可选 `targets`、可选 `include_user`）报告哪些入口缺少当前格式的指针块。
 每个块嵌入**块格式版本**；当目标存在且该版本与当前不同（例如应迁移为指针的旧版 v1 全文块）时即为**过期**。
-因为指针是静态的，改规则**不会**让它过期。它只读：提示重新导出且**绝不改写**任何内容。SessionStart hook 调用它
-并追加迁移警告。它只检测**文件对存储**的格式漂移——**不**告诉你已运行会话注入的上下文是否过期；那个边界是
+因为指针是静态的，改规则**不会**让它过期；而**内联**块（可选开启）另带规则集哈希，改规则**会**使其过期、
+需重新导出。它只读：提示重新导出且**绝不改写**任何内容。SessionStart hook 调用它
+并追加迁移警告。它只检测**文件对存储**的漂移——**不**告诉你已运行会话注入的上下文是否过期；那个边界是
 按会话且显式的。
 
 `verify_constraints`（`session_id`、`agent_id`）对照**真实仓库文件**评估冻结快照的 `code_checks`，为每条规则计算
@@ -212,8 +216,8 @@ Projects → Hooks 面板一键完成同样的事。
 规则文件（`.agent-control/rules/`）是唯一事实来源，但多数 agent 读取自己的入口文件
 （`AGENTS.md`、`CLAUDE.md`、`GEMINI.md`、`.cursor/rules`）而非调用 MCP。Agent Control 用两种交付机制弥合：
 
-- **原生导出（便于拉取）。** `export_native` / **导出到 harness** 按钮向你**勾选**的入口文件写入静态*指针*块
-  （默认仅 `AGENTS.md`；`CLAUDE.md`、`GEMINI.md`、Cursor 可选）。该块以**发现为先**：引导 agent 先理解项目、
+- **原生导出（便于拉取）。** `export_native` / Projects **接入集成**开关向 `AGENTS.md` 写入静态*指针*块
+  （其余入口经 MCP；可选内联模式内嵌契约正文，代价是改规则后过期）。该块以**发现为先**：引导 agent 先理解项目、
   **读取并总结** `.agent-control/rules/` 中的**启用**规则——它不复制规则文本，因此改规则绝不会让它过期，也绝不
   提交被 git 忽略的环境说明。块是管理边界：重复导出只替换块，故其周围的 frontmatter 与手写正文得以保留，
   `revoke_native` / **撤回**按钮可再次移除它。Cursor 目标把 `---` frontmatter 保留在块外。这让任何读该文件的

@@ -1178,11 +1178,38 @@ impl Store {
     /// files to write (default `AGENTS.md` only); when `include_user` is set, a preferences pointer
     /// goes to the user-global `~/.claude/CLAUDE.md`. Everything outside the block markers is
     /// preserved, so a hand-written `AGENTS.md` is safe to export into. Re-export is idempotent.
+    /// Enabled project contract/constraint rules, id-sorted — the inline snapshot source (UX9).
+    fn inline_contract_rules(&self, project_path: &Path) -> Result<Vec<Rule>> {
+        let mut rules: Vec<Rule> = self
+            .load_rules(Some(project_path))?
+            .into_iter()
+            .filter(|r| {
+                r.enabled
+                    && r.scope == Scope::Project
+                    && matches!(r.kind, RuleKind::Contract | RuleKind::Constraint)
+            })
+            .collect();
+        rules.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(rules)
+    }
+
+    /// Hash over the inline snapshot source; a rule edit changes it, which is what makes an
+    /// inline block stale (pointer blocks never embed it).
+    pub fn inline_ruleset_hash(&self, project_path: &Path) -> Result<String> {
+        let rules = self.inline_contract_rules(project_path)?;
+        let payload: Vec<serde_json::Value> = rules
+            .iter()
+            .map(|r| serde_json::json!({ "id": r.id, "title": r.title, "content": r.content }))
+            .collect();
+        Ok(canonical_hash(&serde_json::to_value(payload)?))
+    }
+
     pub fn export_native(
         &self,
         project_path: &Path,
         targets: &[export::ExportTarget],
         include_user: bool,
+        inline: bool,
     ) -> Result<export::ExportReport> {
         let rules = self.load_rules(Some(project_path))?;
         let project_rules = rules
@@ -1194,7 +1221,21 @@ impl Store {
             .filter(|r| r.enabled && r.scope == Scope::User)
             .count();
 
-        let project_block = export::wrap_block(export::PROJECT_GUIDANCE);
+        let project_block = if inline {
+            let contracts = self.inline_contract_rules(project_path)?;
+            let hash = self.inline_ruleset_hash(project_path)?;
+            export::wrap_block_mode(
+                &format!(
+                    "{}{}",
+                    export::PROJECT_GUIDANCE,
+                    export::render_inline_contracts(&contracts)
+                ),
+                true,
+                Some(&hash),
+            )
+        } else {
+            export::wrap_block(export::PROJECT_GUIDANCE)
+        };
         let mut outcomes = Vec::new();
         for target in targets {
             outcomes.push(write_managed_block_file(
@@ -1231,13 +1272,14 @@ impl Store {
         targets: &[export::ExportTarget],
         include_user: bool,
     ) -> Result<export::DriftReport> {
+        let current_ruleset = self.inline_ruleset_hash(project_path)?;
         let mut drifts: Vec<export::TargetDrift> = targets
             .iter()
-            .map(|t| target_drift(&t.path(project_path)))
+            .map(|t| target_drift(&t.path(project_path), Some(&current_ruleset)))
             .collect();
 
         if include_user {
-            drifts.push(target_drift(&DataLayout::claude_user_md()?));
+            drifts.push(target_drift(&DataLayout::claude_user_md()?, None));
         }
 
         let stale = drifts.iter().any(|t| t.stale);
@@ -1328,7 +1370,7 @@ impl Store {
         let command = hooks::default_hook_command().context(
             "hook script not found beside the executable; run setup from a release or dev build",
         )?;
-        let export = self.export_native(project_path, export_targets, include_user)?;
+        let export = self.export_native(project_path, export_targets, include_user, false)?;
         let hooks = self.register_hooks(project_path, hook_targets, &command)?;
         Ok(SetupReport {
             project_path: project_path.to_path_buf(),
@@ -1760,22 +1802,33 @@ fn write_managed_block_file(
     })
 }
 
-fn target_drift(path: &Path) -> export::TargetDrift {
+fn target_drift(path: &Path, current_ruleset: Option<&str>) -> export::TargetDrift {
     let exists = path.exists();
-    let exported_format = if exists {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| export::read_exported_format(&raw))
+    let raw = if exists {
+        std::fs::read_to_string(path).ok()
     } else {
         None
     };
-    let stale = exists && exported_format != Some(export::BLOCK_FORMAT);
+    let exported_format = raw.as_deref().and_then(export::read_exported_format);
+    let inline = raw
+        .as_deref()
+        .map(export::read_exported_inline)
+        .unwrap_or(false);
+    let exported_ruleset = raw.as_deref().and_then(export::read_exported_ruleset);
+    // Pointer blocks are rule-edit immune (format check only); inline blocks also compare the
+    // embedded ruleset hash against the current enabled contract/constraint set.
+    let stale = exists
+        && (exported_format != Some(export::BLOCK_FORMAT)
+            || (inline && exported_ruleset.as_deref() != current_ruleset));
     export::TargetDrift {
         path: path.to_path_buf(),
         exists,
         exported_format,
         current_format: export::BLOCK_FORMAT,
         stale,
+        inline,
+        exported_ruleset,
+        current_ruleset: current_ruleset.map(str::to_string),
     }
 }
 

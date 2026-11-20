@@ -180,6 +180,10 @@ pub struct TargetDrift {
     pub exported_format: Option<u32>,
     pub current_format: u32,
     pub stale: bool,
+    /// Whether the existing block is an inline snapshot (mode line present).
+    pub inline: bool,
+    pub exported_ruleset: Option<String>,
+    pub current_ruleset: Option<String>,
 }
 
 /// Result of checking the selected entry points for a missing or outdated-format block. `stale` is
@@ -378,7 +382,53 @@ pub fn render_handoff_brief(bundle: &HandoffBundle, resumed_under: Option<&str>)
 /// block carries no trailing newline: the file's terminating newline is added by `upsert_managed_block`
 /// so that it survives as the suffix after the end marker and re-export stays byte-idempotent.
 pub fn wrap_block(body: &str) -> String {
-    format!("{BLOCK_BEGIN}\n{GENERATED_NOTE}\n{FORMAT_PREFIX}{BLOCK_FORMAT} -->\n{body}{BLOCK_END}")
+    wrap_block_mode(body, false, None)
+}
+
+/// Prefix of the in-block mode line. Only **inline** blocks carry it; its absence means pointer
+/// mode, so legacy v2 pointer blocks stay byte-identical and read as pointer.
+pub const MODE_PREFIX: &str = "<!-- agent-control:mode:";
+/// Prefix of the in-block ruleset-hash line (inline mode only). A rule edit changes the hash, which
+/// is what makes an inline block stale — the deliberate tradeoff of the opt-in inline mode.
+pub const RULESET_PREFIX: &str = "<!-- agent-control:ruleset:";
+
+/// Wrap a body with the mode marker: `inline` embeds a ruleset hash line so drift can detect rule
+/// edits; pointer mode writes exactly the v2 layout (byte-idempotent, rule-edit immune).
+pub fn wrap_block_mode(body: &str, inline: bool, ruleset_hash: Option<&str>) -> String {
+    let mut head = format!("{BLOCK_BEGIN}\n{GENERATED_NOTE}\n{FORMAT_PREFIX}{BLOCK_FORMAT} -->\n");
+    if inline {
+        head.push_str(&format!("{MODE_PREFIX}inline -->\n"));
+        if let Some(hash) = ruleset_hash {
+            head.push_str(&format!("{RULESET_PREFIX}{hash} -->\n"));
+        }
+    }
+    format!("{head}{body}{BLOCK_END}")
+}
+
+/// Whether an entry point's managed block is an inline snapshot (vs the static pointer).
+pub fn read_exported_inline(existing: &str) -> bool {
+    existing.contains(&format!("{MODE_PREFIX}inline -->"))
+}
+
+/// Read the ruleset hash embedded in an inline block, if present.
+pub fn read_exported_ruleset(existing: &str) -> Option<String> {
+    let start = existing.find(RULESET_PREFIX)? + RULESET_PREFIX.len();
+    let rest = &existing[start..];
+    let end = rest.find(" -->")?;
+    Some(rest[..end].trim().to_string())
+}
+
+/// The opt-in inline snapshot section: enabled project contract/constraint bodies, appended to the
+/// pointer guidance so an agent that never calls MCP still reads the actual contracts.
+pub fn render_inline_contracts(rules: &[crate::model::Rule]) -> String {
+    let mut out = String::from("\n\n## Project contracts (inline snapshot)\n");
+    for rule in rules {
+        out.push_str(&format!(
+            "\n### {} — {}\n\n{}\n",
+            rule.id, rule.title, rule.content
+        ));
+    }
+    out
 }
 
 /// Read the block-format version embedded in an entry point's managed block, if present. Returns

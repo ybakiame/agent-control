@@ -418,6 +418,11 @@ pub struct ExportNativeRequest {
     /// at once is opt-in, because Claude Code reads only CLAUDE.md when both it and AGENTS.md exist.
     #[serde(default)]
     pub targets: Option<Vec<String>>,
+    /// Opt-in inline mode (UX9): embed the enabled project contract/constraint bodies plus a
+    /// ruleset hash in the managed block. Defaults to false (static pointer, byte-idempotent);
+    /// inline blocks go stale on rule edits by design.
+    #[serde(default)]
+    pub inline: bool,
     /// Also export personal preferences to the user-global ~/.claude/CLAUDE.md. Defaults to false
     /// so a project export never writes outside the project unless explicitly requested.
     #[serde(default)]
@@ -1096,7 +1101,7 @@ impl ControlServer {
         let project = PathBuf::from(req.project_path.trim());
         match self
             .store
-            .export_native(&project, &targets, req.include_user)
+            .export_native(&project, &targets, req.include_user, req.inline)
         {
             Ok(report) => json_result(&serde_json::json!({
                 "report": report,

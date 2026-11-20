@@ -200,7 +200,7 @@ fn doctor_aggregates_read_only_diagnostics() {
         )
         .unwrap();
     store
-        .export_native(project.path(), &[ExportTarget::Agents], false)
+        .export_native(project.path(), &[ExportTarget::Agents], false, false)
         .unwrap();
     store
         .register_hooks(
@@ -306,7 +306,7 @@ fn doctor_flags_stale_export_as_unhealthy() {
     let store = Store::open_with_root(tempfile::tempdir().unwrap().path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
     store
-        .export_native(project.path(), &[ExportTarget::Agents], false)
+        .export_native(project.path(), &[ExportTarget::Agents], false, false)
         .unwrap();
     std::fs::write(
         project.path().join("AGENTS.md"),
@@ -1477,7 +1477,7 @@ fn environment_excluded_from_native_export() {
     store.save_rule(&env, Some(project.path())).unwrap();
 
     let report = store
-        .export_native(project.path(), &[ExportTarget::Agents], false)
+        .export_native(project.path(), &[ExportTarget::Agents], false, false)
         .unwrap();
     // Environment rules are never counted as exported project/user rules.
     assert_eq!(report.project_rules, 1);
@@ -1627,7 +1627,7 @@ fn export_native_injects_pointer_block_preserving_prose() {
     store.save_rule(&disabled, Some(project.path())).unwrap();
 
     let report = store
-        .export_native(project.path(), &ExportTarget::ALL, false)
+        .export_native(project.path(), &ExportTarget::ALL, false, false)
         .unwrap();
     assert_eq!(report.project_rules, 1, "disabled rules are not counted");
     assert_eq!(report.user_rules, 0);
@@ -1662,7 +1662,12 @@ fn export_native_default_targets_agents_only() {
     let project = tempfile::tempdir().unwrap();
 
     let report = store
-        .export_native(project.path(), &ExportTarget::default_targets(), false)
+        .export_native(
+            project.path(),
+            &ExportTarget::default_targets(),
+            false,
+            false,
+        )
         .unwrap();
     assert_eq!(report.targets.len(), 1, "default writes AGENTS.md only");
     assert!(project.path().join("AGENTS.md").exists());
@@ -1691,12 +1696,12 @@ fn export_native_reexport_idempotent_even_after_rule_edit() {
 
     let targets = ExportTarget::default_targets();
     let first = store
-        .export_native(project.path(), &targets, false)
+        .export_native(project.path(), &targets, false, false)
         .unwrap();
     assert!(first.targets.iter().all(|t| t.action == "created"));
 
     let second = store
-        .export_native(project.path(), &targets, false)
+        .export_native(project.path(), &targets, false, false)
         .unwrap();
     assert!(
         second.targets.iter().all(|t| t.action == "unchanged"),
@@ -1714,7 +1719,7 @@ fn export_native_reexport_idempotent_even_after_rule_edit() {
     std::fs::write(&agents, &text).unwrap();
 
     let third = store
-        .export_native(project.path(), &targets, false)
+        .export_native(project.path(), &targets, false, false)
         .unwrap();
     let agents_outcome = third.targets.iter().find(|t| t.path == agents).unwrap();
     assert_eq!(
@@ -1753,7 +1758,7 @@ fn export_drift_flags_legacy_format_and_clears_on_reexport() {
     assert!(fresh.targets.iter().all(|t| !t.exists));
 
     store
-        .export_native(project.path(), &ExportTarget::ALL, false)
+        .export_native(project.path(), &ExportTarget::ALL, false, false)
         .unwrap();
     let synced = store
         .export_drift(project.path(), &ExportTarget::ALL, false)
@@ -1796,12 +1801,97 @@ fn export_drift_flags_legacy_format_and_clears_on_reexport() {
 
     // Re-export migrates the block and clears the drift.
     store
-        .export_native(project.path(), &ExportTarget::ALL, false)
+        .export_native(project.path(), &ExportTarget::ALL, false, false)
         .unwrap();
     let resynced = store
         .export_drift(project.path(), &ExportTarget::ALL, false)
         .unwrap();
     assert!(!resynced.stale);
+}
+
+#[test]
+fn export_native_inline_embeds_contracts_and_drifts_on_rule_edit() {
+    use agent_control_core::export::{read_exported_inline, read_exported_ruleset};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let mut contract = make_rule("c1", Scope::Project, 100, None);
+    contract.kind = RuleKind::Contract;
+    store.save_rule(&contract, Some(project.path())).unwrap();
+    // A project-scope preference is never inlined — only contract/constraint bodies are.
+    store
+        .save_rule(
+            &make_rule("p1", Scope::Project, 90, None),
+            Some(project.path()),
+        )
+        .unwrap();
+
+    let targets = ExportTarget::default_targets();
+    let first = store
+        .export_native(project.path(), &targets, false, true)
+        .unwrap();
+    assert!(first.targets.iter().all(|t| t.action == "created"));
+    let agents = project.path().join("AGENTS.md");
+    let out = std::fs::read_to_string(&agents).unwrap();
+    assert!(read_exported_inline(&out));
+    assert!(out.contains("content of c1"));
+    assert!(!out.contains("content of p1"));
+    assert_eq!(
+        read_exported_ruleset(&out).unwrap(),
+        store.inline_ruleset_hash(project.path()).unwrap()
+    );
+
+    // Idempotent while the ruleset is unchanged.
+    let second = store
+        .export_native(project.path(), &targets, false, true)
+        .unwrap();
+    assert!(second.targets.iter().all(|t| t.action == "unchanged"));
+    let synced = store.export_drift(project.path(), &targets, false).unwrap();
+    assert!(!synced.stale);
+    assert!(synced.targets.iter().all(|t| t.inline));
+
+    // Editing the contract dirties the inline snapshot until re-export.
+    let mut updated = contract.clone();
+    updated.content = "revised contract body".into();
+    store.save_rule(&updated, Some(project.path())).unwrap();
+    let drifted = store.export_drift(project.path(), &targets, false).unwrap();
+    assert!(drifted.stale, "inline mode reintroduces ruleset drift");
+    let d = drifted.targets.iter().find(|t| t.path == agents).unwrap();
+    assert!(d.stale && d.inline);
+    assert_ne!(d.exported_ruleset, d.current_ruleset);
+
+    let third = store
+        .export_native(project.path(), &targets, false, true)
+        .unwrap();
+    assert!(third.targets.iter().all(|t| t.action == "updated"));
+    let out = std::fs::read_to_string(&agents).unwrap();
+    assert!(out.contains("revised contract body"));
+    assert!(
+        !store
+            .export_drift(project.path(), &targets, false)
+            .unwrap()
+            .stale
+    );
+
+    // Switching back to pointer mode drops the snapshot and restores byte-idempotence.
+    let fourth = store
+        .export_native(project.path(), &targets, false, false)
+        .unwrap();
+    assert!(fourth.targets.iter().all(|t| t.action == "updated"));
+    let out = std::fs::read_to_string(&agents).unwrap();
+    assert!(!read_exported_inline(&out));
+    assert!(!out.contains("revised contract body"));
+    let mut edited = updated.clone();
+    edited.content = "yet another body".into();
+    store.save_rule(&edited, Some(project.path())).unwrap();
+    assert!(
+        !store
+            .export_drift(project.path(), &targets, false)
+            .unwrap()
+            .stale
+    );
 }
 
 #[test]
@@ -1819,7 +1909,7 @@ fn revoke_native_removes_block_preserves_prose_deletes_stub() {
     std::fs::write(&claude, "# Claude notes\n\nKeep me too.\n").unwrap();
 
     store
-        .export_native(project.path(), &ExportTarget::ALL, false)
+        .export_native(project.path(), &ExportTarget::ALL, false, false)
         .unwrap();
     let gemini = project.path().join("GEMINI.md");
     let cursor = project.path().join(".cursor/rules/agent-control.mdc");
@@ -2095,7 +2185,12 @@ fn export_native_project_block_carries_continuity_guidance() {
         .unwrap();
 
     store
-        .export_native(project.path(), &ExportTarget::default_targets(), false)
+        .export_native(
+            project.path(),
+            &ExportTarget::default_targets(),
+            false,
+            false,
+        )
         .unwrap();
     let agents = std::fs::read_to_string(project.path().join("AGENTS.md")).unwrap();
     assert!(agents.contains("Continuity"), "{agents}");

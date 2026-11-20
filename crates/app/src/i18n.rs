@@ -647,22 +647,33 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("proj.reveal", "Open contracts folder", "打开契约目录"),
     ("proj.export", "Export to harnesses", "导出到 harness"),
     ("proj.setup", "Setup", "一键接入"),
+    ("proj.integration_title", "Integration", "接入集成"),
+    (
+        "proj.integration_details",
+        "Details & harness status",
+        "详情与各 harness 状态",
+    ),
+    ("proj.pointer_toggle", "AGENTS.md pointer", "AGENTS.md 指针"),
+    (
+        "proj.inline_toggle",
+        "Inline-list contracts in AGENTS.md",
+        "在 AGENTS.md 内联列出契约",
+    ),
+    (
+        "proj.inline_hint",
+        "Off (default): the block stays a static pointer, so rule edits never make it stale. On: enabled contract/constraint rule bodies are embedded with a ruleset hash; editing a rule then marks the export stale until you re-export.",
+        "关闭（默认）：托管块保持静态指针，编辑规则不会使其过期。开启：内嵌启用的 contract/constraint 规则正文与规则集哈希；此后编辑规则会标记导出过期，需重新导出。",
+    ),
+    (
+        "proj.hooks_toggle",
+        "Enforcement hooks (all harnesses)",
+        "强制 Hooks（全部 harness）",
+    ),
     (
         "proj.export_hint",
-        "Writes a static pointer block into the selected harness entry points, directing agents to read the live rules in .agent-control/rules/ (no rule text is copied). Content outside the block is preserved; re-export is idempotent.",
-        "向所选 harness 入口写入静态指针块，引导代理读取 .agent-control/rules/ 中的实时规则（不复制规则文本）。块外内容会保留，重复导出幂等。",
+        "Writes a static pointer block into AGENTS.md, directing agents to read the live rules in .agent-control/rules/ (no rule text is copied). Content outside the block is preserved; re-export is idempotent. Other harness entry points remain available via the MCP export_native tool.",
+        "向 AGENTS.md 写入静态指针块，引导代理读取 .agent-control/rules/ 中的实时规则（不复制规则文本）。块外内容会保留，重复导出幂等。其他 harness 入口仍可通过 MCP export_native 工具写入。",
     ),
-    ("proj.export_title", "Export to harnesses", "导出到 harness"),
-    ("proj.export_details", "About export", "导出说明"),
-    (
-        "proj.export_targets_hint",
-        "Choose which harness entry points to write. AGENTS.md is near-universal; add others only when that harness reads its own file (e.g. Claude Code prefers CLAUDE.md, Gemini CLI reads GEMINI.md).",
-        "选择要写入的 harness 入口。AGENTS.md 近乎通用；仅当某 harness 只读自己的文件时才追加（如 Claude Code 优先 CLAUDE.md，Gemini CLI 读 GEMINI.md）。",
-    ),
-    ("proj.target_agents", "AGENTS.md", "AGENTS.md"),
-    ("proj.target_claude", "CLAUDE.md", "CLAUDE.md"),
-    ("proj.target_gemini", "GEMINI.md", "GEMINI.md"),
-    ("proj.target_cursor", "Cursor (.mdc)", "Cursor (.mdc)"),
     ("proj.revoke", "Revoke…", "撤回…"),
     ("proj.revoke_ok", "Revoke", "撤回"),
     (
@@ -675,8 +686,6 @@ const STRINGS: &[(&str, &str, &str)] = &[
         "Revoke managed block?",
         "撤回托管块？",
     ),
-    ("proj.hooks_title", "Hooks (enforcement)", "Hooks（强制）"),
-    ("proj.hooks_details", "About hooks", "Hooks 说明"),
     ("proj.hooks_summary", "{}/{} registered", "已注册 {}/{}"),
     (
         "proj.hooks_register_toast",
@@ -718,11 +727,6 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("proj.hooks_register", "Register hooks", "注册 Hooks"),
     ("proj.hooks_revoke", "Revoke hooks…", "撤回 Hooks…"),
     ("proj.hooks_revoke_ok", "Revoke hooks", "撤回 Hooks"),
-    (
-        "proj.hooks_register_hint",
-        "Writes the managed hook group into the selected harnesses' config, preserving every other key and your own hooks. Project-level targets write the project config; user-level targets (Kimi, Antigravity) write your user-global config. Re-registering is idempotent.",
-        "向所选 harness 的配置写入托管 hook 组，保留其它所有配置与你自己的 hook。项目级目标写入项目配置；用户级目标（Kimi、Antigravity）写入你的用户全局配置。重复注册幂等。",
-    ),
     (
         "proj.hooks_revoke_hint",
         "Removes our hook group from the selected targets, keeping your other config and hooks. Config files that held only our hook are deleted; for Kimi only our managed block is stripped from config.toml.",

@@ -763,6 +763,91 @@ try {
     await toolRejects("check_export_drift", { project_path: "  ", include_user: false }),
   );
 
+  // UX9 inline opt-in: export_native inline=true embeds enabled contract/constraint bodies plus a
+  // ruleset hash; a rule edit then DOES induce drift until re-export. inline=false restores the
+  // static pointer (byte-idempotent again).
+  const inlineExport = await tool("export_native", {
+    project_path: projectDir,
+    targets: ["agents"],
+    include_user: false,
+    inline: true,
+  });
+  check(
+    "export_native inline=true writes the inline snapshot",
+    inlineExport.report?.targets?.length === 1 &&
+      ["created", "updated"].includes(inlineExport.report?.targets?.[0]?.action),
+    inlineExport,
+  );
+  const inlineText = readFileSync(agentsPath, "utf8");
+  check(
+    "inline block carries the mode marker, ruleset hash and contract body",
+    inlineText.includes("<!-- agent-control:mode:inline -->") &&
+      inlineText.includes("<!-- agent-control:ruleset:") &&
+      inlineText.includes("Edited, but a static pointer block must not go stale."),
+    inlineText.slice(0, 400),
+  );
+  const inlineSync = await tool("check_export_drift", {
+    project_path: projectDir,
+    targets: ["agents"],
+    include_user: false,
+  });
+  check(
+    "check_export_drift in-sync right after inline export (inline flag set)",
+    inlineSync.report?.stale === false && inlineSync.report?.targets?.[0]?.inline === true,
+    inlineSync,
+  );
+  await tool("save_rule", {
+    id: "api-isasc",
+    title: "Upstream isAsc type is ambiguous",
+    content: "Inline snapshot must go stale after this edit.",
+    agent_id: "harness-b",
+    scope: "project",
+    project_path: projectDir,
+  });
+  const inlineDrift = await tool("check_export_drift", {
+    project_path: projectDir,
+    targets: ["agents"],
+    include_user: false,
+  });
+  const inlineTarget = inlineDrift.report?.targets?.[0];
+  check(
+    "check_export_drift flags inline ruleset drift after a rule edit",
+    inlineDrift.report?.stale === true &&
+      inlineTarget?.inline === true &&
+      inlineTarget?.exported_ruleset !== inlineTarget?.current_ruleset,
+    inlineDrift,
+  );
+  await tool("export_native", {
+    project_path: projectDir,
+    targets: ["agents"],
+    include_user: false,
+    inline: true,
+  });
+  const inlineResync = await tool("check_export_drift", {
+    project_path: projectDir,
+    targets: ["agents"],
+    include_user: false,
+  });
+  check(
+    "inline drift clears after re-export",
+    inlineResync.report?.stale === false &&
+      readFileSync(agentsPath, "utf8").includes("Inline snapshot must go stale after this edit."),
+    inlineResync,
+  );
+  await tool("export_native", {
+    project_path: projectDir,
+    targets: ["agents"],
+    include_user: false,
+    inline: false,
+  });
+  const pointerText = readFileSync(agentsPath, "utf8");
+  check(
+    "inline=false restores the static pointer (no mode marker, no rule text)",
+    !pointerText.includes("<!-- agent-control:mode:inline -->") &&
+      !pointerText.includes("Inline snapshot must go stale after this edit."),
+    pointerText.slice(0, 400),
+  );
+
   // revoke_native: the explicit undo. AGENTS.md keeps its prose (removed); the block-only CLAUDE.md,
   // GEMINI.md and Cursor rule (frontmatter + block) are deleted. Re-running is a safe no-op.
   const revoked = await tool("revoke_native", {
