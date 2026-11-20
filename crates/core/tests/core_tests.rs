@@ -189,7 +189,7 @@ fn doctor_aggregates_read_only_diagnostics() {
     let project = tempfile::tempdir().unwrap();
     store.init_project_contracts(project.path()).unwrap();
     let (session, _) = store
-        .create_session("diag task", project.path(), "tester", vec![])
+        .create_session("diag task", project.path(), "tester", vec![], None)
         .unwrap();
     store
         .record_evidence(
@@ -234,7 +234,7 @@ fn search_finds_chinese_rules_sessions_and_evidence() {
     rule.content = "登记文档声明并求值".into();
     store.save_rule(&rule, Some(project.path())).unwrap();
     let (session, _) = store
-        .create_session("中文搜索任务", project.path(), "tester", vec![])
+        .create_session("中文搜索任务", project.path(), "tester", vec![], None)
         .unwrap();
     store
         .set_session_work_state(
@@ -244,6 +244,7 @@ fn search_finds_chinese_rules_sessions_and_evidence() {
                 title: "分词器".into(),
                 status: WorkItemStatus::Done,
             }],
+            "tester",
         )
         .unwrap();
     store
@@ -322,7 +323,7 @@ fn evidence_chain_verifies_and_detects_tampering() {
     let store = Store::open_with_root(tempfile::tempdir().unwrap().path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
     let session = store
-        .create_session("test task", project.path(), "tester", vec![])
+        .create_session("test task", project.path(), "tester", vec![], None)
         .unwrap()
         .0;
     store
@@ -360,7 +361,7 @@ fn handoff_roundtrip_preserves_constraints() {
     store.save_rule(&rule, Some(project.path())).unwrap();
 
     let session = store
-        .create_session("handoff test", project.path(), "harness-a", vec![])
+        .create_session("handoff test", project.path(), "harness-a", vec![], None)
         .unwrap()
         .0;
     assert_eq!(session.constraint_snapshot.rules.len(), 1);
@@ -374,7 +375,7 @@ fn handoff_roundtrip_preserves_constraints() {
         .unwrap();
     assert!(bundle.verify_integrity());
 
-    let resumed = store.import_handoff(&bundle, "harness-b").unwrap();
+    let resumed = store.import_handoff(&bundle, "harness-b", None).unwrap();
     assert_eq!(resumed.agent_id, "harness-b");
     assert_eq!(resumed.status, SessionStatus::Active);
     assert_eq!(
@@ -410,7 +411,7 @@ fn export_handoff_supersedes_prior_unacknowledged() {
     store.save_rule(&rule, Some(project.path())).unwrap();
 
     let session = store
-        .create_session("supersede test", project.path(), "harness-a", vec![])
+        .create_session("supersede test", project.path(), "harness-a", vec![], None)
         .unwrap()
         .0;
     let rule_ids: Vec<String> = session
@@ -463,7 +464,7 @@ fn work_state_roundtrip_and_handoff_carry() {
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
     let session = store
-        .create_session("work state", project.path(), "harness-a", vec![])
+        .create_session("work state", project.path(), "harness-a", vec![], None)
         .unwrap()
         .0;
 
@@ -482,7 +483,7 @@ fn work_state_roundtrip_and_handoff_carry() {
         },
     ];
     store
-        .set_session_work_state(session.id, "the goal".into(), items.clone())
+        .set_session_work_state(session.id, "the goal".into(), items.clone(), "tester")
         .unwrap();
     let loaded = store.get_session(session.id).unwrap().unwrap();
     assert_eq!(loaded.goal, "the goal");
@@ -500,7 +501,7 @@ fn work_state_roundtrip_and_handoff_carry() {
     assert!(latest.contains("the goal"), "{latest}");
     assert!(latest.contains("**doing**: doing thing"), "{latest}");
 
-    let resumed = store.import_handoff(&bundle, "harness-b").unwrap();
+    let resumed = store.import_handoff(&bundle, "harness-b", None).unwrap();
     assert_eq!(resumed.goal, "the goal");
     assert_eq!(resumed.work_items.len(), 3);
     assert_eq!(resumed.work_items[1].status, WorkItemStatus::Doing);
@@ -512,28 +513,28 @@ fn create_session_reuses_active_same_task() {
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
     let (first, reused) = store
-        .create_session("same task", project.path(), "harness-a", vec![])
+        .create_session("same task", project.path(), "harness-a", vec![], None)
         .unwrap();
     assert!(!reused);
     let (again, reused) = store
-        .create_session("same task", project.path(), "harness-a", vec![])
+        .create_session("same task", project.path(), "harness-a", vec![], None)
         .unwrap();
     assert!(reused);
     assert_eq!(again.id, first.id);
     assert_eq!(store.list_sessions().unwrap().len(), 1);
 
     let (other, reused) = store
-        .create_session("other task", project.path(), "harness-a", vec![])
+        .create_session("other task", project.path(), "harness-a", vec![], None)
         .unwrap();
     assert!(!reused);
     assert_ne!(other.id, first.id);
 
     // A closed session no longer absorbs new calls for the same task.
     store
-        .set_session_status(first.id, SessionStatus::Completed)
+        .set_session_status(first.id, SessionStatus::Completed, "tester")
         .unwrap();
     let (fresh, reused) = store
-        .create_session("same task", project.path(), "harness-a", vec![])
+        .create_session("same task", project.path(), "harness-a", vec![], None)
         .unwrap();
     assert!(!reused);
     assert_ne!(fresh.id, first.id);
@@ -545,12 +546,12 @@ fn set_session_status_closes_and_reopens_with_evidence() {
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
     let session = store
-        .create_session("lifecycle", project.path(), "tester", vec![])
+        .create_session("lifecycle", project.path(), "tester", vec![], None)
         .unwrap()
         .0;
 
     let closed = store
-        .set_session_status(session.id, SessionStatus::Completed)
+        .set_session_status(session.id, SessionStatus::Completed, "tester")
         .unwrap();
     assert_eq!(closed.status, SessionStatus::Completed);
     let chain = store.get_evidence(session.id).unwrap();
@@ -558,7 +559,7 @@ fn set_session_status_closes_and_reopens_with_evidence() {
     assert!(store.verify_chain(session.id).unwrap().valid);
 
     let reopened = store
-        .set_session_status(session.id, SessionStatus::Active)
+        .set_session_status(session.id, SessionStatus::Active, "tester")
         .unwrap();
     assert_eq!(reopened.status, SessionStatus::Active);
 }
@@ -569,7 +570,7 @@ fn export_handoff_without_to_agent() {
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
     let session = store
-        .create_session("no target", project.path(), "harness-a", vec![])
+        .create_session("no target", project.path(), "harness-a", vec![], None)
         .unwrap()
         .0;
 
@@ -585,7 +586,7 @@ fn export_handoff_without_to_agent() {
             .join(".agent-control/handoff/latest.md")
             .exists()
     );
-    let resumed = store.import_handoff(&bundle, "harness-b").unwrap();
+    let resumed = store.import_handoff(&bundle, "harness-b", None).unwrap();
     assert_eq!(resumed.agent_id, "harness-b");
     assert_eq!(resumed.status, SessionStatus::Active);
 }
@@ -596,7 +597,7 @@ fn delete_session_cascades_evidence_and_provenance() {
     let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
     let session = store
-        .create_session("to delete", project.path(), "tester", vec![])
+        .create_session("to delete", project.path(), "tester", vec![], None)
         .unwrap()
         .0;
     store
@@ -1786,7 +1787,7 @@ fn verify_constraints_computes_achieved_tiers_and_records_evidence() {
     }
 
     let session = store
-        .create_session("verify", project.path(), "tester", vec![])
+        .create_session("verify", project.path(), "tester", vec![], None)
         .unwrap()
         .0;
     assert_eq!(session.constraint_snapshot.rules.len(), 3);
@@ -1856,7 +1857,7 @@ fn handoff_carries_assurance_baseline() {
     store.save_rule(&rule, Some(project.path())).unwrap();
 
     let session = store
-        .create_session("handoff", project.path(), "harness-a", vec![])
+        .create_session("handoff", project.path(), "harness-a", vec![], None)
         .unwrap()
         .0;
     store.verify_constraints(session.id, "harness-a").unwrap();
@@ -1872,7 +1873,7 @@ fn handoff_carries_assurance_baseline() {
     assert_eq!(bundle.assurance.len(), 1);
     assert_eq!(bundle.assurance[0].achieved, AssuranceTier::Verified);
 
-    let resumed = store.import_handoff(&bundle, "harness-b").unwrap();
+    let resumed = store.import_handoff(&bundle, "harness-b", None).unwrap();
     assert_eq!(resumed.agent_id, "harness-b");
     assert_eq!(
         resumed.assurance.len(),
@@ -1893,7 +1894,13 @@ fn export_handoff_writes_project_latest_md() {
         )
         .unwrap();
     let session = store
-        .create_session("layer 1 continuity", project.path(), "harness-a", vec![])
+        .create_session(
+            "layer 1 continuity",
+            project.path(),
+            "harness-a",
+            vec![],
+            None,
+        )
         .unwrap()
         .0;
     let bundle = store
@@ -1939,7 +1946,7 @@ fn import_handoff_refreshes_latest_md_with_resumed_state() {
     store.save_rule(&rule, Some(project.path())).unwrap();
 
     let session = store
-        .create_session("resume brief", project.path(), "harness-a", vec![])
+        .create_session("resume brief", project.path(), "harness-a", vec![], None)
         .unwrap()
         .0;
     store.verify_constraints(session.id, "harness-a").unwrap();
@@ -1955,7 +1962,7 @@ fn import_handoff_refreshes_latest_md_with_resumed_state() {
     );
     assert!(!exported.contains("Resumed under"), "{exported}");
 
-    store.import_handoff(&bundle, "harness-b").unwrap();
+    store.import_handoff(&bundle, "harness-b", None).unwrap();
     let resumed = std::fs::read_to_string(&latest).unwrap();
     assert!(
         resumed.contains("Refreshed by `import_handoff`"),
@@ -2159,7 +2166,7 @@ fn check_tool_call_marks_enforced_and_records_evidence() {
     store.save_rule(&rule, Some(project.path())).unwrap();
 
     let session = store
-        .create_session("gate", project.path(), "tester", vec![])
+        .create_session("gate", project.path(), "tester", vec![], None)
         .unwrap()
         .0;
     let report = store
@@ -2515,4 +2522,102 @@ fn app_config_migrates_legacy_ui_json_once() {
     assert!(layout.config_file().exists(), "toml written");
     assert!(!legacy.exists(), "legacy json removed after conversion");
     assert_eq!(AppConfig::load(&layout).locale, "zh");
+}
+
+#[test]
+fn session_mutations_record_acting_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let session = store
+        .create_session(
+            "audit",
+            project.path(),
+            "harness-a",
+            vec![],
+            Some("conv-1".into()),
+        )
+        .unwrap()
+        .0;
+    assert_eq!(session.harness_session_id.as_deref(), Some("conv-1"));
+
+    store
+        .set_session_work_state(session.id, "goal".into(), vec![], "auditor")
+        .unwrap();
+    let entries = store.get_evidence(session.id).unwrap();
+    let last = entries.last().unwrap();
+    assert_eq!(last.kind, EvidenceKind::WorkStateUpdate);
+    assert_eq!(last.agent_id, "auditor");
+    assert_eq!(last.payload["goal"], "goal");
+    assert_eq!(last.payload["harness_session_id"], "conv-1");
+
+    store
+        .set_session_status(session.id, SessionStatus::Completed, "auditor")
+        .unwrap();
+    let entries = store.get_evidence(session.id).unwrap();
+    let end = entries.last().unwrap();
+    assert_eq!(end.kind, EvidenceKind::SessionEnd);
+    assert_eq!(end.agent_id, "auditor");
+    let change = &entries[entries.len() - 2];
+    assert_eq!(change.kind, EvidenceKind::StatusChange);
+    assert_eq!(change.payload["status"], "completed");
+
+    // Reopen leaves a trail too (the old code wrote nothing on reopen).
+    store
+        .set_session_status(session.id, SessionStatus::Active, "harness-a")
+        .unwrap();
+    let entries = store.get_evidence(session.id).unwrap();
+    let reopen = entries.last().unwrap();
+    assert_eq!(reopen.kind, EvidenceKind::StatusChange);
+    assert_eq!(reopen.agent_id, "harness-a");
+    assert_eq!(reopen.payload["status"], "active");
+    assert!(store.verify_chain(session.id).unwrap().valid);
+}
+
+#[test]
+fn ownership_timeline_derives_from_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let session = store
+        .create_session("ownership", project.path(), "harness-a", vec![], None)
+        .unwrap()
+        .0;
+    let bundle = store
+        .export_handoff(session.id, None, serde_json::json!({}))
+        .unwrap();
+    store.import_handoff(&bundle, "harness-b", None).unwrap();
+    let spans = store.ownership_timeline(session.id).unwrap();
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0].agent_id, "harness-a");
+    assert_eq!(spans[0].via, "session_start");
+    assert!(spans[0].until.is_some());
+    assert_eq!(spans[1].agent_id, "harness-b");
+    assert!(spans[1].until.is_none());
+    assert_eq!(
+        store.get_session(session.id).unwrap().unwrap().agent_id,
+        "harness-b"
+    );
+
+    // Re-import under the same agent adds no span.
+    let bundle2 = store
+        .export_handoff(session.id, None, serde_json::json!({}))
+        .unwrap();
+    store.import_handoff(&bundle2, "harness-b", None).unwrap();
+    assert_eq!(store.ownership_timeline(session.id).unwrap().len(), 2);
+}
+
+#[test]
+fn legacy_session_json_defaults_harness_session_id() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let session = store
+        .create_session("legacy", project.path(), "harness-a", vec![], None)
+        .unwrap()
+        .0;
+    let mut value = serde_json::to_value(&session).unwrap();
+    value.as_object_mut().unwrap().remove("harness_session_id");
+    let parsed: agent_control_core::model::Session = serde_json::from_value(value).unwrap();
+    assert!(parsed.harness_session_id.is_none());
 }

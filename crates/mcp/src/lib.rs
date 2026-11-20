@@ -33,6 +33,26 @@ impl ControlServer {
             store,
         }
     }
+
+    /// Acting identity for session-mutation evidence: the caller-supplied agent when present,
+    /// otherwise the session's current owner. Keeps every mutation attributable (UX5).
+    fn acting_agent(
+        &self,
+        session_id: Uuid,
+        supplied: Option<String>,
+    ) -> Result<String, ErrorData> {
+        if let Some(a) = supplied
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Ok(a);
+        }
+        match self.store.get_session(session_id) {
+            Ok(Some(s)) => Ok(s.agent_id),
+            Ok(None) => Err(ErrorData::invalid_params("session not found", None)),
+            Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
+        }
+    }
 }
 
 fn json_result(value: &serde_json::Value) -> Result<CallToolResult, ErrorData> {
@@ -174,6 +194,10 @@ pub struct CreateSessionRequest {
     pub agent_id: String,
     #[serde(default)]
     pub task_tags: Vec<String>,
+    /// Harness-native conversation id, when the harness exposes one; distinguishes several
+    /// conversations of the same harness sharing one Agent Control session.
+    #[serde(default)]
+    pub harness_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -202,6 +226,9 @@ pub struct AcknowledgeRequest {
 pub struct SessionRequest {
     /// Session UUID
     pub session_id: String,
+    /// Also return the full evidence chain (default false; keep payloads small for hooks).
+    #[serde(default)]
+    pub include_evidence: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -223,6 +250,9 @@ pub struct SetSessionStatusRequest {
     pub session_id: String,
     /// New lifecycle status: active | completed | failed (handed_off is set by export_handoff)
     pub status: String,
+    /// Acting identity recorded in the status_change evidence; defaults to the session owner.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -231,6 +261,9 @@ pub struct ImportHandoffRequest {
     pub bundle: serde_json::Value,
     /// Harness resuming the session
     pub new_agent: String,
+    /// Harness-native conversation id of the resuming conversation, when exposed.
+    #[serde(default)]
+    pub harness_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -437,6 +470,9 @@ pub struct UpdateWorkStateRequest {
     /// Resumable work items; replaces the session's current list
     #[serde(default)]
     pub work_items: Vec<WorkItemInput>,
+    /// Acting identity recorded in the work_state_update evidence; defaults to the session owner.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -614,6 +650,7 @@ impl ControlServer {
             &PathBuf::from(&req.project_path),
             &req.agent_id,
             req.task_tags,
+            req.harness_session_id,
         ) {
             Ok((session, reused)) => json_result(&serde_json::json!({
                 "session_id": session.id,
@@ -678,10 +715,23 @@ impl ControlServer {
                     .store
                     .evidence_head_hash(session_id)
                     .unwrap_or_default();
-                json_result(&serde_json::json!({
+                let mut value = serde_json::json!({
                     "session": session,
                     "evidence_head_hash": head,
-                }))
+                });
+                if req.include_evidence {
+                    let entries = self
+                        .store
+                        .get_evidence(session_id)
+                        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+                    let spans = self
+                        .store
+                        .ownership_timeline(session_id)
+                        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+                    value["evidence"] = serde_json::to_value(entries).unwrap();
+                    value["ownership"] = serde_json::to_value(spans).unwrap();
+                }
+                json_result(&value)
             }
             Ok(None) => tool_err(format!("session '{session_id}' not found")),
             Err(e) => tool_err(e),
@@ -715,7 +765,10 @@ impl ControlServer {
         let bundle: agent_control_core::model::HandoffBundle =
             serde_json::from_value(req.bundle)
                 .map_err(|e| ErrorData::invalid_params(format!("invalid bundle: {e}"), None))?;
-        match self.store.import_handoff(&bundle, &req.new_agent) {
+        match self
+            .store
+            .import_handoff(&bundle, &req.new_agent, req.harness_session_id)
+        {
             Ok(session) => {
                 let carried = session.assurance.clone();
                 json_result(&serde_json::json!({
@@ -1142,9 +1195,10 @@ impl ControlServer {
                 },
             })
             .collect();
+        let acting = self.acting_agent(session_id, req.agent_id)?;
         match self
             .store
-            .set_session_work_state(session_id, req.goal, items)
+            .set_session_work_state(session_id, req.goal, items, &acting)
         {
             Ok(session) => json_result(&serde_json::to_value(session).unwrap()),
             Err(e) => tool_err(e),
@@ -1177,7 +1231,8 @@ impl ControlServer {
                 None,
             ));
         }
-        match self.store.set_session_status(session_id, status) {
+        let acting = self.acting_agent(session_id, req.agent_id)?;
+        match self.store.set_session_status(session_id, status, &acting) {
             Ok(session) => json_result(&serde_json::to_value(session).unwrap()),
             Err(e) => tool_err(e),
         }

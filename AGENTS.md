@@ -84,17 +84,26 @@ the only write path for `enabled` (bumps version, preserves content; backs the M
 (`Decision::Disabled`) and never bind sessions; a content update via `save_rule`/`upsert_rule`
 never silently re-enables them. Build fresh rules with
 `store::new_rule(id, title, content, kind, scope, author)` (`new_user_rule` is a preference/user
-wrapper). Session work state is written via `set_session_work_state(id, goal, work_items) -> Session`
-(replaces the goal + done/doing/todo list; backs MCP `update_work_state` and the Sessions-view work
-editor). `delete_session(id)` removes a session and, **cascade**, its evidence chain + provenance
-record (backs the Sessions-view Delete button / row menu, behind a confirm dialog).
-`create_session(task, project_path, agent_id, task_tags) -> (Session, bool)` is **get-or-create**: an
-**active** session with the same project + agent + task is returned unchanged (`reused = true`), so
-repeated calls from one harness conversation never pile up duplicate sessions; a new task or a closed
-source session freezes a fresh snapshot. `set_session_status(id, status) -> Session` closes
-(`Completed`/`Failed`, appending a `session_end` evidence entry) or reopens (`Active`) a session;
-`HandedOff` is set only by `export_handoff` (whose `to_agent` is an optional receiver hint — the real
-receiver is chosen at `import_handoff`). Each `export_handoff` marks every prior **unacknowledged**
+wrapper). Session work state is written via
+`set_session_work_state(id, goal, work_items, acting_agent_id) -> Session` (replaces the goal +
+done/doing/todo list; backs MCP `update_work_state` and the Sessions-view work editor). Every session
+mutation appends evidence carrying the **acting** agent (caller-supplied), not `session.agent_id`:
+`WorkStateUpdate` on work-state edits, `StatusChange` on every status transition (including reopen),
+`OwnershipChange` on an `import_handoff` agent flip. `delete_session(id)` removes a session and,
+**cascade**, its evidence chain + provenance record (backs the Sessions-view Delete button / row menu,
+behind a confirm dialog).
+`create_session(task, project_path, agent_id, task_tags, harness_session_id) -> (Session, bool)` is
+**get-or-create**: an **active** session with the same project + agent + task is returned unchanged
+(`reused = true`), so repeated calls from one harness conversation never pile up duplicate sessions; a
+new task or a closed source session freezes a fresh snapshot. `harness_session_id` (optional, serde
+default, guarded `ALTER` column) records the harness-native conversation id to distinguish several
+conversations of one harness. `set_session_status(id, status, acting_agent_id) -> Session` closes
+(`Completed`/`Failed`, appending `status_change` + `session_end`) or reopens (`Active`, appending
+`status_change`) a session; `HandedOff` is set only by `export_handoff` (whose `to_agent` is an optional
+receiver hint — the real receiver is chosen at `import_handoff`).
+`ownership_timeline(id) -> Vec<OwnershipSpan>` **derives** the ownership history from the evidence
+chain (SessionStart agent + HandoffIn/OwnershipChange flips); `Session.agent_id` stays the current
+owner. Each `export_handoff` marks every prior **unacknowledged**
 `HandoffRecord` as `superseded` (a `#[serde(default)]` bool, so old session JSON needs no migration):
 only the latest handoff can be acknowledged, and superseded records no longer read as pending action.
 `acknowledge_rules` still marks only the last record acknowledged; acknowledged records are never

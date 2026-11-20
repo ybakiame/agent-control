@@ -58,7 +58,8 @@ impl Db {
                 handoffs_json TEXT NOT NULL DEFAULT '[]',
                 assurance_json TEXT NOT NULL DEFAULT '[]',
                 goal TEXT NOT NULL DEFAULT '',
-                work_items_json TEXT NOT NULL DEFAULT '[]'
+                work_items_json TEXT NOT NULL DEFAULT '[]',
+                harness_session_id TEXT
             );
             CREATE TABLE IF NOT EXISTS evidence (
                 session_id TEXT NOT NULL,
@@ -149,6 +150,13 @@ impl Db {
                 "ALTER TABLE sessions ADD COLUMN goal TEXT NOT NULL DEFAULT '';
                  ALTER TABLE sessions ADD COLUMN work_items_json TEXT NOT NULL DEFAULT '[]';",
             )?;
+        }
+        // Harness-native conversation id (UX5); nullable, backfill once.
+        let has_harness_sid = conn
+            .prepare("SELECT harness_session_id FROM sessions LIMIT 0")
+            .is_ok();
+        if !has_harness_sid {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN harness_session_id TEXT;")?;
         }
         // Full-text shadow tables (P1). Rows store app-segmented tokens (CJK bigrams), so
         // unicode61 only splits on spaces; original titles stay in UNINDEXED display columns.
@@ -340,8 +348,8 @@ impl Db {
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 task = excluded.task,
                 project_path = excluded.project_path,
@@ -352,7 +360,8 @@ impl Db {
                 handoffs_json = excluded.handoffs_json,
                 assurance_json = excluded.assurance_json,
                 goal = excluded.goal,
-                work_items_json = excluded.work_items_json",
+                work_items_json = excluded.work_items_json,
+                harness_session_id = excluded.harness_session_id",
             rusqlite::params![
                 session.id.to_string(),
                 session.task,
@@ -366,6 +375,7 @@ impl Db {
                 serde_json::to_string(&session.assurance)?,
                 session.goal,
                 serde_json::to_string(&session.work_items)?,
+                session.harness_session_id,
             ],
         )?;
         Self::search_sync_session_conn(&conn, session)?;
@@ -375,7 +385,7 @@ impl Db {
     pub fn get_session(&self, id: Uuid) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json FROM sessions WHERE id = ?1",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id.to_string()])?;
         match rows.next()? {
@@ -387,7 +397,7 @@ impl Db {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json FROM sessions ORDER BY updated_at DESC",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id FROM sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], session_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -850,6 +860,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         assurance: serde_json::from_str(&assurance_json).map_err(json_err)?,
         goal,
         work_items: serde_json::from_str(&work_items_json).map_err(json_err)?,
+        harness_session_id: row.get(12)?,
     })
 }
 

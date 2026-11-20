@@ -21,6 +21,9 @@ fn kind_tag(kind: EvidenceKind) -> Tag {
         EvidenceKind::ToolGate => Tag::warning().child("tool_gate"),
         EvidenceKind::SessionStart => Tag::secondary().child("session_start"),
         EvidenceKind::SessionEnd => Tag::secondary().child("session_end"),
+        EvidenceKind::WorkStateUpdate => Tag::primary().child("work_state_update"),
+        EvidenceKind::StatusChange => Tag::secondary().child("status_change"),
+        EvidenceKind::OwnershipChange => Tag::info().child("ownership_change"),
     }
 }
 

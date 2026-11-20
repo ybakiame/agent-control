@@ -1105,7 +1105,7 @@ impl Console {
             .unwrap_or_else(|| "manual".into());
         match self
             .store
-            .create_session(&task, &project, &agent_id, vec![])
+            .create_session(&task, &project, &agent_id, vec![], None)
         {
             Ok((session, reused)) => {
                 self.log(self.tr(
@@ -1164,7 +1164,7 @@ impl Console {
             self.log(self.t("log.select_session"));
             return false;
         };
-        match self.store.set_session_status(session_id, status) {
+        match self.store.set_session_status(session_id, status, "console") {
             Ok(session) => {
                 let label = match session.status {
                     SessionStatus::Active => self.t("sess.status.active"),
@@ -1215,7 +1215,7 @@ impl Console {
         let work_items = parse_work_items(&work_text);
         match self
             .store
-            .set_session_work_state(session_id, goal, work_items)
+            .set_session_work_state(session_id, goal, work_items, "console")
         {
             Ok(session) => {
                 self.log(self.tr(

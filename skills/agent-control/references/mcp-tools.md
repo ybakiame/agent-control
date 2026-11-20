@@ -36,7 +36,8 @@ an existing **active** session with the same triple is returned unchanged (`reus
 of creating a duplicate, so repeated calls from one harness conversation never pile up sessions.
 A new task — or a closed (completed/failed/handed-off) source session — freezes a fresh snapshot.
 - `task` (string, required), `project_path` (string, required), `agent_id` (string, required),
-  `task_tags` (string[], default `[]`).
+  `task_tags` (string[], default `[]`), `harness_session_id` (string, optional — the harness-native
+  conversation id, distinguishing several conversations of one harness).
 - Returns: `session_id` (UUID), `reused` (bool), `snapshot_hash`, `rules[]`, `instruction`.
   Acknowledge these rules before making changes.
 
@@ -60,9 +61,10 @@ Append a tamper-evident entry to the session hash chain.
 
 ### get_session_context
 Resume work started by another harness.
-- `session_id` (UUID string, required).
+- `session_id` (UUID string, required), `include_evidence` (bool, default false — also return the
+  full `evidence[]` chain and the derived `ownership[]` timeline; keep off for hook-sized payloads).
 - Returns: `session` (task, constraint snapshot, current `agent_id`, `handoffs[]`, status, `goal`,
-  `work_items[]`) and `evidence_head_hash`.
+  `work_items[]`, `harness_session_id`) and `evidence_head_hash`.
 
 ### update_work_state
 Record the session's resumable **work state** so a handoff carries progress instead of relying on the
@@ -71,6 +73,9 @@ next harness's own todo list.
 - `goal` (string, default `""`) — the objective (the `/goal`) the session is working toward.
 - `work_items` (object[], default `[]`) — each `{ "title": string, "status": "done"|"doing"|"todo" }`
   (`status` defaults to `todo`). **Replaces** the session's current goal + list.
+- `agent_id` (string, optional) — the **acting** identity recorded in the `work_state_update`
+  evidence entry; defaults to the session owner. Every work-state edit leaves an attributable,
+  hash-chained trail.
 - Returns the updated `session` (including `goal` and `work_items[]`). Call it as work completes or
   starts, and before `export_handoff`; the goal + items then ride into the bundle and `latest.md`.
 
@@ -79,8 +84,11 @@ Close or reopen a session so finished work leaves the active list instead of pil
 - `session_id` (UUID string, required).
 - `status` (string, required) — `active` | `completed` | `failed`. `handed_off` is rejected here;
   only `export_handoff` sets it.
-- Returns the updated `session`. Completing/failing appends a `session_end` evidence entry (the
-  chain stays auditable and is never deleted); `active` reopens it. A completed session no longer
+- `agent_id` (string, optional) — the **acting** identity recorded in the `status_change` evidence
+  entry; defaults to the session owner.
+- Returns the updated `session`. Every transition appends `status_change` (including reopen);
+  completing/failing additionally appends `session_end` (the chain stays auditable and is never
+  deleted); `active` reopens it. A completed session no longer
   absorbs `create_session` calls for the same task.
 
 ### export_handoff
@@ -105,7 +113,9 @@ Produce a bundle to transfer the session to another harness.
 ### import_handoff
 Resume a session under a new harness; verifies bundle integrity + snapshot consistency.
 - `bundle` (object, required) — the full JSON from `export_handoff`.
-- `new_agent` (string, required).
+- `new_agent` (string, required), `harness_session_id` (string, optional — the resuming
+  conversation's native id). An agent flip appends an `ownership_change` evidence entry; the
+  ownership history is derivable via `get_session_context include_evidence` (`ownership[]`).
 - Returns: `session_id`, `agent_id`, `rules_to_acknowledge[]`, `carried_assurance[]` (the source
   tiers), `goal` + `work_items[]` (the carried work state) and `tier_warning` (set when any carried
   tier is above Advisory). The warning is

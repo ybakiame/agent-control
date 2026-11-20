@@ -256,12 +256,13 @@ async function mcpCall(headers, tool, args) {
 // (project, agent, task); a fixed task means every hook invocation for this project+agent lands on
 // the same session UUID without sharing state between separate processes — an enforcement ledger
 // that records each gated call. The start event freezes the snapshot; the gate attaches its verdict.
-async function resolveSession(headers, cwd) {
+async function resolveSession(headers, cwd, harnessSessionId) {
   const data = await mcpCall(headers, "create_session", {
     task: "hook",
     project_path: cwd,
     agent_id: AGENT_ID,
     task_tags: [],
+    harness_session_id: typeof harnessSessionId === "string" ? harnessSessionId : null,
   });
   return typeof data?.session_id === "string" ? data.session_id : null;
 }
@@ -305,7 +306,7 @@ async function handleGate(headers, parsed, cwd) {
   if (!toolName) return allowResult();
   let sessionId = null;
   try {
-    sessionId = await resolveSession(headers, cwd);
+    sessionId = await resolveSession(headers, cwd, parsed?.session_id);
   } catch (e) {
     debug(`session resolution skipped: ${e?.message ?? String(e)}`);
   }
@@ -357,14 +358,14 @@ function renderWorkState(ctx) {
 // compaction event), so the documented injection channel is the compact session-start. Re-inject the
 // binding-rule briefing + the on-disk continuity brief + live work state. The brief is read from disk
 // first, so continuity is preserved even when the daemon is down.
-async function handleCompact(cwd, brief) {
+async function handleCompact(cwd, brief, harnessSessionId) {
   let briefing = "";
   let workState = "";
   try {
     const headers = await mcpInit();
     let sessionId = null;
     try {
-      sessionId = await resolveSession(headers, cwd);
+      sessionId = await resolveSession(headers, cwd, harnessSessionId);
     } catch (e) {
       debug(`compact session resolution skipped: ${e?.message ?? String(e)}`);
     }
@@ -410,7 +411,7 @@ async function main() {
   // Compaction continuity: react to the compact session-start source before any daemon dependency.
   if (parsed?.source === "compact" && SHAPE !== "antigravity") {
     compactBrief = readBrief(cwd);
-    return handleCompact(cwd, compactBrief);
+    return handleCompact(cwd, compactBrief, parsed?.session_id);
   }
 
   const headers = await mcpInit();
@@ -419,7 +420,7 @@ async function main() {
 
   // Start event: freeze the snapshot, then inject the binding-rule briefing where the vendor supports it.
   try {
-    await resolveSession(headers, cwd);
+    await resolveSession(headers, cwd, parsed?.session_id);
   } catch (e) {
     debug(`session creation skipped: ${e?.message ?? String(e)}`);
   }

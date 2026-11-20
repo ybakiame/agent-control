@@ -15,10 +15,10 @@ use crate::export;
 use crate::hooks::{self, HookReport, HookStatus, HookTarget, SetupReport};
 use crate::model::{
     AgentRegistration, AssuranceTier, ConstraintAssurance, ConstraintSnapshot, Enforcement,
-    EvidenceEntry, EvidenceKind, HandoffBundle, HandoffRecord, Project, ProvenanceRecord,
-    QueryContext, Resolution, Rule, RuleKind, RuleSuggestion, Scope, Session, SessionStatus,
-    SourceKind, SuggestionEdits, SuggestionStatus, ToolGateReport, VerificationReport, WorkItem,
-    canonical_hash,
+    EvidenceEntry, EvidenceKind, HandoffBundle, HandoffRecord, OwnershipSpan, Project,
+    ProvenanceRecord, QueryContext, Resolution, Rule, RuleKind, RuleSuggestion, Scope, Session,
+    SessionStatus, SourceKind, SuggestionEdits, SuggestionStatus, ToolGateReport,
+    VerificationReport, WorkItem, canonical_hash,
 };
 
 pub use db::Db;
@@ -245,6 +245,7 @@ impl Store {
         project_path: &Path,
         agent_id: &str,
         task_tags: Vec<String>,
+        harness_session_id: Option<String>,
     ) -> Result<(Session, bool)> {
         if let Some(existing) = self.db.list_sessions()?.into_iter().find(|s| {
             s.status == SessionStatus::Active
@@ -284,6 +285,7 @@ impl Store {
             assurance: vec![],
             goal: String::new(),
             work_items: vec![],
+            harness_session_id,
         };
         self.db.upsert_session(&session)?;
         self.db.append_evidence(
@@ -295,6 +297,7 @@ impl Store {
                 "snapshot_hash": session.constraint_snapshot.snapshot_hash,
                 "rule_count": session.constraint_snapshot.rules.len(),
                 "provenance_id": record.id,
+                "harness_session_id": session.harness_session_id,
             }),
         )?;
         Ok((session, false))
@@ -308,18 +311,33 @@ impl Store {
         self.db.list_sessions()
     }
 
-    /// Close or reopen a session. Closing (Completed/Failed) appends a `session_end` evidence
-    /// entry so the lifecycle change stays auditable; the chain itself is never deleted.
-    pub fn set_session_status(&self, id: Uuid, status: SessionStatus) -> Result<Session> {
+    /// Close or reopen a session. Every transition appends a `status_change` evidence entry carrying
+    /// the ACTING agent (caller-supplied), and closing additionally appends `session_end` so the
+    /// lifecycle change stays auditable; the chain itself is never deleted.
+    pub fn set_session_status(
+        &self,
+        id: Uuid,
+        status: SessionStatus,
+        acting_agent_id: &str,
+    ) -> Result<Session> {
         let mut session = self.db.get_session(id)?.context("session not found")?;
         session.status = status;
         session.updated_at = Utc::now();
         self.db.upsert_session(&session)?;
+        self.db.append_evidence(
+            id,
+            EvidenceKind::StatusChange,
+            acting_agent_id,
+            serde_json::json!({
+                "status": db::status_label(status),
+                "harness_session_id": session.harness_session_id,
+            }),
+        )?;
         if matches!(status, SessionStatus::Completed | SessionStatus::Failed) {
             self.db.append_evidence(
                 id,
                 EvidenceKind::SessionEnd,
-                &session.agent_id,
+                acting_agent_id,
                 serde_json::json!({ "status": db::status_label(status) }),
             )?;
         }
@@ -327,19 +345,78 @@ impl Store {
     }
 
     /// Record the resumable work state (goal + done/doing/todo) so a handoff carries progress
-    /// independent of any harness's own todo list.
+    /// independent of any harness's own todo list. Appends a `work_state_update` evidence entry
+    /// carrying the ACTING agent (caller-supplied), so every edit leaves an attributable trail.
     pub fn set_session_work_state(
         &self,
         id: Uuid,
         goal: String,
         work_items: Vec<WorkItem>,
+        acting_agent_id: &str,
     ) -> Result<Session> {
         let mut session = self.db.get_session(id)?.context("session not found")?;
         session.goal = goal;
         session.work_items = work_items;
         session.updated_at = Utc::now();
         self.db.upsert_session(&session)?;
+        self.db.append_evidence(
+            id,
+            EvidenceKind::WorkStateUpdate,
+            acting_agent_id,
+            serde_json::json!({
+                "goal": session.goal,
+                "work_items": session.work_items,
+                "harness_session_id": session.harness_session_id,
+            }),
+        )?;
         Ok(session)
+    }
+
+    /// Derive the ownership history from the evidence chain: the SessionStart agent opens the first
+    /// span; each HandoffIn / OwnershipChange closes the current span and opens a new one. The last
+    /// span stays open (`until: None`) and matches `Session.agent_id` (the current owner).
+    pub fn ownership_timeline(&self, id: Uuid) -> Result<Vec<OwnershipSpan>> {
+        let session = self.db.get_session(id)?.context("session not found")?;
+        let entries = self.db.get_evidence(id)?;
+        let mut spans: Vec<OwnershipSpan> = Vec::new();
+        for e in &entries {
+            let via = match e.kind {
+                EvidenceKind::SessionStart => "session_start",
+                EvidenceKind::HandoffIn => "handoff_in",
+                EvidenceKind::OwnershipChange => "ownership_change",
+                _ => continue,
+            };
+            let agent = match e.kind {
+                EvidenceKind::OwnershipChange => e
+                    .payload
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&e.agent_id)
+                    .to_string(),
+                _ => e.agent_id.clone(),
+            };
+            if let Some(last) = spans.last_mut() {
+                if last.agent_id == agent {
+                    continue;
+                }
+                last.until = Some(e.timestamp);
+            }
+            spans.push(OwnershipSpan {
+                agent_id: agent,
+                since: e.timestamp,
+                until: None,
+                via: via.to_string(),
+            });
+        }
+        if spans.is_empty() {
+            spans.push(OwnershipSpan {
+                agent_id: session.agent_id.clone(),
+                since: session.created_at,
+                until: None,
+                via: "session_start".to_string(),
+            });
+        }
+        Ok(spans)
     }
 
     /// Delete a session and, cascade, its evidence chain and provenance record.
@@ -739,6 +816,12 @@ impl Store {
                 "handoff_id": record.id,
             }),
         )?;
+        self.db.append_evidence(
+            session.id,
+            EvidenceKind::StatusChange,
+            &session.agent_id,
+            serde_json::json!({ "status": "handed_off", "handoff_id": record.id }),
+        )?;
         // A newer export replaces every still-unacknowledged prior record; only the latest
         // handoff can be acknowledged, so older ones must not read as pending forever.
         for handoff in session.handoffs.iter_mut() {
@@ -764,7 +847,12 @@ impl Store {
         Ok(bundle)
     }
 
-    pub fn import_handoff(&self, bundle: &HandoffBundle, new_agent: &str) -> Result<Session> {
+    pub fn import_handoff(
+        &self,
+        bundle: &HandoffBundle,
+        new_agent: &str,
+        harness_session_id: Option<String>,
+    ) -> Result<Session> {
         if !bundle.verify_integrity() {
             bail!("handoff bundle failed integrity verification");
         }
@@ -783,6 +871,7 @@ impl Store {
                 assurance: vec![],
                 goal: bundle.goal.clone(),
                 work_items: bundle.work_items.clone(),
+                harness_session_id: None,
             },
         };
         let snapshot_hash = canonical_hash(
@@ -798,10 +887,22 @@ impl Store {
         session.assurance = bundle.assurance.clone();
         session.goal = bundle.goal.clone();
         session.work_items = bundle.work_items.clone();
+        let previous_agent = session.agent_id.clone();
         session.agent_id = new_agent.to_string();
+        if harness_session_id.is_some() {
+            session.harness_session_id = harness_session_id;
+        }
         session.status = SessionStatus::Active;
         session.updated_at = Utc::now();
         self.db.upsert_session(&session)?;
+        if previous_agent != new_agent {
+            self.db.append_evidence(
+                session.id,
+                EvidenceKind::OwnershipChange,
+                new_agent,
+                serde_json::json!({ "from": previous_agent, "to": new_agent }),
+            )?;
+        }
         self.db.append_evidence(
             session.id,
             EvidenceKind::HandoffIn,

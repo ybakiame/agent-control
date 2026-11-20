@@ -232,6 +232,45 @@ try {
     workState,
   );
 
+  // UX5 — acting-identity attribution: every session mutation records the CALLER in the chain.
+  const ux5 = await tool("create_session", {
+    task: "ux5-audit", project_path: projectDir, agent_id: "harness-a", task_tags: [],
+    harness_session_id: "conv-ux5",
+  });
+  await tool("update_work_state", {
+    session_id: ux5.session_id, goal: "audit trail", work_items: [], agent_id: "auditor",
+  });
+  await tool("set_session_status", { session_id: ux5.session_id, status: "completed", agent_id: "auditor" });
+  await tool("set_session_status", { session_id: ux5.session_id, status: "active", agent_id: "harness-a" });
+  const ux5ctx = await tool("get_session_context", { session_id: ux5.session_id, include_evidence: true });
+  const kinds = ux5ctx.evidence.map((e) => `${e.kind}:${e.agent_id}`);
+  check(
+    "work-state/status mutations carry the acting agent (incl. reopen)",
+    kinds.includes("work_state_update:auditor") &&
+      kinds.includes("status_change:auditor") &&
+      kinds.includes("session_end:auditor") &&
+      kinds.includes("status_change:harness-a"),
+    kinds,
+  );
+  check(
+    "harness_session_id round-trips into session + evidence",
+    ux5ctx.session?.harness_session_id === "conv-ux5" &&
+      ux5ctx.evidence.some((e) => e.payload?.harness_session_id === "conv-ux5"),
+    ux5ctx.session?.harness_session_id,
+  );
+  const ux5bundle = await tool("export_handoff", { session_id: ux5.session_id, context: {} });
+  await tool("import_handoff", { bundle: ux5bundle, new_agent: "harness-b" });
+  const ux5own = await tool("get_session_context", { session_id: ux5.session_id, include_evidence: true });
+  check(
+    "ownership timeline derives the agent flip from evidence",
+    ux5own.ownership?.length === 2 &&
+      ux5own.ownership[0].agent_id === "harness-a" &&
+      ux5own.ownership[1].agent_id === "harness-b" &&
+      ux5own.ownership[1].until === null,
+    ux5own.ownership,
+  );
+  check("ux5 chain stays valid", (await tool("verify_evidence", { session_id: ux5.session_id })).valid === true);
+
   const bundle = await tool("export_handoff", {
     session_id: sessionId,
     context: { summary: "module refactor in progress" },

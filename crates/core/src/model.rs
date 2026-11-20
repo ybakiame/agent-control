@@ -347,6 +347,9 @@ pub enum EvidenceKind {
     ConstraintViolation,
     SessionStart,
     SessionEnd,
+    WorkStateUpdate,
+    StatusChange,
+    OwnershipChange,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -600,6 +603,21 @@ pub struct Session {
     pub goal: String,
     #[serde(default)]
     pub work_items: Vec<WorkItem>,
+    /// Harness-native conversation id, when the caller supplies one; distinguishes several
+    /// conversations of the same harness sharing one Agent Control session.
+    #[serde(default)]
+    pub harness_session_id: Option<String>,
+}
+
+/// One span of session ownership, derived from the evidence chain (SessionStart agent plus
+/// HandoffIn / OwnershipChange flips). `until` is None for the current owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnershipSpan {
+    pub agent_id: String,
+    pub since: DateTime<Utc>,
+    pub until: Option<DateTime<Utc>>,
+    /// Evidence kind that opened the span: session_start | handoff_in | ownership_change.
+    pub via: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
