@@ -174,6 +174,15 @@ impl Db {
         if !has_title {
             conn.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT '';")?;
         }
+        // Optimistic-concurrency counter for the work-state list (CONC1).
+        let has_wsv = conn
+            .prepare("SELECT work_state_version FROM sessions LIMIT 0")
+            .is_ok();
+        if !has_wsv {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN work_state_version INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
         // Full-text shadow tables (P1). Rows store app-segmented tokens (CJK bigrams), so
         // unicode61 only splits on spaces; original titles stay in UNINDEXED display columns.
         // Rebuilt from source on every Store::open.
@@ -397,7 +406,7 @@ impl Db {
 
     pub fn list_sessions_conn(conn: &Connection) -> Result<Vec<Session>> {
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title FROM sessions ORDER BY updated_at DESC",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title, work_state_version FROM sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], session_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -406,8 +415,8 @@ impl Db {
 
     pub fn upsert_session_conn(conn: &Connection, session: &Session) -> Result<()> {
         conn.execute(
-            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title, work_state_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
                 task = excluded.task,
                 project_path = excluded.project_path,
@@ -421,7 +430,8 @@ impl Db {
                 work_items_json = excluded.work_items_json,
                 harness_session_id = excluded.harness_session_id,
                 predecessor = excluded.predecessor,
-                title = excluded.title",
+                title = excluded.title,
+                work_state_version = excluded.work_state_version",
             rusqlite::params![
                 session.id.to_string(),
                 session.task,
@@ -438,6 +448,7 @@ impl Db {
                 session.harness_session_id,
                 session.predecessor.map(|id| id.to_string()),
                 session.title,
+                session.work_state_version as i64,
             ],
         )?;
         Self::search_sync_session_conn(conn, session)?;
@@ -447,7 +458,7 @@ impl Db {
     pub fn get_session(&self, id: Uuid) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title FROM sessions WHERE id = ?1",
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title, work_state_version FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id.to_string()])?;
         match rows.next()? {
@@ -964,6 +975,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
             .map(|s| Uuid::parse_str(&s).map_err(invalid_uuid))
             .transpose()?,
         title: row.get(14)?,
+        work_state_version: row.get::<_, i64>(15)? as u64,
     })
 }
 

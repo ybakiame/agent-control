@@ -351,6 +351,7 @@ pub enum EvidenceKind {
     StatusChange,
     OwnershipChange,
     SessionRename,
+    SnapshotRefresh,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -616,6 +617,40 @@ pub struct Session {
     /// split a new snapshot off it; links chain splits so they read as one thread (UX1).
     #[serde(default)]
     pub predecessor: Option<Uuid>,
+    /// Optimistic-concurrency counter for the work-state list (CONC1): every accepted
+    /// `set_session_work_state` bumps it; a caller passing a stale expected version gets a
+    /// conflict instead of silently clobbering another agent's read-modify-write.
+    #[serde(default)]
+    pub work_state_version: u64,
+}
+
+/// What a session thread is for (UX11): telemetry threads are hook-created gate/audit records and
+/// must never carry work state or become continuity bundles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    Work,
+    Continuity,
+    Telemetry,
+}
+
+impl Session {
+    pub fn kind(&self) -> SessionKind {
+        if self.task == "hook" {
+            SessionKind::Telemetry
+        } else if !self.handoffs.is_empty()
+            || self.predecessor.is_some()
+            || self.status == SessionStatus::HandedOff
+        {
+            SessionKind::Continuity
+        } else {
+            SessionKind::Work
+        }
+    }
+
+    pub fn is_telemetry(&self) -> bool {
+        self.kind() == SessionKind::Telemetry
+    }
 }
 
 /// One span of session ownership, derived from the evidence chain (SessionStart agent plus

@@ -73,7 +73,7 @@ Agent Control 是同一规则库之上的**解析层**，会**编译进**这些�
   并把已取代的交接收进折叠区。视图显示可恢复的**工作态**
   （goal + done/doing/todo）、已达保证分级，以及级联删除会话证据 + 溯源的删除动作。
 - **双语 UI（English / 简体中文）**，设置内有运行时切换器；选择持久化到 `<数据根>/config.toml`。
-- **MCP 服务端**（rmcp），支持 **stdio** 与 **Streamable HTTP** 两种模式，暴露 28 个工具及资源与提示。
+- **MCP 服务端**（rmcp），支持 **stdio** 与 **Streamable HTTP** 两种模式，暴露 29 个工具及资源与提示。
   守护进程的回环**端口可在设置中配置**（默认 `9870`）并存于 `config.toml`，因此便携/dev 实例可绑定不同端口、
   与生产隔离；侧栏图标按钮可一眼启停守护进程。
 - **Hooks 强制**，支持**九家编码 agent**——Claude Code、CodeBuddy、WorkBuddy、Qoder、Qoder CN、Codex、

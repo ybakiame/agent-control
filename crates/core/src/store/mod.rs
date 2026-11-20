@@ -352,6 +352,7 @@ impl Store {
                 harness_session_id,
                 predecessor,
                 title: String::new(),
+                work_state_version: 0,
             };
             Db::upsert_session_conn(conn, &session)?;
             Ok((session, false))
@@ -419,9 +420,10 @@ impl Store {
             self.record_handoff(
                 &mut session,
                 None,
-                serde_json::json!({ "auto": "session_close" }),
+                serde_json::json!({"auto": "session_close"}),
                 acting_agent_id,
                 None,
+                true,
             )?;
         }
         Ok(session)
@@ -436,10 +438,23 @@ impl Store {
         goal: String,
         work_items: Vec<WorkItem>,
         acting_agent_id: &str,
+        expected_version: Option<u64>,
     ) -> Result<Session> {
         let mut session = self.db.get_session(id)?.context("session not found")?;
+        if session.is_telemetry() {
+            bail!("telemetry sessions (task 'hook') cannot carry work state");
+        }
+        if let Some(expected) = expected_version
+            && expected != session.work_state_version
+        {
+            bail!(
+                "work state conflict: expected version {expected}, current {}; re-read the session and retry",
+                session.work_state_version
+            );
+        }
         session.goal = goal;
         session.work_items = work_items;
+        session.work_state_version += 1;
         session.updated_at = Utc::now();
         self.db.upsert_session(&session)?;
         self.db.append_evidence(
@@ -449,6 +464,7 @@ impl Store {
             serde_json::json!({
                 "goal": session.goal,
                 "work_items": session.work_items,
+                "version": session.work_state_version,
                 "harness_session_id": session.harness_session_id,
             }),
         )?;
@@ -881,19 +897,73 @@ impl Store {
         session_id: Uuid,
         to_agent: Option<&str>,
         context: serde_json::Value,
+        non_owner: bool,
     ) -> Result<HandoffBundle> {
         let mut session = self
             .db
             .get_session(session_id)?
             .context("session not found")?;
+        if session.is_telemetry() {
+            bail!("telemetry sessions (task 'hook') cannot be exported as handoff bundles");
+        }
         let acting = session.agent_id.clone();
         self.record_handoff(
             &mut session,
             to_agent,
             context,
             &acting,
-            Some(SessionStatus::HandedOff),
+            if non_owner {
+                None
+            } else {
+                Some(SessionStatus::HandedOff)
+            },
+            !non_owner,
         )
+    }
+
+    /// SNAP1 re-freeze: recompute the live applied rule set into a fresh snapshot so a long-lived
+    /// session adopts rule changes without splitting. Records `SnapshotRefresh` evidence and
+    /// re-runs verification so achieved tiers match the new snapshot; old bundles then drift-bail
+    /// on import (expected).
+    pub fn refresh_snapshot(&self, session_id: Uuid, acting_agent_id: &str) -> Result<Session> {
+        let mut session = self
+            .db
+            .get_session(session_id)?
+            .context("session not found")?;
+        let old_hash = session.constraint_snapshot.snapshot_hash.clone();
+        let ctx = QueryContext {
+            project_path: session.project_path.clone(),
+            agent_id: session.agent_id.clone(),
+            file_paths: vec![],
+            languages: vec![],
+            task_tags: vec![],
+            session_id: Some(session.id),
+        };
+        let (record, resolution) = self.resolve_rules(&ctx)?;
+        let applied: Vec<Rule> = resolution
+            .applied
+            .iter()
+            .filter(|m| m.decision == crate::model::Decision::Applied)
+            .map(|m| m.rule.clone())
+            .collect();
+        session.constraint_snapshot = ConstraintSnapshot::new(applied, record.id);
+        session.updated_at = Utc::now();
+        self.db.upsert_session(&session)?;
+        self.db.set_provenance_session(record.id, session.id)?;
+        self.db.append_evidence(
+            session.id,
+            EvidenceKind::SnapshotRefresh,
+            acting_agent_id,
+            serde_json::json!({
+                "old_snapshot_hash": old_hash,
+                "new_snapshot_hash": session.constraint_snapshot.snapshot_hash,
+                "rule_count": session.constraint_snapshot.rules.len(),
+            }),
+        )?;
+        self.verify_constraints(session.id, acting_agent_id)?;
+        self.db
+            .get_session(session_id)?
+            .context("session not found")
     }
 
     /// Write the handoff bundle + project-local brief and record the handoff, superseding every
@@ -907,6 +977,7 @@ impl Store {
         context: serde_json::Value,
         acting_agent_id: &str,
         status_after: Option<SessionStatus>,
+        supersede: bool,
     ) -> Result<HandoffBundle> {
         let head_hash = self.db.evidence_head_hash(session.id)?;
         let mut bundle = HandoffBundle {
@@ -953,11 +1024,14 @@ impl Store {
             )?;
             session.status = status;
         }
-        // A newer export replaces every still-unacknowledged prior record; only the latest
-        // handoff can be acknowledged, so older ones must not read as pending forever.
-        for handoff in session.handoffs.iter_mut() {
-            if !handoff.acknowledged {
-                handoff.superseded = true;
+        // A newer OWNER export replaces every still-unacknowledged prior record; only the latest
+        // handoff can be acknowledged, so older ones must not read as pending forever. A non-owner
+        // refresh (CONC1) leaves the owner's pending bundle actionable.
+        if supersede {
+            for handoff in session.handoffs.iter_mut() {
+                if !handoff.acknowledged {
+                    handoff.superseded = true;
+                }
             }
         }
         session.handoffs.push(record);
@@ -1005,6 +1079,7 @@ impl Store {
                 harness_session_id: None,
                 predecessor: None,
                 title: bundle.title.clone(),
+                work_state_version: 0,
             },
         };
         let snapshot_hash = canonical_hash(

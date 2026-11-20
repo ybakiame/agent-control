@@ -23,7 +23,7 @@ work). It is not the guide for editing the console's Rust source — that lives 
 
 ## Connect
 
-The console exposes an **MCP server** (28 tools + resources + prompts). Pick one transport:
+The console exposes an **MCP server** (29 tools + resources + prompts). Pick one transport:
 
 - **Streamable HTTP** — the desktop app runs a **background daemon** at `http://127.0.0.1:9870/mcp`
   by default (`mcp-session-id` header). It reuses an already-running daemon or spawns the sibling
@@ -245,7 +245,7 @@ Projects → Hooks panel does the same with one click.
 
 ## Resources
 
-- [references/mcp-tools.md](references/mcp-tools.md) — all 28 tools (parameters + returns), the 3
+- [references/mcp-tools.md](references/mcp-tools.md) — all 29 tools (parameters + returns), the 3
   resources, the `constraint-briefing` prompt, and concrete call examples.
 - In the source repo: `scripts/mcp-e2e.mjs` and `scripts/mcp-http-e2e.mjs` are runnable lifecycle
   examples; `scripts/hook-e2e.mjs` exercises the SessionStart/PreToolUse hook against a live daemon;

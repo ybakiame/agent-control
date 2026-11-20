@@ -238,6 +238,15 @@ pub struct SessionRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RefreshSnapshotRequest {
+    /// Session UUID whose snapshot is re-frozen from the live rule set
+    pub session_id: String,
+    /// Acting identity recorded in the snapshot_refresh evidence; defaults to `console`.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExportHandoffRequest {
     /// Session UUID to hand off
     pub session_id: String,
@@ -248,6 +257,10 @@ pub struct ExportHandoffRequest {
     /// Context summary to carry over (conversation state, files touched, decisions)
     #[serde(default)]
     pub context: serde_json::Value,
+    /// CONC1 non-owner mode: write bundle + brief WITHOUT flipping status to handed_off or
+    /// superseding the owner's pending bundle (a planner refreshing the brief). Default false.
+    #[serde(default)]
+    pub non_owner: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -484,6 +497,10 @@ pub struct UpdateWorkStateRequest {
     /// Acting identity recorded in the work_state_update evidence; defaults to the session owner.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// CONC1 optimistic concurrency: the work_state_version this edit was prepared against.
+    /// A mismatch is a conflict error carrying the current version; re-read and retry.
+    #[serde(default)]
+    pub expected_version: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -757,10 +774,12 @@ impl ControlServer {
         Parameters(req): Parameters<ExportHandoffRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let session_id = parse_uuid(&req.session_id)?;
-        match self
-            .store
-            .export_handoff(session_id, req.to_agent.as_deref(), req.context)
-        {
+        match self.store.export_handoff(
+            session_id,
+            req.to_agent.as_deref(),
+            req.context,
+            req.non_owner,
+        ) {
             Ok(bundle) => json_result(&serde_json::to_value(bundle).unwrap()),
             Err(e) => tool_err(e),
         }
@@ -1187,6 +1206,30 @@ impl ControlServer {
     }
 
     #[tool(
+        description = "SNAP1 re-freeze the session's constraint snapshot from the LIVE applied rule set so a long-lived session adopts rule changes without splitting. Records snapshot_refresh evidence and re-runs verification; previously exported bundles then drift-bail on import (expected)."
+    )]
+    async fn refresh_snapshot(
+        &self,
+        Parameters(req): Parameters<RefreshSnapshotRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let session_id = parse_uuid(&req.session_id)?;
+        let acting = req.agent_id.clone().unwrap_or_else(|| "console".into());
+        let session = self
+            .store
+            .refresh_snapshot(session_id, &acting)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            serde_json::to_string(&serde_json::json!({
+                "instruction": "Snapshot re-frozen from the live rule set; verification re-run. Older handoff bundles now fail integrity/drift checks on import by design.",
+                "session_id": session.id,
+                "snapshot_hash": session.constraint_snapshot.snapshot_hash,
+                "rule_count": session.constraint_snapshot.rules.len(),
+            }))
+            .unwrap(),
+        )]))
+    }
+
+    #[tool(
         description = "Record the session's resumable work state: the goal (the /goal objective) plus work items marked done/doing/todo. Replaces the session's goal and work items. export_handoff carries them into the bundle and handoff/latest.md so a new harness inherits progress without relying on its own todo list. Call it as work completes or starts, and before exporting a handoff."
     )]
     async fn update_work_state(
@@ -1207,10 +1250,13 @@ impl ControlServer {
             })
             .collect();
         let acting = self.acting_agent(session_id, req.agent_id)?;
-        match self
-            .store
-            .set_session_work_state(session_id, req.goal, items, &acting)
-        {
+        match self.store.set_session_work_state(
+            session_id,
+            req.goal,
+            items,
+            &acting,
+            req.expected_version,
+        ) {
             Ok(session) => json_result(&serde_json::to_value(session).unwrap()),
             Err(e) => tool_err(e),
         }

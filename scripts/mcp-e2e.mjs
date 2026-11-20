@@ -119,7 +119,7 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  check("tools/list has 28 tools", names.length === 28, names);
+  check("tools/list has 29 tools", names.length === 29, names);
   check("save_rule registered", names.includes("save_rule"), names);
   check("set_rule_enabled registered", names.includes("set_rule_enabled"), names);
   check("suggest_rule registered", names.includes("suggest_rule"), names);
@@ -256,6 +256,98 @@ try {
     workState.work_items?.length === 3 && workState.work_items[1].status === "doing",
     workState,
   );
+
+  // CONC1 — optimistic concurrency: a stale expected_version loses with a conflict, retry wins.
+  const concSession = await tool("create_session", {
+    task: "conc1-cas", project_path: projectDir, agent_id: "planner",
+  });
+  const concV1 = await tool("update_work_state", {
+    session_id: concSession.session_id, goal: "g", work_items: [{ title: "a", status: "doing" }],
+    expected_version: 0,
+  });
+  check("update_work_state bumps version", concV1.work_state_version === 1, concV1);
+  check(
+    "stale expected_version is a conflict, not a clobber",
+    await toolRejects("update_work_state", {
+      session_id: concSession.session_id, goal: "g",
+      work_items: [{ title: "b", status: "doing" }], expected_version: 0,
+    }),
+  );
+  const concKept = await tool("get_session_context", { session_id: concSession.session_id });
+  check("conflict left the winner's items", concKept.session?.work_items?.[0]?.title === "a", concKept);
+  const concV2 = await tool("update_work_state", {
+    session_id: concSession.session_id, goal: "g", work_items: [{ title: "b", status: "doing" }],
+    expected_version: 1,
+  });
+  check("retry against current version succeeds", concV2.work_state_version === 2, concV2);
+
+  // CONC1 — non-owner export refreshes bundle + brief without flipping status or superseding.
+  const ownerSession = await tool("create_session", {
+    task: "conc1-owner", project_path: projectDir, agent_id: "owner",
+  });
+  await tool("export_handoff", { session_id: ownerSession.session_id, non_owner: true });
+  const ownerCtx = await tool("get_session_context", { session_id: ownerSession.session_id });
+  check(
+    "non-owner export keeps status active and bundle pending",
+    ownerCtx.session?.status === "active" &&
+      ownerCtx.session?.handoffs?.length === 1 &&
+      ownerCtx.session?.handoffs?.[0]?.superseded === false,
+    ownerCtx.session,
+  );
+  await tool("export_handoff", { session_id: ownerSession.session_id });
+  await tool("export_handoff", { session_id: ownerSession.session_id, non_owner: true });
+  const ownerCtx2 = await tool("get_session_context", { session_id: ownerSession.session_id });
+  check(
+    "later non-owner refresh leaves the owner's pending bundle actionable",
+    ownerCtx2.session?.status === "handed_off" &&
+      ownerCtx2.session?.handoffs?.[1]?.superseded === false,
+    ownerCtx2.session?.handoffs,
+  );
+
+  // UX11 — model-level guards: telemetry (task 'hook') sessions carry no work state / handoff.
+  const hookSession = await tool("create_session", {
+    task: "hook", project_path: projectDir, agent_id: "qoder",
+  });
+  check(
+    "update_work_state rejects telemetry sessions",
+    await toolRejects("update_work_state", {
+      session_id: hookSession.session_id, goal: "g", work_items: [],
+    }),
+  );
+  check(
+    "export_handoff rejects telemetry sessions (owner and non-owner)",
+    (await toolRejects("export_handoff", { session_id: hookSession.session_id })) &&
+      (await toolRejects("export_handoff", { session_id: hookSession.session_id, non_owner: true })),
+  );
+
+  // SNAP1 — refresh_snapshot re-freezes from the live rule set and records snapshot_refresh.
+  check("refresh_snapshot registered", names.includes("refresh_snapshot"), names);
+  const snapSession = await tool("create_session", {
+    task: "snap1", project_path: projectDir, agent_id: "owner",
+  });
+  const snapBefore = snapSession.rules?.length ?? 0;
+  await tool("save_rule", {
+    id: "snap1-new-rule", title: "snap1 added rule", content: "adopted by re-freeze",
+    agent_id: "owner", kind: "contract", scope: "project", project_path: projectDir,
+  });
+  const snapAfter = await tool("refresh_snapshot", { session_id: snapSession.session_id });
+  check(
+    "refresh_snapshot adopts the new rule",
+    snapAfter.rule_count === snapBefore + 1,
+    { snapBefore, snapAfter },
+  );
+  const snapCtx = await tool("get_session_context", {
+    session_id: snapSession.session_id, include_evidence: true,
+  });
+  check(
+    "refresh_snapshot records snapshot_refresh evidence",
+    snapCtx.evidence?.some((e) => e.kind === "snapshot_refresh"),
+    snapCtx.evidence?.map((e) => e.kind),
+  );
+  // Keep downstream rule-count assertions stable: pause the snap1 probe rule.
+  await tool("set_rule_enabled", {
+    id: "snap1-new-rule", enabled: false, scope: "project", project_path: projectDir,
+  });
 
   // UX5 — acting-identity attribution: every session mutation records the CALLER in the chain.
   const ux5 = await tool("create_session", {

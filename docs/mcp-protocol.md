@@ -45,11 +45,11 @@ cargo run -p agent-control-mcp -- --data-dir <path>       # override data root
 **Single-instance:** the TCP bind is the lock — a second HTTP launch on a busy address logs
 "already serving" and exits cleanly (`AddrInUse` guard), so daemon spawns are idempotent.
 
-**28 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
+**29 tools:** `get_applicable_rules`, `explain_rule`, `check_conflicts`, `create_session`,
 `record_evidence`, `acknowledge_rules`, `get_session_context`, `update_work_state`,
 `set_session_status`, `export_handoff`,
 `import_handoff`, `verify_evidence`, `list_rules`, `save_rule`, `set_rule_enabled`, `suggest_rule`,
-`list_suggestions`, `export_native`, `check_export_drift`, `revoke_native`, `verify_constraints`,
+`list_suggestions`, `export_native`, `check_export_drift`, `revoke_native`, `refresh_snapshot`, `verify_constraints`,
 `check_tool_call`, `register_hooks`, `revoke_hooks`, `detect_hooks`, `doctor`, `search`, `setup` (plus resources & prompts).
 `save_rule` is the active rule-authoring path: an agent records a discovered project contract
 (`scope=project`, `kind=contract`, `project_path`), a personal preference (`scope=user`), or a

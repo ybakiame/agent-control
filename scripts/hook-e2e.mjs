@@ -187,21 +187,24 @@ try {
   );
 
   // P2 — compaction continuity: SessionStart source=compact re-injects the briefing PLUS the on-disk
-  // continuity brief and the session's live work state, so a post-compaction agent recovers context.
+  // continuity brief (which carries the owner session's goal/work state), so a post-compaction agent
+  // recovers context. UX11: telemetry (task 'hook') sessions carry no work state themselves.
   const briefDir = join(proj, ".agent-control", "handoff");
   mkdirSync(briefDir, { recursive: true });
-  writeFileSync(
-    join(briefDir, "latest.md"),
-    "# Continuity brief\n\nCOMPACT-MARKER-42\n\n## Goal\nShip the spike.\n",
-  );
-  const compactSession = await tool("create_session", {
-    task: "hook", project_path: proj, agent_id: "claude-code", task_tags: [],
+  const compactOwner = await tool("create_session", {
+    task: "compact-work", project_path: proj, agent_id: "claude-code", task_tags: [],
   });
   await tool("update_work_state", {
-    session_id: compactSession.session_id,
+    session_id: compactOwner.session_id,
     goal: "Ship the spike",
     work_items: [{ title: "LIVE-ITEM-7", status: "doing" }],
   });
+  await tool("export_handoff", { session_id: compactOwner.session_id });
+  // Stand-in owner brief: marker + carried work state, as export_handoff would render it.
+  writeFileSync(
+    join(briefDir, "latest.md"),
+    "# Continuity brief\n\nCOMPACT-MARKER-42\n\n## Goal\nShip the spike.\n\n## Work state\n\n- [doing] LIVE-ITEM-7\n",
+  );
   const compact = runHook(
     { hook_event_name: "SessionStart", source: "compact", cwd: proj },
     url,
@@ -211,7 +214,7 @@ try {
   const compactCtx = compactJson?.hookSpecificOutput?.additionalContext ?? "";
   check("compact start exits 0", compact.code === 0, compact);
   check(
-    "compact start injects brief + rules + live work state",
+    "compact start injects brief + rules + carried work state",
     compactCtx.includes("COMPACT-MARKER-42") &&
       compactCtx.includes("no-rm-rf") &&
       compactCtx.includes("LIVE-ITEM-7"),

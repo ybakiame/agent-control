@@ -258,6 +258,7 @@ fn search_finds_chinese_rules_sessions_and_evidence() {
                 status: WorkItemStatus::Done,
             }],
             "tester",
+            None,
         )
         .unwrap();
     store
@@ -384,6 +385,7 @@ fn handoff_roundtrip_preserves_constraints() {
             session.id,
             Some("harness-b"),
             serde_json::json!({"summary": "work so far"}),
+            false,
         )
         .unwrap();
     assert!(bundle.verify_integrity());
@@ -436,10 +438,10 @@ fn export_handoff_supersedes_prior_unacknowledged() {
 
     // Two exports without acknowledgment: the first is superseded, the latest stays pending.
     store
-        .export_handoff(session.id, None, serde_json::json!({}))
+        .export_handoff(session.id, None, serde_json::json!({}), false)
         .unwrap();
     store
-        .export_handoff(session.id, None, serde_json::json!({}))
+        .export_handoff(session.id, None, serde_json::json!({}), false)
         .unwrap();
     let session = store.get_session(session.id).unwrap().unwrap();
     assert_eq!(session.handoffs.len(), 2);
@@ -461,7 +463,7 @@ fn export_handoff_supersedes_prior_unacknowledged() {
 
     // An acknowledged record is never superseded by a later export.
     store
-        .export_handoff(session.id, None, serde_json::json!({}))
+        .export_handoff(session.id, None, serde_json::json!({}), false)
         .unwrap();
     let session = store.get_session(session.id).unwrap().unwrap();
     assert_eq!(session.handoffs.len(), 3);
@@ -496,7 +498,7 @@ fn work_state_roundtrip_and_handoff_carry() {
         },
     ];
     store
-        .set_session_work_state(session.id, "the goal".into(), items.clone(), "tester")
+        .set_session_work_state(session.id, "the goal".into(), items.clone(), "tester", None)
         .unwrap();
     let loaded = store.get_session(session.id).unwrap().unwrap();
     assert_eq!(loaded.goal, "the goal");
@@ -504,7 +506,7 @@ fn work_state_roundtrip_and_handoff_carry() {
     assert_eq!(loaded.work_items[0].status, WorkItemStatus::Done);
 
     let bundle = store
-        .export_handoff(session.id, Some("harness-b"), serde_json::json!({}))
+        .export_handoff(session.id, Some("harness-b"), serde_json::json!({}), false)
         .unwrap();
     assert_eq!(bundle.goal, "the goal");
     assert_eq!(bundle.work_items.len(), 3);
@@ -596,7 +598,7 @@ fn rename_touches_title_only_and_keeps_get_or_create() {
 
     // The human-readable title reaches the handoff brief; task stays the machine key.
     let bundle = store
-        .export_handoff(session.id, None, serde_json::json!({}))
+        .export_handoff(session.id, None, serde_json::json!({}), false)
         .unwrap();
     assert_eq!(bundle.title, "Ship the login flow");
     let brief = agent_control_core::export::render_handoff_brief(&bundle, None);
@@ -692,7 +694,7 @@ fn export_handoff_without_to_agent() {
         .0;
 
     let bundle = store
-        .export_handoff(session.id, None, serde_json::json!({}))
+        .export_handoff(session.id, None, serde_json::json!({}), false)
         .unwrap();
     let loaded = store.get_session(session.id).unwrap().unwrap();
     assert_eq!(loaded.status, SessionStatus::HandedOff);
@@ -1515,7 +1517,7 @@ fn handoff_mirror_is_git_ignored_and_scaffolded() {
         .create_session("t", fresh.path(), "a", vec![], None)
         .unwrap();
     store
-        .export_handoff(session.id, None, serde_json::Value::Null)
+        .export_handoff(session.id, None, serde_json::Value::Null, false)
         .unwrap();
     assert!(
         fresh
@@ -2126,6 +2128,7 @@ fn handoff_carries_assurance_baseline() {
             session.id,
             Some("harness-b"),
             serde_json::json!({"summary": "verified"}),
+            false,
         )
         .unwrap();
     assert!(bundle.verify_integrity());
@@ -2163,7 +2166,7 @@ fn export_handoff_writes_project_latest_md() {
         .unwrap()
         .0;
     let bundle = store
-        .export_handoff(session.id, Some("harness-b"), serde_json::json!({}))
+        .export_handoff(session.id, Some("harness-b"), serde_json::json!({}), false)
         .unwrap();
 
     let latest = project.path().join(".agent-control/handoff/latest.md");
@@ -2210,7 +2213,7 @@ fn import_handoff_refreshes_latest_md_with_resumed_state() {
         .0;
     store.verify_constraints(session.id, "harness-a").unwrap();
     let bundle = store
-        .export_handoff(session.id, Some("harness-b"), serde_json::json!({}))
+        .export_handoff(session.id, Some("harness-b"), serde_json::json!({}), false)
         .unwrap();
 
     let latest = project.path().join(".agent-control/handoff/latest.md");
@@ -2800,6 +2803,152 @@ fn app_config_migrates_legacy_ui_json_once() {
 }
 
 #[test]
+fn work_state_cas_rejects_stale_version() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let (session, _) = store
+        .create_session("cas", project.path(), "planner", vec![], None)
+        .unwrap();
+    let item = |t: &str| WorkItem {
+        title: t.into(),
+        status: WorkItemStatus::Doing,
+    };
+    let v1 = store
+        .set_session_work_state(session.id, "g".into(), vec![item("a")], "planner", Some(0))
+        .unwrap();
+    assert_eq!(v1.work_state_version, 1);
+    // A second writer prepared against version 0 must lose, not clobber.
+    let err = store
+        .set_session_work_state(
+            session.id,
+            "g".into(),
+            vec![item("b")],
+            "implementer",
+            Some(0),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("conflict"), "{err}");
+    let kept = store.get_session(session.id).unwrap().unwrap();
+    assert_eq!(kept.work_items[0].title, "a");
+    // Retry against the current version succeeds.
+    let v2 = store
+        .set_session_work_state(
+            session.id,
+            "g".into(),
+            vec![item("b")],
+            "implementer",
+            Some(1),
+        )
+        .unwrap();
+    assert_eq!(v2.work_state_version, 2);
+    // Unconditional (legacy) callers still replace, but bump the version.
+    let v3 = store
+        .set_session_work_state(session.id, "g".into(), vec![item("c")], "planner", None)
+        .unwrap();
+    assert_eq!(v3.work_state_version, 3);
+}
+
+#[test]
+fn telemetry_sessions_reject_work_state_and_handoff() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let (hook, _) = store
+        .create_session("hook", project.path(), "qoder", vec![], None)
+        .unwrap();
+    assert!(hook.is_telemetry());
+    assert!(
+        store
+            .set_session_work_state(hook.id, "g".into(), vec![], "qoder", None)
+            .is_err()
+    );
+    assert!(
+        store
+            .export_handoff(hook.id, None, serde_json::Value::Null, false)
+            .is_err()
+    );
+    assert!(
+        store
+            .export_handoff(hook.id, None, serde_json::Value::Null, true)
+            .is_err()
+    );
+}
+
+#[test]
+fn non_owner_export_keeps_status_and_pending_bundle() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let (session, _) = store
+        .create_session("owned", project.path(), "owner", vec![], None)
+        .unwrap();
+    // Planner refresh: bundle + brief written, status and pending record untouched.
+    store
+        .export_handoff(session.id, None, serde_json::json!({"by": "planner"}), true)
+        .unwrap();
+    let s = store.get_session(session.id).unwrap().unwrap();
+    assert_eq!(s.status, SessionStatus::Active);
+    assert_eq!(s.handoffs.len(), 1);
+    assert!(!s.handoffs[0].superseded);
+    // Owner export supersedes the planner's pending record and flips status.
+    store
+        .export_handoff(session.id, Some("next"), serde_json::Value::Null, false)
+        .unwrap();
+    let s = store.get_session(session.id).unwrap().unwrap();
+    assert_eq!(s.status, SessionStatus::HandedOff);
+    assert!(s.handoffs[0].superseded);
+    assert!(!s.handoffs[1].superseded);
+    // A later planner refresh must not supersede the owner's pending bundle.
+    store
+        .export_handoff(session.id, None, serde_json::json!({"by": "planner"}), true)
+        .unwrap();
+    let s = store.get_session(session.id).unwrap().unwrap();
+    assert!(!s.handoffs[1].superseded, "owner bundle stays actionable");
+    assert_eq!(s.status, SessionStatus::HandedOff);
+}
+
+#[test]
+fn refresh_snapshot_adopts_live_rules_and_drifts_old_bundles() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_with_root(root.path().to_path_buf()).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    store
+        .save_rule(
+            &make_rule("r1", Scope::Project, 100, None),
+            Some(project.path()),
+        )
+        .unwrap();
+    let (session, _) = store
+        .create_session("long-lived", project.path(), "owner", vec![], None)
+        .unwrap();
+    assert_eq!(session.constraint_snapshot.rules.len(), 1);
+    let old_bundle = store
+        .export_handoff(session.id, None, serde_json::Value::Null, true)
+        .unwrap();
+    store
+        .save_rule(
+            &make_rule("r2", Scope::Project, 90, None),
+            Some(project.path()),
+        )
+        .unwrap();
+    let refreshed = store.refresh_snapshot(session.id, "owner").unwrap();
+    assert_eq!(refreshed.constraint_snapshot.rules.len(), 2);
+    assert_ne!(
+        refreshed.constraint_snapshot.snapshot_hash,
+        session.constraint_snapshot.snapshot_hash
+    );
+    let chain = store.get_evidence(session.id).unwrap();
+    assert!(
+        chain
+            .iter()
+            .any(|e| matches!(e.kind, EvidenceKind::SnapshotRefresh))
+    );
+    // The pre-refresh bundle no longer matches the session snapshot: import bails.
+    assert!(store.import_handoff(&old_bundle, "owner", None).is_err());
+}
+
+#[test]
 fn concurrent_create_session_same_triple_yields_one_session() {
     let root = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -2889,6 +3038,7 @@ fn migration_closes_duplicate_active_sessions_and_index_backstops() {
         harness_session_id: None,
         predecessor: None,
         title: String::new(),
+        work_state_version: 0,
     };
     {
         let db = agent_control_core::store::Db::open(
@@ -2937,7 +3087,7 @@ fn session_mutations_record_acting_identity() {
     assert_eq!(session.harness_session_id.as_deref(), Some("conv-1"));
 
     store
-        .set_session_work_state(session.id, "goal".into(), vec![], "auditor")
+        .set_session_work_state(session.id, "goal".into(), vec![], "auditor", None)
         .unwrap();
     let entries = store.get_evidence(session.id).unwrap();
     let last = entries.last().unwrap();
@@ -2983,7 +3133,7 @@ fn ownership_timeline_derives_from_evidence() {
         .unwrap()
         .0;
     let bundle = store
-        .export_handoff(session.id, None, serde_json::json!({}))
+        .export_handoff(session.id, None, serde_json::json!({}), false)
         .unwrap();
     store.import_handoff(&bundle, "harness-b", None).unwrap();
     let spans = store.ownership_timeline(session.id).unwrap();
@@ -3000,7 +3150,7 @@ fn ownership_timeline_derives_from_evidence() {
 
     // Re-import under the same agent adds no span.
     let bundle2 = store
-        .export_handoff(session.id, None, serde_json::json!({}))
+        .export_handoff(session.id, None, serde_json::json!({}), false)
         .unwrap();
     store.import_handoff(&bundle2, "harness-b", None).unwrap();
     assert_eq!(store.ownership_timeline(session.id).unwrap().len(), 2);

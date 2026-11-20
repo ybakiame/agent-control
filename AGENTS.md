@@ -68,7 +68,7 @@ Three crates under `crates/`. Dependency direction: `app → {mcp, core}`, `mcp 
 | Crate | Package | Kind | Responsibility (one line) |
 |-------|---------|------|---------------------------|
 | core | `agent-control-core` | lib | Rule engine, provenance, conflicts, hybrid storage, evidence hash chain, handoff, registry, native export/drift/revoke, assurance tiers, tool gate, hooks config |
-| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 28 tools + resources + prompts; stdio & Streamable HTTP |
+| mcp | `agent-control-mcp` | lib + bin | MCP server (rmcp): 29 tools + resources + prompts; stdio & Streamable HTTP |
 | app | `agent-control-app` | bin | GPUI desktop console (gpui-kit): views + per-session Sheet, bilingual UI, self-rendered title bar, project tree, Integration section |
 
 Key files: `core/src/{engine,model,conflict,gate,hooks,export,config,doctor,search}.rs` +
@@ -119,7 +119,7 @@ storage layout and the GUI/view inventory: [architecture.md](docs/architecture.m
 | Doc | Contents |
 |-----|----------|
 | [docs/architecture.md](docs/architecture.md) | Workspace map & `Store` surface, four layers, environment scope, storage layout, GUI/views/Sheet/Projects tree inventory |
-| [docs/mcp-protocol.md](docs/mcp-protocol.md) | Transports, daemon & portable mode, app config, CLI, the 28 tools, recommended call order, e2e |
+| [docs/mcp-protocol.md](docs/mcp-protocol.md) | Transports, daemon & portable mode, app config, CLI, the 29 tools, recommended call order, e2e |
 | [docs/enforcement-hooks.md](docs/enforcement-hooks.md) | Nine harness targets, four config codecs, start/gate events, the gate, fail-open/fail-closed, hook script |
 | [docs/gui-verification.md](docs/gui-verification.md) | UIA scripts, typical verification loop, Windows gotchas (file lock, 8MB stack, locked session, offscreen nodes) |
 | [docs/conventions.md](docs/conventions.md) | i18n table & helpers, coding conventions, tests |

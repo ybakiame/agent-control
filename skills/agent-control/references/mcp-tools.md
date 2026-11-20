@@ -299,6 +299,18 @@ or enforcement — the block directs the agent to read the live rules like any A
   `instruction`.
 - Errors (`isError`): empty `project_path`, an unknown `targets` name, or a malformed existing block.
 
+### refresh_snapshot
+SNAP1 re-freeze: recompute the session's constraint snapshot from the **live** applied rule set so a
+long-lived session adopts rule changes without splitting into a new session.
+- `session_id` (string, required), `agent_id` (string, optional, default `console`) — acting identity
+  recorded in the `snapshot_refresh` evidence entry.
+- Appends `snapshot_refresh` evidence (old/new snapshot hash + rule count), links a fresh provenance
+  record and re-runs `verify_constraints` so achieved tiers match the new snapshot.
+- Previously exported bundles then fail the snapshot match on `import_handoff` (expected drift-bail);
+  re-export after refreshing.
+- Returns: `session_id`, `snapshot_hash`, `rule_count` + an `instruction`.
+- Errors (`isError`): unknown session.
+
 ### check_export_drift
 Detect native entry points missing the **current-format** pointer block or holding an outdated
 **inline** snapshot (**file-vs-store** drift). Read-only: it prompts a re-export and **never rewrites**

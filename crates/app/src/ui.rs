@@ -216,6 +216,7 @@ pub fn kind_tag(kind: agent_control_core::model::EvidenceKind) -> gpui_kit::comp
         EvidenceKind::StatusChange => Tag::secondary().child("status_change"),
         EvidenceKind::OwnershipChange => Tag::info().child("ownership_change"),
         EvidenceKind::SessionRename => Tag::primary().child("session_rename"),
+        EvidenceKind::SnapshotRefresh => Tag::info().child("snapshot_refresh"),
     }
 }
 
@@ -238,16 +239,10 @@ pub enum SessionKind {
 }
 
 pub fn session_kind(session: &agent_control_core::model::Session) -> SessionKind {
-    use agent_control_core::model::SessionStatus;
-    if session.task == "hook" {
-        SessionKind::Telemetry
-    } else if !session.handoffs.is_empty()
-        || session.predecessor.is_some()
-        || session.status == SessionStatus::HandedOff
-    {
-        SessionKind::Continuity
-    } else {
-        SessionKind::Work
+    match session.kind() {
+        agent_control_core::model::SessionKind::Telemetry => SessionKind::Telemetry,
+        agent_control_core::model::SessionKind::Continuity => SessionKind::Continuity,
+        agent_control_core::model::SessionKind::Work => SessionKind::Work,
     }
 }
 
@@ -270,5 +265,6 @@ pub fn kind_visual(cx: &App, kind: agent_control_core::model::EvidenceKind) -> (
         EvidenceKind::StatusChange => (IconName::RefreshCw, t.info),
         EvidenceKind::OwnershipChange => (IconName::User, t.info),
         EvidenceKind::SessionRename => (IconName::FileText, t.primary),
+        EvidenceKind::SnapshotRefresh => (IconName::RefreshCw, t.info),
     }
 }

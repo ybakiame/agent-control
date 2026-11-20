@@ -101,7 +101,7 @@ delivered into the tools agents already read.
   tiers, and a delete action that cascades to the session's evidence + provenance.
 - **Bilingual UI (English / 简体中文)** with a runtime switcher in Settings; the choice is
   persisted to `<data root>/config.toml`.
-- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 28 tools plus
+- **MCP server** (rmcp) in both **stdio** and **Streamable HTTP** modes, exposing 29 tools plus
   resources and prompts. The daemon's loopback **port is configurable** in Settings (default
   `9870`) and stored in `config.toml`, so a portable/dev instance can bind a different port and
   stay isolated from production; a sidebar icon button starts/stops the daemon at a glance.
