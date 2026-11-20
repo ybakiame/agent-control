@@ -1,10 +1,22 @@
+# Folders
+**/.tmp/
 /target
 /dist
 /vibe_images
+
+.claude
+.codebuddy
+.codex
+.cursor
+.qoder
+.qoder-credits
+.workbuddy
+
+# Files
 **/*.rs.bk
 *.pdb
 .env
 *.local.toml
 
-# Agent
-.qoder-credits
+# scratch / experimental work products (never project docs)
+.tmp/
