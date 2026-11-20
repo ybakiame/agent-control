@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "agent-control-app"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "agent-control-core",
  "agent-control-mcp",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "agent-control-core"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "agent-control-mcp"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "agent-control-core",
  "anyhow",
