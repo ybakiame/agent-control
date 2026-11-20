@@ -165,7 +165,9 @@ Recommended harness call order:
 
 1. `get_applicable_rules` — resolve binding rules + provenance + conflicts before working.
 2. `create_session` — freeze the constraint snapshot (get-or-create: an active session with the same
-   project + agent + task is reused, `reused: true`, instead of piling up duplicates).
+   project + agent + task is reused, `reused: true`, instead of piling up duplicates; the check and
+   insert are one IMMEDIATE transaction and the project path is canonicalized, so concurrent
+   creators and backslash/forward-slash spellings converge on one session).
 3. `acknowledge_rules` — prove you received exactly the snapshot's rules.
 4. `record_evidence` — append tool calls / file changes / test results to the hash chain.
 5. `verify_constraints` — run the snapshot's `code_checks` against the repo, record achieved tiers.

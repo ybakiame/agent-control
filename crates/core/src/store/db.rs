@@ -26,6 +26,8 @@ impl Db {
             .with_context(|| format!("opening database {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Concurrent creators (FIX1) must wait for the write lock instead of failing instantly.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -361,6 +363,48 @@ impl Db {
 
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        Self::upsert_session_conn(&conn, session)
+    }
+
+    /// Run `f` inside a `BEGIN IMMEDIATE` transaction so concurrent writers serialize: the
+    /// get-or-create check and the insert happen under one write lock (FIX1 TOCTOU fix).
+    pub fn with_immediate_txn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        match f(&conn) {
+            Ok(v) => {
+                conn.execute_batch("COMMIT;")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    /// Backstop against duplicate active sessions per (project, agent, task): even a writer that
+    /// bypasses the transaction cannot insert a second active row for the same triple. The status
+    /// column stores the serde JSON string, hence the quoted predicate literal.
+    pub fn ensure_active_triple_index(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active_triple
+             ON sessions(project_path, agent_id, task) WHERE status = '\"active\"';",
+        )?;
+        Ok(())
+    }
+
+    pub fn list_sessions_conn(conn: &Connection) -> Result<Vec<Session>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title FROM sessions ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], session_from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn upsert_session_conn(conn: &Connection, session: &Session) -> Result<()> {
         conn.execute(
             "INSERT INTO sessions (id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
@@ -396,7 +440,7 @@ impl Db {
                 session.title,
             ],
         )?;
-        Self::search_sync_session_conn(&conn, session)?;
+        Self::search_sync_session_conn(conn, session)?;
         Ok(())
     }
 
@@ -414,12 +458,7 @@ impl Db {
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, task, project_path, agent_id, status, created_at, updated_at, snapshot_json, handoffs_json, assurance_json, goal, work_items_json, harness_session_id, predecessor, title FROM sessions ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt.query_map([], session_from_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        Self::list_sessions_conn(&conn)
     }
 
     /// Remove a session together with its evidence chain and provenance record: they are

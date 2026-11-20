@@ -56,6 +56,7 @@ impl Store {
         layout.ensure_dirs()?;
         let db = Db::open(&layout.db_path())?;
         let store = Self { layout, db };
+        store.migrate_session_keys()?;
         store.rebuild_search_index()?;
         Ok(store)
     }
@@ -239,6 +240,52 @@ impl Store {
     /// Get-or-create: an **active** session with the same project + agent + task is returned
     /// as-is (`reused = true`) so repeated calls from one harness conversation never pile up
     /// duplicate sessions. A new task (or a closed source session) freezes a fresh snapshot.
+    /// FIX1 migration: unify historical session project keys and clean duplicate active sessions
+    /// left by the old check-then-insert race (keep the earliest, close the later ones as superseded
+    /// with a predecessor link), then install the partial unique index backstop.
+    fn migrate_session_keys(&self) -> Result<()> {
+        let mut all = self.db.list_sessions()?;
+        let mut changed = false;
+        for s in &mut all {
+            let key = session_path_key(&s.project_path);
+            if key != s.project_path {
+                s.project_path = key;
+                changed = true;
+            }
+        }
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (i, s) in all.iter().enumerate() {
+            if s.status != SessionStatus::Active {
+                continue;
+            }
+            match groups.iter_mut().find(|g| {
+                let head = &all[g[0]];
+                head.project_path == s.project_path
+                    && head.agent_id == s.agent_id
+                    && head.task == s.task
+            }) {
+                Some(g) => g.push(i),
+                None => groups.push(vec![i]),
+            }
+        }
+        for g in groups.iter().filter(|g| g.len() > 1) {
+            let mut idx = g.clone();
+            idx.sort_by_key(|i| all[*i].created_at);
+            let keep = idx[0];
+            for i in &idx[1..] {
+                all[*i].predecessor = Some(all[keep].id);
+                all[*i].status = SessionStatus::Completed;
+                changed = true;
+            }
+        }
+        if changed {
+            for s in &all {
+                self.db.upsert_session(s)?;
+            }
+        }
+        self.db.ensure_active_triple_index()
+    }
+
     pub fn create_session(
         &self,
         task: &str,
@@ -247,28 +294,9 @@ impl Store {
         task_tags: Vec<String>,
         harness_session_id: Option<String>,
     ) -> Result<(Session, bool)> {
-        let all = self.db.list_sessions()?;
-        if let Some(existing) = all.iter().find(|s| {
-            s.status == SessionStatus::Active
-                && s.agent_id == agent_id
-                && s.project_path == project_path
-                && s.task == task
-        }) {
-            return Ok((existing.clone(), true));
-        }
-        // A closed same-(project, agent, task) session means this is a chain split, not a duplicate.
-        let predecessor = all
-            .iter()
-            .filter(|s| {
-                s.status != SessionStatus::Active
-                    && s.agent_id == agent_id
-                    && s.project_path == project_path
-                    && s.task == task
-            })
-            .max_by_key(|s| s.created_at)
-            .map(|s| s.id);
+        let project_key = session_path_key(project_path);
         let ctx = QueryContext {
-            project_path: project_path.to_path_buf(),
+            project_path: project_key.clone(),
             agent_id: agent_id.to_string(),
             file_paths: vec![],
             languages: vec![],
@@ -283,25 +311,54 @@ impl Store {
             .map(|m| m.rule.clone())
             .collect();
         let snapshot = ConstraintSnapshot::new(applied_rules, record.id);
-        let now = Utc::now();
-        let session = Session {
-            id: Uuid::new_v4(),
-            task: task.to_string(),
-            project_path: project_path.to_path_buf(),
-            agent_id: agent_id.to_string(),
-            status: SessionStatus::Active,
-            created_at: now,
-            updated_at: now,
-            constraint_snapshot: snapshot,
-            handoffs: vec![],
-            assurance: vec![],
-            goal: String::new(),
-            work_items: vec![],
-            harness_session_id,
-            predecessor,
-            title: String::new(),
-        };
-        self.db.upsert_session(&session)?;
+        // FIX1: the reuse check and the insert share one IMMEDIATE transaction, so two concurrent
+        // creators of the same (project, agent, task) cannot both insert (the production duplicate
+        // hook sessions were a check-then-insert TOCTOU).
+        let (session, reused) = self.db.with_immediate_txn(|conn| {
+            let all = Db::list_sessions_conn(conn)?;
+            if let Some(existing) = all.iter().find(|s| {
+                s.status == SessionStatus::Active
+                    && s.agent_id == agent_id
+                    && s.project_path == project_key
+                    && s.task == task
+            }) {
+                return Ok((existing.clone(), true));
+            }
+            // A closed same-(project, agent, task) session means this is a chain split, not a dup.
+            let predecessor = all
+                .iter()
+                .filter(|s| {
+                    s.status != SessionStatus::Active
+                        && s.agent_id == agent_id
+                        && s.project_path == project_key
+                        && s.task == task
+                })
+                .max_by_key(|s| s.created_at)
+                .map(|s| s.id);
+            let now = Utc::now();
+            let session = Session {
+                id: Uuid::new_v4(),
+                task: task.to_string(),
+                project_path: project_key.clone(),
+                agent_id: agent_id.to_string(),
+                status: SessionStatus::Active,
+                created_at: now,
+                updated_at: now,
+                constraint_snapshot: snapshot,
+                handoffs: vec![],
+                assurance: vec![],
+                goal: String::new(),
+                work_items: vec![],
+                harness_session_id,
+                predecessor,
+                title: String::new(),
+            };
+            Db::upsert_session_conn(conn, &session)?;
+            Ok((session, false))
+        })?;
+        if reused {
+            return Ok((session, true));
+        }
         // The snapshot resolution ran before the session id existed; link its provenance now (UX2).
         self.db.set_provenance_session(record.id, session.id)?;
         self.db.append_evidence(
@@ -1696,6 +1753,29 @@ fn ensure_handoff_dir(project: &Path) -> Result<PathBuf> {
             .with_context(|| format!("writing {}", gitignore.display()))?;
     }
     Ok(dir)
+}
+
+/// FIX1: canonical session project key — separators unified and on-disk canonical form when the
+/// directory exists, lexical fallback otherwise, so a hook's backslash cwd and MCP's forward-slash
+/// path resolve to the same key.
+fn session_path_key(path: &Path) -> PathBuf {
+    let unified = if cfg!(windows) {
+        PathBuf::from(path.to_string_lossy().replace('/', "\\"))
+    } else {
+        path.to_path_buf()
+    };
+    match unified.canonicalize() {
+        Ok(c) => PathBuf::from(c.to_string_lossy().trim_start_matches("\\?\\")),
+        Err(_) => {
+            let text = unified.to_string_lossy();
+            let trimmed = text.trim_end_matches(std::path::MAIN_SEPARATOR);
+            PathBuf::from(if trimmed.is_empty() {
+                text.as_ref()
+            } else {
+                trimmed
+            })
+        }
+    }
 }
 
 /// Resolve a project path to a stable, display-friendly absolute key. The path must exist and be

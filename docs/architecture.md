@@ -47,7 +47,14 @@ behind a confirm dialog).
 `create_session(task, project_path, agent_id, task_tags, harness_session_id) -> (Session, bool)` is
 **get-or-create**: an **active** session with the same project + agent + task is returned unchanged
 (`reused = true`), so repeated calls from one harness conversation never pile up duplicate sessions; a
-new task or a closed source session freezes a fresh snapshot. When the source session was **closed**
+new task or a closed source session freezes a fresh snapshot. The reuse check and the insert run in
+one `BEGIN IMMEDIATE` transaction (FIX1), and a partial unique index on
+`(project_path, agent_id, task) WHERE status = active` backstops writers that bypass it — concurrent
+creators converge on one session. `project_path` is canonicalized at the boundary
+(`session_path_key`: separator-unified + on-disk canonical form, lexical fallback) so a hook's
+backslash cwd and MCP's forward-slash path share one key; `Store::open` migrates historical sessions
+to that key and closes pre-fix duplicate active sessions (earliest kept, later ones `Completed` with
+a `predecessor` link). When the source session was **closed**
 with the same (project, agent, task), the new session records it as `predecessor` (serde default,
 guarded `ALTER` column) so chain splits read as one continuity thread instead of duplicates (UX1).
 `harness_session_id` (optional, serde

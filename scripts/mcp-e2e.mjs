@@ -186,6 +186,31 @@ try {
     again,
   );
 
+  // FIX1: concurrent creators of the same (project, agent, task) must converge on ONE session
+  // (the production duplicate hook sessions were a check-then-insert TOCTOU).
+  const [raceA, raceB] = await Promise.all([
+    tool("create_session", { task: "e2e: race", project_path: projectDir, agent_id: "harness-race" }),
+    tool("create_session", { task: "e2e: race", project_path: projectDir, agent_id: "harness-race" }),
+  ]);
+  check(
+    "concurrent create_session same triple yields one session",
+    raceA.session_id === raceB.session_id && (raceA.reused || raceB.reused),
+    { raceA, raceB },
+  );
+  // FIX1: a backslash cwd (hook) and a forward-slash path (MCP) are the same project key.
+  if (process.platform === "win32") {
+    const backslash = await tool("create_session", {
+      task: "e2e: race",
+      project_path: projectDir.replace(/\//g, "\\"),
+      agent_id: "harness-race",
+    });
+    check(
+      "create_session reuses across path separator spellings",
+      backslash.session_id === raceA.session_id && backslash.reused === true,
+      backslash,
+    );
+  }
+
   const ack = await tool("acknowledge_rules", {
     session_id: sessionId,
     agent_id: "harness-a",
@@ -1209,9 +1234,18 @@ try {
     doc,
   );
   const docHooks = await tool("doctor", { project_path: hooksDir, daemon_bind: "127.0.0.1:1" });
+  // User-scope harnesses may be registered by the real machine home (production install); assert
+  // the seven project-scope registrations and the aggregate's internal consistency.
+  const docProjectRegistered = (docHooks.harnesses ?? []).filter(
+    (h) => h.scope === "project" && h.registered,
+  ).length;
+  const docAllRegistered = (docHooks.harnesses ?? []).filter((h) => h.registered).length;
   check(
     "doctor counts the seven registered project-scope hooks and reports healthy",
-    docHooks.hooks_registered === 7 && docHooks.stale_exports === 0 && docHooks.healthy === true,
+    docProjectRegistered === 7 &&
+      docHooks.hooks_registered === docAllRegistered &&
+      docHooks.stale_exports === 0 &&
+      docHooks.healthy === true,
     docHooks,
   );
 
