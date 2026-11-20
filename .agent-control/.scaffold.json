@@ -1,9 +1,10 @@
 {
-  "version": 2,
+  "version": 3,
   "files": {
     "README.md": "7828f3a81a1f503082ce4e71444976a83f1395299e48287d59af17329c4a9db1",
     "examples/constraint-example.md": "a90ec7314aec1b3c691779e578300c92f5fb8544b577b5ffc83036b22c249136",
     "examples/contract-example.md": "fc2020a97ff8bda0633b59fd9b5798cee079faa4ea1e70c1c03972685206c150",
-    "examples/environment-example.md": "f040e08288743ff042a628ef1e1bb78f59a0209bc0756874ac45ccda7f00f2cf"
+    "examples/environment-example.md": "f040e08288743ff042a628ef1e1bb78f59a0209bc0756874ac45ccda7f00f2cf",
+    "handoff/.gitignore": "240a3e0d37d2e86b614063f5347eb02d4f99ca6c254de6b82871ff8d95532a7d"
   }
 }
