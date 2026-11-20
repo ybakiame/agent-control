@@ -376,6 +376,13 @@ scripts/uia-shot.ps1   -Hwnd <hwnd> -Out out.png       # 截取窗口矩形
 `crates/app/build.rs`（winresource）嵌入多尺寸 `crates/app/assets/icon.ico` 与版本信息，资源管理器 / 任务栏显示
 Agent Control 图标。
 
+## 开发者文档
+
+工程约定见 [AGENTS.md](AGENTS.md)（铁律、命令、改动前必知），细节拆分至
+[docs/architecture.md](docs/architecture.md)、[docs/mcp-protocol.md](docs/mcp-protocol.md)、
+[docs/enforcement-hooks.md](docs/enforcement-hooks.md)、[docs/gui-verification.md](docs/gui-verification.md)、
+[docs/conventions.md](docs/conventions.md) 与 [docs/release.md](docs/release.md)（semver 策略 + 发布手册）。
+
 ## 许可证
 
 Apache-2.0

@@ -486,6 +486,14 @@ the console + MCP executables, both READMEs (English + 简体中文), the brand 
 Windows executable embeds `crates/app/assets/icon.ico` (multi-size) plus version info through
 `crates/app/build.rs` (winresource), so Explorer / the taskbar show the Agent Control icon.
 
+## Developer docs
+
+Engineering conventions live in [AGENTS.md](AGENTS.md) (golden rules, commands, must-know-before-edit)
+with the detail split into [docs/architecture.md](docs/architecture.md),
+[docs/mcp-protocol.md](docs/mcp-protocol.md), [docs/enforcement-hooks.md](docs/enforcement-hooks.md),
+[docs/gui-verification.md](docs/gui-verification.md), [docs/conventions.md](docs/conventions.md) and
+[docs/release.md](docs/release.md) (semver policy + release runbook).
+
 ## License
 
 Apache-2.0
